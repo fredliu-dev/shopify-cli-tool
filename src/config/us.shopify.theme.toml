@@ -1,0 +1,6 @@
+[environments.dev]
+domain="https://shokz.com"
+theme = ""
+store = "aftershokz-com.myshopify.com"
+port = 9292
+preview_key=""
