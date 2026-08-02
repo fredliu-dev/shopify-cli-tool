@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { parse, stringify } from 'smol-toml'
 import { select, input } from '@inquirer/prompts'
 
 // 工具自带的模板目录（src/config/，相对本文件定位，不是 cwd）
@@ -15,6 +16,33 @@ function listTemplates() {
   return readdirSync(templatesDir)
     .filter((f) => f.endsWith('.toml'))
     .map((f) => ({ file: f, name: f.split('.')[0] }))
+}
+
+/**
+ * 读取模板文件并解析出 [environments.dev] 对象。
+ * @param {string} file
+ * @returns {Record<string, any> | null}
+ */
+function loadTemplate(file) {
+  try {
+    const parsed = parse(readFileSync(join(templatesDir, file), 'utf8'))
+    return parsed.environments?.dev ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 解析已有 shopify.theme.toml。
+ * @param {string} target
+ * @returns {{ environments?: Record<string, Record<string, any>> } | null}
+ */
+function loadExistingConfig(target) {
+  try {
+    return parse(readFileSync(target, 'utf8'))
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -38,8 +66,10 @@ function fillValue(content, key, value) {
 }
 
 /**
- * `shop init` —— 在项目根目录初始化 shopify.theme.toml。
- * 已存在则提示「已初始化完毕」；否则引导：选模板 → 输 theme → 输 port → 输 preview_key → 填值生成。
+ * `shop init` —— 初始化 / 更新 shopify.theme.toml。
+ * 如果文件不存在：选模板 → 输 theme → 输 port → 输 preview_key → 生成。
+ * 如果文件已存在：若缺少 [environments.dev]，则把模板整个 dev 环境合并进去；
+ *                 若已有 dev 环境但缺少 domain，则补入对应 domain。
  */
 export default {
   name: 'init',
@@ -47,15 +77,36 @@ export default {
   description: '初始化 shopify.theme.toml',
   usage: 'shop init',
   async run({ log }) {
-    const target = join(process.cwd(), 'shopify.theme.toml')
-    if (existsSync(target)) {
-      log.success('已初始化完毕（shopify.theme.toml 已存在）')
-      return
-    }
-
     const templates = listTemplates()
     if (!templates.length) {
       log.error('未找到任何模板（src/config/*.toml）')
+      return
+    }
+
+    const target = join(process.cwd(), 'shopify.theme.toml')
+
+    if (existsSync(target)) {
+      const existing = loadExistingConfig(target)
+      const devEnv = existing?.environments?.dev
+
+      if (devEnv?.domain) {
+        log.success('已初始化完毕（shopify.theme.toml 已存在且包含 [environments.dev].domain）')
+        return
+      }
+
+      const tpl = await select({
+        message: '检测到已有 shopify.theme.toml，选择模板来补全 [environments.dev]：',
+        choices: templates.map((t) => ({ name: t.name, value: t })),
+      })
+      const env = loadTemplate(tpl.file)
+      if (!env) {
+        log.error('所选模板未包含 [environments.dev]，无法补全')
+        return
+      }
+
+      const merged = { ...existing, environments: { ...existing?.environments, dev: env } }
+      writeFileSync(target, stringify(merged), 'utf8')
+      log.success('已合并 [environments.dev] 到现有配置')
       return
     }
 
