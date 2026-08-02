@@ -3,6 +3,9 @@
 对 [`@shopify/cli`](https://www.npmjs.com/package/@shopify/cli) 的美化封装。兼容所有原生 shopify 命令，并围绕主题开发流程提供了几个更易用的自定义命令。
 
 ## 快速开始
+```bash
+npm install -g shopify-cli-tool
+```
 
 ### 1. 初始化配置
 
