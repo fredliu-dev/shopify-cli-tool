@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import { banner } from './ui/banner.js'
 import { log } from './ui/logger.js'
 import { runShopify } from './runner.js'
 import { loadCommands } from './registry.js'
 
-const version = '1.0.0'
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const pkg = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8'))
+const version = pkg.version
+
 const argv = process.argv.slice(2)
 
 // 加载 src/commands/ 下所有自定义命令
