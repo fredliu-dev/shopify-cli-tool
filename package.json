@@ -1,12 +1,17 @@
 {
   "name": "shopify-cli-tool",
   "version": "1.0.0",
-  "description": "A beautified wrapper around @shopify/cli",
+  "description": "A beautified wrapper around @shopify/cli for Shopify theme development.",
   "type": "module",
+  "main": "src/index.js",
   "bin": {
     "shop": "src/index.js"
   },
-  "main": "src/index.js",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node src/index.js"
   },
@@ -17,14 +22,20 @@
   "keywords": [
     "shopify",
     "cli",
-    "wrapper"
+    "wrapper",
+    "theme",
+    "shopify-cli",
+    "shopify-theme"
   ],
-  "author": "",
+  "author": "fredliu-dev",
   "license": "ISC",
   "bugs": {
     "url": "https://github.com/fredliu-dev/shopify-cli-tool/issues"
   },
   "homepage": "https://github.com/fredliu-dev/shopify-cli-tool#readme",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "dependencies": {
     "@inquirer/prompts": "^8.5.2",
     "@shopify/cli": "^4.5.2",
@@ -32,6 +43,7 @@
     "cli-table3": "^0.6.5",
     "gradient-string": "^3.0.0",
     "log-symbols": "^7.0.1",
+    "ora": "^9.4.1",
     "picocolors": "^1.1.1",
     "smol-toml": "^1.7.1"
   }

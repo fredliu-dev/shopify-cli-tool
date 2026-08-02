@@ -1,86 +1,57 @@
 # shopify-cli-tool
 
-对 [`@shopify/cli`](https://www.npmjs.com/package/@shopify/cli) 的二次封装：原样透传 shopify 命令，并在前后输出美化文案。
+对 [`@shopify/cli`](https://www.npmjs.com/package/@shopify/cli) 的美化封装。兼容所有原生 shopify 命令，并围绕主题开发流程提供了几个更易用的自定义命令。
 
-## 用法
+## 快速开始
+
+### 1. 初始化配置
+
+在项目根目录运行：
 
 ```bash
-npm link                # 注册全局命令
-shopify-tool app dev    # 任意 shopify 命令原样透传
-shopify-tool theme pull
-shopify-tool --help     # 查看用法
+shop init
 ```
 
-## 依赖说明
+按提示选择模板、填写 theme、port、preview_key，工具会生成 `shopify.theme.toml`。
 
-| 包 | 作用 | 基本用法 |
-|---|---|---|
-| **@shopify/cli** | 被封装的目标 CLI | 不直接 import，通过子进程调用其 `bin` 脚本 |
-| **picocolors** | 文本上色（绿/红/cyan/dim/bold） | `pc.green('done')` |
-| **boxen** | 给文字画带边框的盒子 | `boxen('hi', {borderStyle:'round'})` |
-| **gradient-string** | 渐变色文本 | `gradient('#a','#b')('text')` |
-| **log-symbols** | ✓ ✖ ⚠ ℹ 图标 | `symbols.success`、`symbols.error` |
+打开 `shopify.theme.toml`，把 `[environments.dev]` 下的 `domain`、`store` 等值改成你对应店铺的。
 
-### @shopify/cli
-被封装的目标。用子进程跑，彩色输出原样透传，退出码透传。  
-定位入口：解析其 `package.json` 拿到 `bin` 字段（`./bin/run.js`），再用 `node` 运行该脚本——因为它的 `exports` 没暴露 `./bin/run.js` 子路径，不能直接 `require.resolve`。见 [src/runner.js](src/runner.js)。
+### 2. 本地开发
 
-```js
-const child = spawn(process.execPath, [SHOPIFY_BIN, ...args], {
-  stdio: 'inherit',                        // 透传 shopify 自己的输出
-  env: { ...process.env, FORCE_COLOR: '1' },
-})
+```bash
+shop dev    # 等价于 shopify theme dev -e dev
+shop async  # 等价于 shopify theme dev --theme-editor-sync -e dev
 ```
 
-### picocolors
-最小最快的终端上色库。每个日志级别配一种颜色。见 [src/ui/logger.js](src/ui/logger.js)。
+`shop async` 会把本地主题同步到主题编辑器，适合需要在后台可视化调整的场景。
 
-```js
-import pc from 'picocolors'
-console.log(pc.green('成功'), pc.red('失败'), pc.dim('次要信息'))
+`shop dev` 成功完成后会自动调用 `shop pre` 生成预览链接。
+
+### 3. 获取预览链接
+
+```bash
+shop pre
 ```
 
-### boxen
-给标题/banner 画带边框、内边距、对齐的盒子。见 [src/ui/banner.js](src/ui/banner.js)。
+输出提测链接、主题后台地址和主题编辑器地址。
 
-```js
-import boxen from 'boxen'
-boxen('标题', {
-  padding: 1, margin: 1,
-  borderStyle: 'round', borderColor: 'green',
-  textAlignment: 'center',
-})
-```
+## 自定义命令
 
-### gradient-string
-给品牌名做渐变色，提升 banner 质感。
+| 命令 | 说明 |
+|---|---|
+| `shop init` | 初始化 `shopify.theme.toml` |
+| `shop dev` | 本地预览主题，完成后自动生成预览链接 |
+| `shop async` | 本地预览并同步到主题编辑器 |
+| `shop pre` | 输出预览链接与后台地址 |
+| `shop help` / `shop --help` | 查看命令列表 |
+| `shop version` / `shop --version` | 查看版本 |
 
-```js
-import gradient from 'gradient-string'
-gradient('#95BE22', '#3B82F6')('Shopify Wrapper')
-```
+## 原生命令
 
-### log-symbols
-跨平台的状态图标（自动带颜色），用在每条日志前。见 [src/ui/logger.js](src/ui/logger.js)。
+所有非自定义命令都会原样透传给 `@shopify/cli`，参数、输出、退出码保持一致。
 
-```js
-import symbols from 'log-symbols'
-console.log(symbols.success, '完成')   // ✔ 完成
-console.log(symbols.error, '失败')      // ✖ 失败
-```
-
-## 结构
-
-```
-src/
-├── index.js        # 入口：按 argv[0] 匹配自定义命令，否则原样透传
-├── runner.js       # 子进程调用 @shopify/cli
-├── registry.js     # 自动扫描 commands/ 加载自定义命令（去重、排序、容错）
-├── ui/
-│   ├── banner.js   # boxen + gradient 横幅
-│   ├── logger.js   # picocolors + log-symbols 日志
-│   └── table.js    # 「命令 | 说明」表格
-└── commands/       # 自定义命令：每个文件一套，丢进来即生效（自动发现）
-    ├── version.js  # -v / --version
-    └── help.js     # -h / --help（「自定义命令」表从注册表自动生成）
+```bash
+shop theme pull
+shop theme push
+# …任意 shopify 命令
 ```

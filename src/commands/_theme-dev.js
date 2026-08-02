@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import ora from 'ora'
 import initCmd from './init.js'
+import preCmd from './pre.js'
 
 /**
  * 确保 cwd 下已有 shopify.theme.toml；没有就先跑一遍 `shop init`（交互式）。
@@ -38,6 +40,9 @@ export async function runThemeDev(ctx, extraArgs = []) {
   const code = await ctx.runShopify(args)
   if (code === 0) {
     ctx.log.success('完成 ✅')
+    const spinner = ora('正在生成预览链接 …').start()
+    await preCmd.run(ctx)
+    spinner.succeed('预览链接已生成')
   } else {
     ctx.log.error(`命令失败，退出码 ${code}`)
     process.exit(code)
