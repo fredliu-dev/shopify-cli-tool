@@ -32,3 +32,32 @@ export function runShopify(args) {
     })
   })
 }
+
+/**
+ * 跑 @shopify/cli 但捕获 stdout/stderr（用于 -j 的 JSON 命令，如 theme list/duplicate）。
+ * 与 runShopify 的区别：stdout 不直接打印而是收集起来供解析；stderr 收集后由调用方按需打印。
+ * 关掉彩色（FORCE_COLOR=0）避免 ANSI 码污染 JSON。
+ * @param {string[]} args 透传给 shopify 的参数（原样，不做改动）
+ * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
+ */
+export function captureShopify(args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [SHOPIFY_BIN, ...args], {
+      stdio: ['inherit', 'pipe', 'pipe'],
+      env: { ...process.env, FORCE_COLOR: '0' },
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (d) => {
+      stdout += d.toString()
+    })
+    child.stderr.on('data', (d) => {
+      stderr += d.toString()
+    })
+    child.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }))
+    child.on('error', (err) => {
+      log.error(`无法启动 shopify：${err.message}`)
+      resolve({ code: 1, stdout, stderr })
+    })
+  })
+}

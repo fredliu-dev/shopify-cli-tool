@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join, dirname } from 'node:path'
 import { select, input } from '@inquirer/prompts'
+import { storeToTemplate } from '../config.js'
 
 const PROJECTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../projects')
 const PROJECTS_FILE = join(PROJECTS_DIR, 'projects.json')
@@ -41,17 +42,6 @@ function saveProjects(projects) {
 }
 
 /**
- * 获取模板列表（从 src/config/ 目录）
- * @returns {{ file: string, name: string }[]}
- */
-function getTemplates() {
-  const configDir = join(dirname(fileURLToPath(import.meta.url)), '../config')
-  return readdirSync(configDir)
-    .filter((f) => f.endsWith('.toml'))
-    .map((f) => ({ file: f, name: f.split('.')[0] }))
-}
-
-/**
  * `shop edit` —— 编辑保存的项目配置。
  */
 export default {
@@ -72,7 +62,7 @@ export default {
       selectedProject = await select({
         message: '选择要编辑的项目：',
         choices: projects.map((p) => ({
-          name: `${p.templateName} - ${p.description || '无描述'}`,
+          name: `${p.templateName ?? p.store ?? '?'} - ${p.description || '无描述'}`,
           value: p,
         })),
       })
@@ -84,15 +74,13 @@ export default {
       throw err
     }
 
-    let template, theme, previewKey, port, description
-    try {
-      const templates = getTemplates()
-      template = await select({
-        message: '选择模板：',
-        choices: templates.map((t) => ({ name: t.name, value: t })),
-        default: templates.find((t) => t.name === selectedProject.templateName),
-      })
+    // 模板由 store 判断（只展示，不再让用户选）
+    const templateName =
+      (selectedProject.store ? storeToTemplate(selectedProject.store) : null) ?? selectedProject.templateName
+    log.info(`模板（根据 store 判断）：${templateName ?? '未匹配'}`)
 
+    let theme, previewKey, port, description
+    try {
       theme = await input({
         message: '请输入 theme：',
         default: selectedProject.theme,
@@ -102,7 +90,6 @@ export default {
       previewKey = await input({
         message: '请输入 preview_key：',
         default: selectedProject.previewKey,
-        validate: (v) => (v.trim() ? true : '不能为空'),
       })
 
       port = await input({
@@ -128,7 +115,7 @@ export default {
       if (p.id === selectedProject.id) {
         return {
           ...p,
-          templateName: template.name,
+          templateName,
           theme: theme.trim(),
           previewKey: previewKey.trim(),
           port: port.trim(),

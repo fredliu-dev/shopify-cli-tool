@@ -67,7 +67,7 @@ function fillValue(content, key, value) {
 
 /**
  * `shop init` —— 初始化 / 更新 shopify.theme.toml。
- * 如果文件不存在：选模板 → 输 theme → 输 port → 输 preview_key → 生成。
+ * 如果文件不存在：选模板 → 输 theme → 输 port → 输 preview_key → 输 project_desc(选填) → 生成。
  * 如果文件已存在：若缺少 [environments.dev]，则把模板整个 dev 环境合并进去；
  *                 若已有 dev 环境但缺少 domain，则补入对应 domain。
  */
@@ -110,7 +110,7 @@ export default {
       return
     }
 
-    let tpl, theme, port, previewKey
+    let tpl, theme, port, previewKey, projectDesc
     try {
       tpl = await select({
         message: '选择模板：',
@@ -118,7 +118,7 @@ export default {
       })
       theme = await input({
         message: '请输入 theme：',
-        validate: (v) => (v.trim() ? true : '不能为空'),
+        // validate: (v) => (v.trim() ? true : '不能为空'),
       })
       port = await input({
         message: '请输入 port：',
@@ -126,6 +126,7 @@ export default {
         validate: (v) => (/^\d+$/.test(v.trim()) ? true : '需为数字'),
       })
       previewKey = await input({ message: '请输入 preview_key（新页面需填）：' })
+      projectDesc = await input({ message: '请输入 project_desc（选填）：' })
     } catch (err) {
       // Ctrl+C / ESC 取消：优雅退出，不报「命令执行出错」
       if (err && err.name === 'ExitPromptError') {
@@ -139,6 +140,7 @@ export default {
     content = fillValue(content, 'theme', theme.trim())
     content = fillValue(content, 'port', port.trim())
     content = fillValue(content, 'preview_key', previewKey.trim())
+    content = fillValue(content, 'project_desc', projectDesc.trim())
 
     writeFileSync(target, content, 'utf8')
     log.success(`已创建 ${target}`)

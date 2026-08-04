@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import ora from 'ora'
 import initCmd from './init.js'
 import preCmd from './pre.js'
+import { extractEnvironmentArg } from '../config.js'
 
 /**
  * 确保 cwd 下已有 shopify.theme.toml；没有就先跑一遍 `shop init`（交互式）。
@@ -23,8 +24,8 @@ async function ensureInitialized(ctx) {
 /**
  * 通用：跑 `shopify theme dev …`。
  * ① 没初始化就先 init；② 用 runShopify 透传执行；③ 按退出码收尾。
- * @param {object} ctx 命令上下文（log / banner / version / runShopify）
- * @param {string[]} [extraArgs] 插在 `theme dev` 与 `-e dev` 之间的额外参数
+ * @param {object} ctx 命令上下文（argv / log / banner / version / runShopify）
+ * @param {string[]} [extraArgs] 插在 `theme dev` 与 `-e <env>` 之间的额外参数
  * @returns {Promise<number | void>}
  */
 export async function runThemeDev(ctx, extraArgs = []) {
@@ -33,7 +34,9 @@ export async function runThemeDev(ctx, extraArgs = []) {
     return
   }
 
-  const args = ['theme', 'dev', ...extraArgs, '-e', 'dev']
+  // -e/--environment 传了就用传入的环境名，没传默认 dev
+  const env = extractEnvironmentArg(ctx.argv) ?? 'dev'
+  const args = ['theme', 'dev', ...extraArgs, '-e', env]
   ctx.banner(ctx.version)
   ctx.log.step(`执行：shopify ${args.join(' ')}`)
 

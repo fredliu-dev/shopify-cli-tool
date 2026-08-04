@@ -1,4 +1,5 @@
 [environments.dev]
+project_desc=""
 domain="https://shokz.com"
 theme = ""
 store = "aftershokz-com.myshopify.com"

@@ -11,7 +11,7 @@ export function buildLinks(env) {
 
   const adminLink = `https://admin.shopify.com/store/${env.store.split('.')[0]}/themes`
   const editorLink = `${adminLink}/${env.theme}/editor`
-  const devLink = `http://127.0.0.1:${env.port}/pages?preview_key=${env.preview_key ?? ''}`
+  const devLink = `http://127.0.0.1:${env.port}${env.preview_key ? `/pages?preview_key=${env.preview_key}` : ''}`
 
   return { devLink, previewLink, adminLink, editorLink }
 }

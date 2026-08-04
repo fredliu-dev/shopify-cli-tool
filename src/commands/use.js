@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join, dirname } from 'node:path'
-import { select } from '@inquirer/prompts'
-import { parse, stringify } from 'smol-toml'
+import { select, input } from '@inquirer/prompts'
+import initCmd from './init.js'
+import { loadThemeConfig, setEnvField } from '../config.js'
 import { runThemeDev } from './_theme-dev.js'
 import { getPortPids, killPort } from './_port.js'
 
@@ -35,119 +36,110 @@ function loadProjects() {
 }
 
 /**
- * 获取模板列表（从 src/config/ 目录）
- * @returns {{ file: string, name: string }[]}
- */
-function getTemplates() {
-  const configDir = join(dirname(fileURLToPath(import.meta.url)), '../config')
-  return readdirSync(configDir)
-    .filter((f) => f.endsWith('.toml'))
-    .map((f) => ({ file: f, name: f.split('.')[0] }))
-}
-
-/**
- * 读取模板文件
- * @param {string} templateName
- * @returns {string}
- */
-function getTemplateContent(templateName) {
-  const configDir = join(dirname(fileURLToPath(import.meta.url)), '../config')
-  const templateFile = getTemplates().find((t) => t.name === templateName)
-  if (!templateFile) {
-    return ''
-  }
-  return readFileSync(join(configDir, templateFile.file), 'utf8')
-}
-
-/**
- * 替换模板中的值
- * @param {string} content
- * @param {string} key
- * @param {string} value
- * @returns {string}
- */
-function fillValue(content, key, value) {
-  const re = new RegExp('^(\\s*' + key + '\\s*=\\s*)(?:"([^"]*)"|([^\\s"\\n]+))', 'm')
-  const m = re.exec(content)
-  if (!m) return content
-  const prefix = m[1]
-  const isQuoted = m[2] !== undefined
-  const replacement = isQuoted
-    ? '"' + String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
-    : String(value)
-  return content.slice(0, m.index) + prefix + replacement + content.slice(m.index + m[0].length)
-}
-
-/**
- * `shop use` —— 使用保存的项目配置并执行命令。
+ * `shop use` —— 使用与当前配置匹配的项目并执行命令。
+ * 流程：
+ *   1. 读 shopify.theme.toml 的 theme/store（没配置文件先 init；缺了就补填并写回）
+ *   2. 列出项目，只有 theme+store 与当前配置一致的可选，其余 disable
+ *   3. 选中后把项目的 preview_key/port 同步进 dev 环境，再跑 dev/async
  */
 export default {
   name: 'use',
   aliases: ['use'],
-  description: '使用保存的项目配置并执行命令',
+  description: '使用与当前配置匹配的项目并执行命令',
   usage: 'shop use',
   async run(ctx) {
     const { log } = ctx
-    const projects = loadProjects()
 
+    // ① 确保配置文件存在
+    let cfg = loadThemeConfig()
+    if (!cfg) {
+      log.warn('未找到 shopify.theme.toml，先执行 shop init …')
+      await initCmd.run(ctx)
+      cfg = loadThemeConfig()
+      if (!cfg) {
+        log.error('初始化未完成，已取消执行')
+        return
+      }
+    }
+
+    const dev = cfg.environments.dev
+    if (!dev) {
+      log.error('配置缺少 [environments.dev]')
+      return
+    }
+
+    // ② 读 theme/store，缺了就补填并写回（后续要靠它们匹配项目）
+    let content = readFileSync(cfg.path, 'utf8')
+    const filled = {}
+    for (const f of [
+      { key: 'theme', message: '请输入 theme：' },
+      { key: 'store', message: '请输入 store：' },
+    ]) {
+      const cur = dev[f.key]
+      if (cur === undefined || String(cur).trim() === '') {
+        let val
+        try {
+          val = await input({
+            message: f.message,
+            validate: (v) => (v.trim() ? true : '不能为空'),
+          })
+        } catch (err) {
+          if (err?.name === 'ExitPromptError') {
+            log.info('已取消')
+            return
+          }
+          throw err
+        }
+        filled[f.key] = val.trim()
+        content = setEnvField(content, 'dev', f.key, val.trim())
+      }
+    }
+    if (Object.keys(filled).length) {
+      writeFileSync(cfg.path, content, 'utf8')
+      log.success('已将补填字段写回 shopify.theme.toml')
+    }
+    const configTheme = String(filled.theme ?? dev.theme)
+    const configStore = String(filled.store ?? dev.store)
+
+    // ③ 加载项目，按 theme+store 判断是否可选
+    const projects = loadProjects()
     if (!projects.length) {
       log.error('暂无保存的项目配置，请先使用 shop add 添加')
       return
     }
+    const isMatch = (p) => String(p.theme) === configTheme && String(p.store) === configStore
+    if (!projects.some(isMatch)) {
+      log.error(`没有与当前配置匹配的项目（theme=${configTheme}, store=${configStore}）`)
+      return
+    }
 
+    // ④ 选择项目：不匹配的 disable 掉
     let selectedProject
     try {
       selectedProject = await select({
         message: '选择要使用的项目：',
         choices: projects.map((p) => ({
-          name: `${p.templateName} - ${p.description || '无描述'}`,
+          name: `${p.templateName ?? p.store ?? '?'} - ${p.description || '无描述'}`,
           value: p,
+          disabled: isMatch(p) ? false : 'theme/store 与当前配置不符',
         })),
       })
     } catch (err) {
-      if (err && err.name === 'ExitPromptError') {
+      if (err?.name === 'ExitPromptError') {
         log.info('已取消')
         return
       }
       throw err
     }
 
-    // 读取当前 shopify.theme.toml
-    const configPath = join(process.cwd(), 'shopify.theme.toml')
-    if (!existsSync(configPath)) {
-      log.error('当前目录下未找到 shopify.theme.toml 文件')
-      return
-    }
-
-    // 获取模板内容并填充值
-    let content = getTemplateContent(selectedProject.templateName)
-    if (!content) {
-      log.error(`未找到模板：${selectedProject.templateName}`)
-      return
-    }
-
-    content = fillValue(content, 'theme', selectedProject.theme)
-    content = fillValue(content, 'preview_key', selectedProject.previewKey)
-    content = fillValue(content, 'port', selectedProject.port)
-
-    // 解析现有配置，保留其他环境配置
-    const existingConfig = parse(readFileSync(configPath, 'utf8'))
-    const newConfig = parse(content)
-    
-    // 合并配置，替换 dev 环境
-    const mergedConfig = {
-      ...existingConfig,
-      environments: {
-        ...existingConfig.environments,
-        dev: newConfig.environments.dev,
-      },
-    }
-
-    // 写入配置文件
-    writeFileSync(configPath, stringify(mergedConfig), 'utf8')
+    // ⑤ 把项目的 preview_key/port 同步进 dev 环境（theme/store 已匹配，不动）
+    content = readFileSync(cfg.path, 'utf8')
+    content = setEnvField(content, 'dev', 'preview_key', selectedProject.previewKey)
+    content = setEnvField(content, 'dev', 'port', selectedProject.port)
+    writeFileSync(cfg.path, content, 'utf8')
     log.success('配置文件已更新')
 
-    // 选择执行方式
+    // ⑥ 选择执行方式
     let commandType
     try {
       commandType = await select({
@@ -158,7 +150,7 @@ export default {
         ],
       })
     } catch (err) {
-      if (err && err.name === 'ExitPromptError') {
+      if (err?.name === 'ExitPromptError') {
         log.info('已取消')
         return
       }

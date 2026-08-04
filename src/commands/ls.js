@@ -90,8 +90,8 @@ export default {
     projects.forEach((p) => {
       const tplEnv = loadTemplateEnv(p.templateName)
       const links = buildLinks({
-        domain: tplEnv.domain,
-        store: tplEnv.store,
+        domain: p.domain ?? tplEnv.domain,
+        store: p.store ?? tplEnv.store,
         theme: p.theme,
         preview_key: p.previewKey,
         port: p.port,

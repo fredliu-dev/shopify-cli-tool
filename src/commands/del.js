@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join, dirname } from 'node:path'
-import { select, confirm } from '@inquirer/prompts'
+import { checkbox, confirm } from '@inquirer/prompts'
 
 const PROJECTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../projects')
 const PROJECTS_FILE = join(PROJECTS_DIR, 'projects.json')
@@ -56,10 +56,11 @@ export default {
       return
     }
 
-    let selectedProject
+    // 多选要删除的项目
+    let selected
     try {
-      selectedProject = await select({
-        message: '选择要删除的项目：',
+      selected = await checkbox({
+        message: '选择要删除的项目（可多选）：',
         choices: projects.map((p) => ({
           name: `${p.templateName} - ${p.description || '无描述'}`,
           value: p,
@@ -73,11 +74,19 @@ export default {
       throw err
     }
 
-    // 确认删除
+    if (!selected.length) {
+      log.info('未选择任何项目')
+      return
+    }
+
+    // 二次确认：逐条列出待删除项目，避免误删
+    const summary = selected
+      .map((p) => `  · ${p.templateName} - ${p.description || '无描述'}`)
+      .join('\n')
     let confirmed
     try {
       confirmed = await confirm({
-        message: `确认删除项目 "${selectedProject.templateName} - ${selectedProject.description || '无描述'}"？`,
+        message: `确认删除以下 ${selected.length} 个项目？\n${summary}`,
         default: false,
       })
     } catch (err) {
@@ -93,10 +102,11 @@ export default {
       return
     }
 
-    // 删除项目
-    const updatedProjects = projects.filter((p) => p.id !== selectedProject.id)
+    // 删除选中的项目
+    const selectedIds = new Set(selected.map((p) => p.id))
+    const updatedProjects = projects.filter((p) => !selectedIds.has(p.id))
     saveProjects(updatedProjects)
 
-    log.success('项目配置已删除')
+    log.success(`已删除 ${selected.length} 个项目配置`)
   },
 }

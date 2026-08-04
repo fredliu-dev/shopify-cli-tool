@@ -1,7 +1,7 @@
 [environments.dev]
 project_desc=""
-domain="https://ca.shokz.com"
+domain=""
 theme = ""
-store = "aftershokz-canada.myshopify.com"
+store = ""
 port = 9292
 preview_key=""
