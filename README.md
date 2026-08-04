@@ -1,8 +1,46 @@
 # shopify-cli-tool
 
-对 [`@shopify/cli`](https://www.npmjs.com/package/@shopify/cli) 的美化封装。兼容所有原生 shopify 命令，并围绕主题开发流程提供了一组更易用的自定义命令。
+对 [`@shopify/cli`](https://www.npmjs.com/package/@shopify/cli) 的美化封装。兼容所有原生 shopify 命令，并围绕主题开发流程提供了一组更易用的自定义命令（所有命令需要再项目根目录执行）。
+***当前工具只支持us，ca，de三个项目配置模版***
+## 一、背景
+### 1.项目通常不上传配置文件shopify.theme.toml到仓库，手动创建耗时且容易出错，从其他地方复制耗时
+命令：shop init
+可以快速生成 `shopify.theme.toml` 文件，包含默认的开发环境配置。
 
-## 快速开始
+### 2. 项目开发完提测链接老是人工拼接，找拼接url耗时
+命令：shop pre
+可以快速获取提测链接、本地调试地址、主题后台地址和主题编辑器地址。不用再手动拼接和记忆拼接规则。
+
+### 3. 当同一个主题有多个页面要开发的时候，或者需要切换到其他分支去开发的时候，需要频繁的去网站上找theme_id和preview_key
+命令：shop add
+可以快速的把当前配置缓存到本地
+命令：shop ls
+可以列出所有已保存的配置
+命令：shop edit
+可以编辑某个配置
+命令：shop del
+可以删除某个配置
+命令：shop use
+可以快速切换到某个配置
+这样就不用频繁的去后台查找theme_id和preview_key了，直接用命令切换即可
+
+### 4.shopify运行命令太长不容易记，需要记忆多个参数
+命令：shop dev
+可以快速启动本地开发环境
+命令：shop async
+可以快速启动本地开发环境，同时把本地主题同步到主题编辑器
+
+### 5. 在收到需求后，去拉分支后又要去后台复制主题，然后还要等主题创建好再点进去获取theme_id，来回切换应用等待太耗时了，主题的命名格式还需要记忆
+命令：shop add
+在你没有输入theme_id的时候会提示你是否需要复制线上主题，选择是就会自动去创建了，创建成功就会把theme_id保存到shopify.theme.toml文件中，同是把当前配置缓存到本地，方便后续切换配置
+
+### 6.设计稿里有时候提供的图片边缘有空的地方需要裁剪掉，美工处理需要时间
+命令：shop handleimage
+可以把当前文件夹下的图片裁剪空白边框并转成webp格式
+
+
+
+## 二、快速开始
 
 ```bash
 npm install -g shopify-cli-tool
@@ -18,7 +56,7 @@ npm install -g shopify-cli-tool
 shop init
 ```
 
-按提示选择模板，填写 `theme`、`port`、`preview_key`、`project_desc`（选填），工具会生成 `shopify.theme.toml`。再打开它，把 `[environments.dev]` 下的 `domain`、`store` 改成你对应店铺的值。
+按提示选择模板，填写 `theme`、`port`、`preview_key`、`project_desc`（选填），工具会生成 `shopify.theme.toml`。
 
 ### 2. 本地开发
 
@@ -35,9 +73,9 @@ shop async  # 等价于 shopify theme dev --theme-editor-sync -e dev
 shop pre
 ```
 
-输出提测链接、主题后台地址和主题编辑器地址。
+输出提测链接、本地调试地址、主题后台地址和主题编辑器地址。
 
-## 命令参考
+## 三、命令参考
 
 所有自定义命令都通过 `shop <命令>` 调用；未列出的命令会原样透传给 `@shopify/cli`。
 
@@ -187,7 +225,7 @@ shop handleimg --tolerance 30
 
 不带任何参数运行 `shop` 也会显示帮助。
 
-## 原生命令透传
+## 四、原生命令透传
 
 所有非自定义命令都会原样透传给 `@shopify/cli`，参数、输出、退出码保持一致。
 
@@ -197,7 +235,7 @@ shop theme push
 # …任意 shopify 命令
 ```
 
-## 配置文件：`shopify.theme.toml`
+## 五、配置文件：`shopify.theme.toml`
 
 多数自定义命令围绕这个文件工作，`[environments.<名称>]` 下常用字段：
 
