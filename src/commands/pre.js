@@ -1,6 +1,7 @@
 import { banner } from '../ui/banner.js'
 import { log } from '../ui/logger.js'
 import { resolveEnvironment } from '../config.js'
+import { buildLinks } from '../links.js'
 
 export default {
   name: 'pre',
@@ -16,12 +17,8 @@ export default {
       return 1
     }
 
-    const previewLink = env.preview_key
-      ? `${env.domain}/pages?preview_key=${env.preview_key}&preview_theme_id=${env.theme}`
-      : `${env.domain}?_ab=0&_fd=0&_sc=1&preview_theme_id=${env.theme}`
-    const adminLink = `https://admin.shopify.com/store/${env.store.split('.')[0]}/themes`
-    const editorLink = `${adminLink}/${env.theme}/editor`
-    log.warn(`开发链接：http://127.0.0.1:${env.port}/pages?preview_key=${env.preview_key}`)
+    const { devLink, previewLink, adminLink, editorLink } = buildLinks(env)
+    log.warn(`开发链接：${devLink}`)
     log.info(`提测链接：${previewLink}`)
     log.info(`主题后台：${adminLink}`)
     log.info(`主题编辑：${editorLink}`)

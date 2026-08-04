@@ -86,10 +86,11 @@ export default {
 
     let template, theme, previewKey, port, description
     try {
+      const templates = getTemplates()
       template = await select({
         message: '选择模板：',
-        choices: getTemplates().map((t) => ({ name: t.name, value: t })),
-        default: getTemplates().find((t) => t.name === selectedProject.templateName),
+        choices: templates.map((t) => ({ name: t.name, value: t })),
+        default: templates.find((t) => t.name === selectedProject.templateName),
       })
 
       theme = await input({
