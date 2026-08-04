@@ -1,6 +1,6 @@
 {
   "name": "shopify-cli-tool",
-  "version": "1.0.7",
+  "version": "1.0.9",
   "description": "A beautified wrapper around @shopify/cli for Shopify theme development.",
   "type": "module",
   "main": "src/index.js",
