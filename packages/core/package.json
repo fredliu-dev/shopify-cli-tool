@@ -1,0 +1,21 @@
+{
+  "name": "@shopify-cli-tool/core",
+  "version": "1.0.0",
+  "description": "Shopify CLI 工具的共享核心逻辑（headless，无终端依赖，CLI 与桌面应用共用）",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/"
+  ],
+  "dependencies": {
+    "@shopify/cli": "^4.5.2",
+    "smol-toml": "^1.7.1"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

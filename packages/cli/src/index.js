@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { banner } from './ui/banner.js'
 import { log } from './ui/logger.js'
-import { runShopify } from './runner.js'
+import { runShopify } from '@shopify-cli-tool/core'
 import { loadCommands } from './registry.js'
 
 const __filename = fileURLToPath(import.meta.url)

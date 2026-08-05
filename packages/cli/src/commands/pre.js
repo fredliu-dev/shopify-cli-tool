@@ -1,7 +1,6 @@
 import { banner } from '../ui/banner.js'
 import { log } from '../ui/logger.js'
-import { resolveEnvironment } from '../config.js'
-import { buildLinks } from '../links.js'
+import { resolveEnvironment, buildLinks } from '@shopify-cli-tool/core'
 
 export default {
   name: 'pre',

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import initCmd from './init.js'
 import preCmd from './pre.js'
-import { extractEnvironmentArg } from '../config.js'
+import { extractEnvironmentArg } from '@shopify-cli-tool/core'
 
 /**
  * 确保 cwd 下已有 shopify.theme.toml；没有就先跑一遍 `shop init`（交互式）。

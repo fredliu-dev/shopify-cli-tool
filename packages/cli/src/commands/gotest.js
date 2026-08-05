@@ -2,10 +2,16 @@ import { select, input } from '@inquirer/prompts'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import ora from 'ora'
-import { loadDingtalkConfig, saveDingtalkConfig, getDingtalkFile, sendText } from '../dingtalk.js'
-import { loadProjects } from '../projects.js'
-import { buildLinks } from '../links.js'
-import { parsePlaceholders, fillTemplate } from '../template.js'
+import {
+  loadDingtalkConfig,
+  saveDingtalkConfig,
+  getDingtalkFile,
+  sendText,
+  loadProjects,
+  buildLinks,
+  parsePlaceholders,
+  fillTemplate,
+} from '@shopify-cli-tool/core'
 
 // 列表末尾的「新增」哨兵值（用字符串避免与真实对象冲突）
 const NEW_GROUP = '__new_group__'

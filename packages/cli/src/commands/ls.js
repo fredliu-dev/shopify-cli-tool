@@ -1,32 +1,5 @@
-import { readFileSync, readdirSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { join, dirname } from 'node:path'
-import { parse } from 'smol-toml'
 import pc from 'picocolors'
-import { buildLinks } from '../links.js'
-import { loadProjects, getProjectsFile } from '../projects.js'
-
-/**
- * 读取模板的 dev 环境配置（用于补 domain / store，projects.json 里没存这两个）。
- * @param {string} templateName
- * @returns {Record<string, string|number>}
- */
-function loadTemplateEnv(templateName) {
-  const configDir = join(dirname(fileURLToPath(import.meta.url)), '../config')
-  let files = []
-  try {
-    files = readdirSync(configDir)
-  } catch {
-    return {}
-  }
-  const file = files.find((f) => f.endsWith('.toml') && f.split('.')[0] === templateName)
-  if (!file) return {}
-  try {
-    return parse(readFileSync(join(configDir, file), 'utf8')).environments?.dev ?? {}
-  } catch {
-    return {}
-  }
-}
+import { buildLinks, loadProjects, getProjectsFile, loadTemplateEnv } from '@shopify-cli-tool/core'
 
 /**
  * `shop ls` —— 列出所有保存的项目配置。

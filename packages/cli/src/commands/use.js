@@ -1,10 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { select, input } from '@inquirer/prompts'
 import initCmd from './init.js'
-import { loadThemeConfig, setEnvField } from '../config.js'
+import { loadThemeConfig, setEnvField, getPortPids, killPort, loadProjects } from '@shopify-cli-tool/core'
 import { runThemeDev } from './_theme-dev.js'
-import { getPortPids, killPort } from './_port.js'
-import { loadProjects } from '../projects.js'
 
 /**
  * `shop use` —— 使用与当前配置匹配的项目并执行命令。

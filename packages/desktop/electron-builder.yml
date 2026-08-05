@@ -1,0 +1,38 @@
+appId: dev.fredliu.shopify-desktop
+productName: Shopify Toolbox
+
+# 产物输出目录
+directories:
+  output: release
+
+# 打包内容：electron-vite 产物 + package.json（dependencies 如
+# @shopify-cli-tool/core、electron-updater 会被 electron-builder 自动打进 asar）
+files:
+  - out/**/*
+  - package.json
+  - '!**/README.md'
+  - '!**/.git/**'
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64 # Apple Silicon；CI 上可加 x64
+    - target: zip # zip 供 electron-updater 增量更新用
+      arch:
+        - arm64
+  category: public.app-category.developer-tools
+  # 暂不签名/公证（个人/内部使用）：用户首次打开需右键 → 打开
+  # identity: null
+
+win:
+  target:
+    - target: nsis # 出 .exe 安装包
+      arch:
+        - x64
+
+# 自动更新：发布到 GitHub Release，electron-updater 据此检查
+publish:
+  provider: github
+  owner: fredliu-dev
+  repo: shopify-cli-tool

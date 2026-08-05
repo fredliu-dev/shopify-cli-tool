@@ -39,7 +39,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^8.5.2",
-    "@shopify/cli": "^4.5.2",
+    "@shopify-cli-tool/core": "workspace:^",
     "boxen": "^8.0.1",
     "cli-table3": "^0.6.5",
     "gradient-string": "^3.0.0",

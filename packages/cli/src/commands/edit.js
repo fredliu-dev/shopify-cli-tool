@@ -1,6 +1,5 @@
 import { select, input } from '@inquirer/prompts'
-import { storeToTemplate } from '../config.js'
-import { loadProjects, saveProjects } from '../projects.js'
+import { storeToTemplate, loadProjects, saveProjects } from '@shopify-cli-tool/core'
 
 /**
  * `shop edit` —— 编辑保存的项目配置。

@@ -2,8 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { input, checkbox, confirm } from '@inquirer/prompts'
 import initCmd from './init.js'
 import { copyLiveTheme } from './copy.js'
-import { loadThemeConfig, setEnvField, storeToTemplate } from '../config.js'
-import { loadProjects, saveProjects } from '../projects.js'
+import { loadThemeConfig, setEnvField, storeToTemplate, loadProjects, saveProjects } from '@shopify-cli-tool/core'
 
 // 需要齐全的字段（store 作为环境身份，是前置门槛；其余缺了就补填）
 const REQUIRED_FIELDS = [

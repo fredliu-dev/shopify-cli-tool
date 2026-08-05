@@ -2,9 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { select, input, confirm } from '@inquirer/prompts'
 import ora from 'ora'
 import initCmd from './init.js'
-import { loadThemeConfig, setEnvField } from '../config.js'
-import { captureShopify } from '../runner.js'
-import { buildLinks } from '../links.js'
+import { loadThemeConfig, setEnvField, captureShopify, buildLinks } from '@shopify-cli-tool/core'
 
 /**
  * 从 shopify -j 的 stdout 里解析 JSON。

@@ -1,3 +1,16 @@
+# 依赖
 node_modules
-shopify.theme.toml
-src/projects/
+
+# CLI 本地开发配置（不入库）
+packages/cli/shopify.theme.toml
+packages/cli/src/projects/
+
+# 桌面应用构建产物
+packages/desktop/dist
+packages/desktop/out
+packages/desktop/release
+packages/desktop/build
+
+# 杂项
+*.log
+.DS_Store

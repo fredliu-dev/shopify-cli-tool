@@ -1,5 +1,5 @@
 import { checkbox, confirm } from '@inquirer/prompts'
-import { loadProjects, saveProjects } from '../projects.js'
+import { loadProjects, saveProjects } from '@shopify-cli-tool/core'
 
 /**
  * `shop del` —— 删除保存的项目配置。
