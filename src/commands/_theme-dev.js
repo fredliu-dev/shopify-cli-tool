@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import ora from 'ora'
 import initCmd from './init.js'
 import preCmd from './pre.js'
 import { extractEnvironmentArg } from '../config.js'
@@ -40,12 +39,13 @@ export async function runThemeDev(ctx, extraArgs = []) {
   ctx.banner(ctx.version)
   ctx.log.step(`执行：shopify ${args.join(' ')}`)
 
+  // shopify theme dev 会长时间占用终端，启动前先把 pre 的预览链接输出出来，
+  // 服务跑起来后即可直接取用（pre 会按 -e/--environment 解析对应环境）。
+  await preCmd.run(ctx)
+
   const code = await ctx.runShopify(args)
   if (code === 0) {
     ctx.log.success('完成 ✅')
-    const spinner = ora('正在生成预览链接 …').start()
-    await preCmd.run(ctx)
-    spinner.succeed('预览链接已生成')
   } else {
     ctx.log.error(`命令失败，退出码 ${code}`)
     process.exit(code)
