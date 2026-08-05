@@ -110,6 +110,7 @@ shop init
 - `theme` 缺失时会询问「是否复制线上 live 主题」，选择是则自动复制 live 主题为草稿并把新主题 id 回填到 `theme`。
 - 多选要保存的环境（默认勾选 `dev`）。
 - 判重：`project_desc`、`domain`、`theme`、`store`、`preview_key` 五要素全相同视为「已存在」并跳过；否则作为新项目追加（改了 theme 就是新项目，不会覆盖旧的）。
+- 存储位置在用户数据目录（包外），更新或重装工具都不会丢失：Windows 为 `%APPDATA%\shopify-cli-tool\projects.json`，macOS / Linux 为 `~/.config/shopify-cli-tool/projects.json`。可用 `shop ls` 查看实际路径。
 
 ```bash
 shop add
@@ -117,7 +118,7 @@ shop add
 
 #### `shop ls`
 
-以表格列出所有已保存的项目（模板、描述、store、theme、端口等）。
+以表格列出所有已保存的项目（模板、描述、store、theme、端口等），并在末尾显示数据文件路径，方便定位与备份。
 
 ```bash
 shop ls
@@ -145,7 +146,7 @@ shop del
 
 1. 读取（缺失则补填并写回）当前 `theme` / `store`。
 2. 列出项目，只有 `theme` + `store` 与当前配置一致的可选，其余置灰。
-3. 选中后把该项目的 `preview_key` / `port` 同步进 `[environments.dev]`。
+3. 选中后把该项目的全部字段（`domain` / `project_desc` / `preview_key` / `port` 等，`theme` / `store` 本就是匹配条件也一并写入）同步进 `[environments.dev]`。
 4. 选择执行 `shop dev` 或 `shop async`；若端口被旧 dev server 占用会自动释放。
 
 ```bash

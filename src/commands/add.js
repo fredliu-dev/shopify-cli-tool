@@ -1,47 +1,9 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { join, dirname } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { input, checkbox, confirm } from '@inquirer/prompts'
 import initCmd from './init.js'
 import { copyLiveTheme } from './copy.js'
 import { loadThemeConfig, setEnvField, storeToTemplate } from '../config.js'
-
-const PROJECTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../projects')
-const PROJECTS_FILE = join(PROJECTS_DIR, 'projects.json')
-
-/**
- * 确保项目存储目录存在
- */
-function ensureProjectsDir() {
-  if (!existsSync(PROJECTS_DIR)) {
-    mkdirSync(PROJECTS_DIR, { recursive: true })
-  }
-}
-
-/**
- * 读取所有保存的项目
- * @returns {Array}
- */
-function loadProjects() {
-  ensureProjectsDir()
-  if (!existsSync(PROJECTS_FILE)) {
-    return []
-  }
-  try {
-    return JSON.parse(readFileSync(PROJECTS_FILE, 'utf8'))
-  } catch {
-    return []
-  }
-}
-
-/**
- * 保存项目到文件
- * @param {Array} projects
- */
-function saveProjects(projects) {
-  ensureProjectsDir()
-  writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2), 'utf8')
-}
+import { loadProjects, saveProjects } from '../projects.js'
 
 // 需要齐全的字段（store 作为环境身份，是前置门槛；其余缺了就补填）
 const REQUIRED_FIELDS = [

@@ -1,45 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { join, dirname } from 'node:path'
 import { select, input } from '@inquirer/prompts'
 import { storeToTemplate } from '../config.js'
-
-const PROJECTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../projects')
-const PROJECTS_FILE = join(PROJECTS_DIR, 'projects.json')
-
-/**
- * 确保项目存储目录存在
- */
-function ensureProjectsDir() {
-  if (!existsSync(PROJECTS_DIR)) {
-    mkdirSync(PROJECTS_DIR, { recursive: true })
-  }
-}
-
-/**
- * 读取所有保存的项目
- * @returns {Array}
- */
-function loadProjects() {
-  ensureProjectsDir()
-  if (!existsSync(PROJECTS_FILE)) {
-    return []
-  }
-  try {
-    return JSON.parse(readFileSync(PROJECTS_FILE, 'utf8'))
-  } catch {
-    return []
-  }
-}
-
-/**
- * 保存项目到文件
- * @param {Array} projects
- */
-function saveProjects(projects) {
-  ensureProjectsDir()
-  writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2), 'utf8')
-}
+import { loadProjects, saveProjects } from '../projects.js'
 
 /**
  * `shop edit` —— 编辑保存的项目配置。

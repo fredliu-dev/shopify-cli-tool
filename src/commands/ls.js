@@ -1,37 +1,10 @@
-import { existsSync, readFileSync, mkdirSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join, dirname } from 'node:path'
 import { parse } from 'smol-toml'
 import pc from 'picocolors'
 import { buildLinks } from '../links.js'
-
-const PROJECTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../projects')
-const PROJECTS_FILE = join(PROJECTS_DIR, 'projects.json')
-
-/**
- * 确保项目存储目录存在
- */
-function ensureProjectsDir() {
-  if (!existsSync(PROJECTS_DIR)) {
-    mkdirSync(PROJECTS_DIR, { recursive: true })
-  }
-}
-
-/**
- * 读取所有保存的项目
- * @returns {Array}
- */
-function loadProjects() {
-  ensureProjectsDir()
-  if (!existsSync(PROJECTS_FILE)) {
-    return []
-  }
-  try {
-    return JSON.parse(readFileSync(PROJECTS_FILE, 'utf8'))
-  } catch {
-    return []
-  }
-}
+import { loadProjects, getProjectsFile } from '../projects.js'
 
 /**
  * 读取模板的 dev 环境配置（用于补 domain / store，projects.json 里没存这两个）。
@@ -68,6 +41,7 @@ export default {
 
     if (!projects.length) {
       log.info('暂无保存的项目配置')
+      console.log(pc.gray(`数据文件：${getProjectsFile()}`))
       return
     }
 
@@ -113,5 +87,6 @@ export default {
     })
 
     console.log(table.toString())
+    console.log(pc.gray(`数据文件：${getProjectsFile()}`))
   },
 }

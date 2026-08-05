@@ -1,39 +1,10 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { join, dirname } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { select, input } from '@inquirer/prompts'
 import initCmd from './init.js'
 import { loadThemeConfig, setEnvField } from '../config.js'
 import { runThemeDev } from './_theme-dev.js'
 import { getPortPids, killPort } from './_port.js'
-
-const PROJECTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../projects')
-const PROJECTS_FILE = join(PROJECTS_DIR, 'projects.json')
-
-/**
- * 确保项目存储目录存在
- */
-function ensureProjectsDir() {
-  if (!existsSync(PROJECTS_DIR)) {
-    mkdirSync(PROJECTS_DIR, { recursive: true })
-  }
-}
-
-/**
- * 读取所有保存的项目
- * @returns {Array}
- */
-function loadProjects() {
-  ensureProjectsDir()
-  if (!existsSync(PROJECTS_FILE)) {
-    return []
-  }
-  try {
-    return JSON.parse(readFileSync(PROJECTS_FILE, 'utf8'))
-  } catch {
-    return []
-  }
-}
+import { loadProjects } from '../projects.js'
 
 /**
  * `shop use` —— 使用与当前配置匹配的项目并执行命令。
@@ -132,10 +103,21 @@ export default {
       throw err
     }
 
-    // ⑤ 把项目的 preview_key/port 同步进 dev 环境（theme/store 已匹配，不动）
+    // ⑤ 把项目的全部配置属性同步进 dev 环境（用项目数据覆盖现有值）；
+    //    theme/store 虽已是匹配条件（必然相等），一并写入，确保配置与项目完全一致
     content = readFileSync(cfg.path, 'utf8')
-    content = setEnvField(content, 'dev', 'preview_key', selectedProject.previewKey)
-    content = setEnvField(content, 'dev', 'port', selectedProject.port)
+    for (const [key, val] of [
+      ['domain', selectedProject.domain],
+      ['project_desc', selectedProject.description],
+      ['preview_key', selectedProject.previewKey],
+      ['port', selectedProject.port],
+      ['theme', selectedProject.theme],
+      ['store', selectedProject.store],
+    ]) {
+      if (val !== undefined && val !== null) {
+        content = setEnvField(content, 'dev', key, val)
+      }
+    }
     writeFileSync(cfg.path, content, 'utf8')
     log.success('配置文件已更新')
 
