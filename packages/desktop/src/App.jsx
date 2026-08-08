@@ -1,50 +1,46 @@
-import React, { useState } from 'react'
-import { Layout, Menu } from 'antd'
-import Ls from './pages/Ls.jsx'
-import Del from './pages/Del.jsx'
-import Edit from './pages/Edit.jsx'
-import Pre from './pages/Pre.jsx'
-import Init from './pages/Init.jsx'
+import React from 'react'
+import { ConfigProvider, Layout, theme as antdTheme } from 'antd'
+import zhCN from 'antd/locale/zh_CN'
+import { version } from '../package.json'
+import Repos from './pages/Repos.jsx'
 
-const { Sider, Content } = Layout
+// 窗口标题带版本号：读 desktop package.json，每次发版改 version 即自动跟上
+// （Electron 原生标题由 main.js 用 app.getVersion() 设置；这里同步页面 <title>，避免页面加载后覆盖回去）
+document.title = `Shopify 工具箱 v${version}`
 
-const items = [
-  { key: 'ls', label: '项目列表' },
-  { key: 'del', label: '删除项目' },
-  { key: 'edit', label: '编辑项目' },
-  { key: 'pre', label: '提测链接' },
-  { key: 'init', label: '初始化配置' },
-]
+const { Content } = Layout
 
-const pages = { ls: Ls, del: Del, edit: Edit, pre: Pre, init: Init }
+// 全局暗色主题：darkAlgorithm 让所有 antd 组件自动切暗色；
+// 默认按钮在暗色下用「半透明橘色填充 + 浅橘文字/图标」，悬停/按下加深，扁平无阴影。
+// danger 走独立 colorError 分支（红色删除按钮不受 default* 影响），primary 蓝色不变。
+const theme = {
+  algorithm: antdTheme.darkAlgorithm,
+  components: {
+    Button: {
+      defaultBg: 'rgba(250, 140, 22, 0.16)',
+      defaultColor: '#ffa940',
+      defaultBorderColor: 'transparent',
+      defaultHoverBg: 'rgba(250, 140, 22, 0.26)',
+      defaultHoverColor: '#ffb84d',
+      defaultHoverBorderColor: 'transparent',
+      defaultActiveBg: 'rgba(250, 140, 22, 0.34)',
+      defaultActiveColor: '#ffc068',
+      defaultActiveBorderColor: 'transparent',
+      defaultShadow: 'none',
+      primaryShadow: 'none',
+      fontWeight: 500,
+    },
+  },
+}
 
 export default function App() {
-  const [page, setPage] = useState('ls')
-  const Page = pages[page]
-
   return (
-    <Layout style={{ height: '100vh' }}>
-      <Sider width={200} theme="light">
-        <div
-          style={{
-            height: 48,
-            margin: 12,
-            fontWeight: 700,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#1677ff',
-          }}
-        >
-          Shopify 工具箱
-        </div>
-        <Menu mode="inline" selectedKeys={[page]} onClick={(e) => setPage(e.key)} items={items} />
-      </Sider>
-      <Layout>
-        <Content style={{ padding: 24, overflow: 'auto', background: '#f5f5f5' }}>
-          <Page />
+    <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }} theme={theme}>
+      <Layout style={{ height: '100vh' }}>
+        <Content style={{ padding: 20, overflow: 'auto', background: '#0d0d0f' }}>
+          <Repos />
         </Content>
       </Layout>
-    </Layout>
+    </ConfigProvider>
   )
 }

@@ -1,4 +1,6 @@
 [environments.dev]
+_github="git@github.com:devshopify/Shokz-US-2.0.git"
+_branch=""
 project_desc=""
 domain="https://shokz.com"
 theme = ""

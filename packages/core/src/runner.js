@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { dirname, join, delimiter } from 'node:path'
+import { accessSync, constants, existsSync, readFileSync } from 'node:fs'
 
 const require = createRequire(import.meta.url)
 
@@ -12,18 +12,105 @@ const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'))
 const binRel = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin.shopify
 const SHOPIFY_BIN = join(dirname(pkgJsonPath), binRel)
 
+/** 实装的 @shopify/cli 版本（与 bin 同源，解析自其 package.json）。桌面端「关于」展示用。 */
+export const SHOPIFY_CLI_VERSION = pkg.version || null
+
+/** 是否身处 Electron 主进程（此时 process.execPath 是 Electron 而非系统 node）。 */
+const isElectron = !!process.versions.electron
+/** 缓存解析出的系统 node 路径（Electron 下不能直接拿偏旧的内置 Node 跑新版 @shopify/cli）。 */
+let _systemNode = null
+
+/**
+ * 扫 process.env.PATH 各目录，返回第一个存在且可执行的 node（同步、即时）。
+ * dev 下 Electron 从终端继承的 PATH 已含 nvm，命中即用；GUI 直启的 Electron 的 PATH 常被裁剪，
+ * 此处查不到时再由 resolveShopifyNode 走登录 shell 兜底。
+ */
+function nodeFromPath() {
+  const isWin = process.platform === 'win32'
+  const exe = isWin ? 'node.exe' : 'node'
+  for (const dir of (process.env.PATH || '').split(delimiter)) {
+    if (!dir) continue
+    const full = join(dir, exe)
+    try {
+      accessSync(full, constants.X_OK)
+      return full
+    } catch {
+      /* 继续找下一个目录 */
+    }
+  }
+  return null
+}
+
+/**
+ * 解析跑 @shopify/cli 的 node 解释器路径。
+ * CLI 里 process.execPath 本就是系统 node；Electron 下它却是 Electron 自带的偏旧 Node——
+ * 新版 @shopify/cli 的 bin/run.js 顶部静态 `import { enableCompileCache } from 'node:module'`，
+ * 该命名导出在旧 Node 上不存在，会在 import 阶段直接 SyntaxError，故 Electron 下必须改用系统 node：
+ * 先扫 PATH（dev 下命中即用）；查不到再用登录+交互 shell 还原用户 PATH（含 nvm/homebrew）后取 node；
+ * 再兜底常见安装路径；仍找不到才退回 process.execPath（可能仍失败，但至少给个可读错误）。
+ * 结果按进程缓存，仅首次解析有一次（最多）登录 shell 的同步开销。
+ * @returns {Promise<string>}
+ */
+function resolveShopifyNode() {
+  if (!isElectron) return Promise.resolve(process.execPath)
+  if (_systemNode) return Promise.resolve(_systemNode)
+  const fast = nodeFromPath()
+  if (fast) {
+    _systemNode = fast
+    return Promise.resolve(fast)
+  }
+  const isWin = process.platform === 'win32'
+  return new Promise((resolve) => {
+    const shell = process.env.SHELL || (isWin ? 'cmd.exe' : '/bin/sh')
+    const flag = isWin ? '/c' : '-lic' // -l 登录 + -i 交互：source .zshrc/.zprofile 等以还原 nvm/homebrew
+    const script = isWin ? 'where node' : 'command -v node'
+    const child = spawn(shell, [flag, script], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 })
+    let out = ''
+    let settled = false
+    child.stdout.on('data', (d) => {
+      out += d.toString()
+    })
+    const finish = () => {
+      if (settled) return
+      settled = true
+      const picked = out.split('\n').map((l) => l.trim()).filter(Boolean).pop()
+      if (picked && existsSync(picked)) {
+        _systemNode = picked
+        return resolve(picked)
+      }
+      // 兜底常见安装路径：macOS homebrew / Windows Program Files\nodejs / Linux
+      const candidates = isWin
+        ? [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean).map((r) => join(r, 'nodejs', 'node.exe'))
+        : ['/opt/homebrew/bin/node', '/usr/local/bin/node']
+      for (const cand of candidates) {
+        if (existsSync(cand)) {
+          _systemNode = cand
+          return resolve(cand)
+        }
+      }
+      resolve(process.execPath) // 兜底：退回 Electron 自带 Node（可能仍因 enableCompileCache 失败）
+    }
+    child.on('close', finish)
+    child.on('error', finish)
+  })
+}
+
 /**
  * 用子进程跑 @shopify/cli，shopify 自身的彩色输出原样透传。
  * headless：进程错误时静默返回退出码（不再打印，由调用方按退出码处理）。
+ * Electron 下用系统 node 作解释器（见 resolveShopifyNode），避开 Electron 偏旧内置 Node 跑不了新版 CLI 的问题。
  * （环境参数请用 config.js 的 resolveEnvironment(args) 单独获取。）
  * @param {string[]} args 透传给 shopify 的参数（原样，不做改动）
+ * @param {{ cwd?: string }} [opts] cwd 不传则用 process.cwd()（CLI 依赖此默认）
  * @returns {Promise<number>} 进程退出码
  */
-export function runShopify(args) {
+export async function runShopify(args, { cwd } = {}) {
+  const node = await resolveShopifyNode()
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [SHOPIFY_BIN, ...args], {
+    const child = spawn(node, [SHOPIFY_BIN, ...args], {
       stdio: 'inherit',
-      env: { ...process.env, FORCE_COLOR: '1' },
+      env: { ...process.env, FORCE_COLOR: '1', INIT_CWD: cwd || process.cwd() },
+      ...(cwd ? { cwd } : {}),
     })
     child.on('close', (code) => resolve(code ?? 0))
     child.on('error', () => resolve(1))
@@ -35,13 +122,18 @@ export function runShopify(args) {
  * 与 runShopify 的区别：stdout 不直接打印而是收集起来供解析；stderr 收集后由调用方按需打印。
  * 关掉彩色（FORCE_COLOR=0）避免 ANSI 码污染 JSON。
  * @param {string[]} args 透传给 shopify 的参数（原样，不做改动）
+ * @param {{ cwd?: string }} [opts] cwd 不传则用 process.cwd()
  * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
  */
-export function captureShopify(args) {
+export async function captureShopify(args, { cwd } = {}) {
+  const node = await resolveShopifyNode()
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [SHOPIFY_BIN, ...args], {
+    const child = spawn(node, [SHOPIFY_BIN, ...args], {
       stdio: ['inherit', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '0' },
+      // INIT_CWD 必须同步到 cwd：shopify 的 cwd() 是 process.env.INIT_CWD || process.cwd()，
+      // Electron 主进程的 INIT_CWD 是 dev 启动目录（项目根），会让 shopify 拿错目录去找 toml。
+      env: { ...process.env, FORCE_COLOR: '0', INIT_CWD: cwd || process.cwd() },
+      ...(cwd ? { cwd } : {}),
     })
     let stdout = ''
     let stderr = ''
@@ -60,14 +152,17 @@ export function captureShopify(args) {
  * 跑 @shopify/cli 并把输出**按 chunk 流式回调**（供 GUI 实时显示）。
  * 介于 runShopify（inherit，GUI 拿不到字节）与 captureShopify（全量 buffer，不适合 dev server 长连接）之间。
  * @param {string[]} args 透传给 shopify 的参数
- * @param {{ onData?: (chunk: string, stream: 'stdout'|'stderr') => void, env?: Record<string,string> }} [opts]
- * @returns {{ child: import('node:child_process').ChildProcess, done: Promise<number> }}
+ * @param {{ onData?: (chunk: string, stream: 'stdout'|'stderr') => void, env?: Record<string,string>, cwd?: string }} [opts]
+ *   cwd 不传则用 process.cwd()（GUI 跑指定仓库时必传）
+ * @returns {Promise<{ child: import('node:child_process').ChildProcess, done: Promise<number> }>}
  *   child 可用于提前 kill；done resolve 退出码
  */
-export function streamShopify(args, { onData, env } = {}) {
-  const child = spawn(process.execPath, [SHOPIFY_BIN, ...args], {
+export async function streamShopify(args, { onData, env, cwd } = {}) {
+  const node = await resolveShopifyNode()
+  const child = spawn(node, [SHOPIFY_BIN, ...args], {
     stdio: ['inherit', 'pipe', 'pipe'],
-    env: { ...process.env, FORCE_COLOR: '1', ...env },
+    env: { ...process.env, FORCE_COLOR: '1', INIT_CWD: cwd || process.cwd(), ...env },
+    ...(cwd ? { cwd } : {}),
   })
   child.stdout.on('data', (d) => onData?.(d.toString(), 'stdout'))
   child.stderr.on('data', (d) => onData?.(d.toString(), 'stderr'))

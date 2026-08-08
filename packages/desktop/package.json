@@ -12,6 +12,7 @@
     "package:dir": "electron-vite build && electron-builder --dir"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.2",
     "@shopify-cli-tool/core": "workspace:*",
     "electron-updater": "^6.3.9"
   },

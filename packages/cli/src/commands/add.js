@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { input, checkbox, confirm } from '@inquirer/prompts'
 import initCmd from './init.js'
 import { copyLiveTheme } from './copy.js'
-import { loadThemeConfig, setEnvField, storeToTemplate, loadProjects, saveProjects } from '@shopify-cli-tool/core'
+import { loadThemeConfig, setEnvField, storeToTemplate, loadProjects, saveProjects, listBranches } from '@shopify-cli-tool/core'
 
 // 需要齐全的字段（store 作为环境身份，是前置门槛；其余缺了就补填）
 const REQUIRED_FIELDS = [
@@ -29,6 +29,9 @@ export default {
   usage: 'shop add',
   async run(ctx) {
     const { log } = ctx
+
+    // 当前分支：保存项目时记入 _branch（项目身份 + 「合并」源分支）
+    const { current: currentBranch } = await listBranches(process.cwd())
 
     // ① 确保配置文件存在
     let cfg = loadThemeConfig()
@@ -103,6 +106,8 @@ export default {
       for (const [k, v] of Object.entries(filled)) {
         content = setEnvField(content, name, k, v)
       }
+      // 记录当前分支到 _branch（与桌面端保存一致：项目身份 + 合并源分支）
+      if (currentBranch) content = setEnvField(content, name, '_branch', currentBranch)
       ready.push({ name, env: { ...env, ...filled } })
     }
     if (content !== original) {
@@ -148,15 +153,18 @@ export default {
         previewKey: String(sel.env.preview_key),
         port: String(sel.env.port),
         description: sel.env.project_desc,
+        _branch: currentBranch || null,
       }
-      // 五要素全相同视为已存在：project_desc / domain / theme / store / preview_key
+      // 六要素全相同视为已存在：project_desc / domain / theme / store / preview_key / _branch
+      // （历史项目无 _branch 视为通配，避免升级后已存项目全部失配）
       const duplicated = projects.find(
         (p) =>
           p.store === proj.store &&
           p.domain === proj.domain &&
           p.theme === proj.theme &&
           p.previewKey === proj.previewKey &&
-          p.description === proj.description,
+          p.description === proj.description &&
+          (p._branch == null || p._branch === proj._branch),
       )
       if (duplicated) {
         skipped++

@@ -2,44 +2,11 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { select, input, confirm } from '@inquirer/prompts'
 import ora from 'ora'
 import initCmd from './init.js'
-import { loadThemeConfig, setEnvField, captureShopify, buildLinks } from '@shopify-cli-tool/core'
+import { loadThemeConfig, setEnvField, duplicateLiveTheme } from '@shopify-cli-tool/core'
 
 /**
- * 从 shopify -j 的 stdout 里解析 JSON。
- * -j 一般输出纯 JSON；做一点容错：整体解析失败时尝试截取最后一个 [...] / {...} 再解析。
- * @param {string} stdout
- * @returns {any | null}
- */
-function parseJson(stdout) {
-  const text = stdout.trim()
-  if (!text) return null
-  try {
-    return JSON.parse(text)
-  } catch {
-    const matches = text.match(/\[[\s\S]*\]|\{[\s\S]*\}/g)
-    if (matches) {
-      for (let i = matches.length - 1; i >= 0; i--) {
-        try {
-          return JSON.parse(matches[i])
-        } catch {}
-      }
-    }
-    return null
-  }
-}
-
-/**
- * `shop copy` —— 把线上 live 主题复制成新主题（草稿），可选把新 id 回填到配置。
- * 流程：
- *   1. 确保 shopify.theme.toml 存在（没有则先 shop init）
- *   2. 读取并筛出配置了 store 的环境供选择；一个都没有就报错
- *   3. `shop theme list --role live -j -e <env>` → 取 live 主题 id
- *   4. 输入新主题名（必填）
- *   5. `shop theme duplicate --theme <id> --name <name> -e <env> -j` → 取新主题 id
- *   6. 展示主题后台 / 主题编辑链接（参考 shop pre）；询问是否把新 id 回填到对应环境的 theme 字段
- */
-/**
- * 复制指定环境的 live 主题为新草稿主题（核心逻辑，供 shop copy 与 shop add 复用）。
+ * 复制指定环境的 live 主题为新草稿主题（CLI 交互壳，供 shop copy 与 shop add 复用）。
+ * 核心逻辑（shopify 调用）在 core 的 duplicateLiveTheme；这里只负责提问 + 展示。
  * 不做环境选择、不做 theme 回填——由调用方负责。
  * @param {object} ctx 命令上下文（取 log）
  * @param {object} opts
@@ -51,25 +18,7 @@ function parseJson(stdout) {
 export async function copyLiveTheme(ctx, { envName, envConfig, showLinks = true }) {
   const { log } = ctx
 
-  // 拉 live 主题
-  let liveId
-  const listSpinner = ora(`正在获取 ${envName} 的 live 主题 …`).start()
-  const listRes = await captureShopify(['theme', 'list', '--role', 'live', '-j', '-e', envName])
-  if (listRes.code !== 0) {
-    listSpinner.fail(`获取主题列表失败，退出码 ${listRes.code}`)
-    if (listRes.stderr) console.log(listRes.stderr.trim())
-    return null
-  }
-  const list = parseJson(listRes.stdout)
-  const live = Array.isArray(list) ? list.find((t) => t.role === 'live') ?? list[0] : null
-  if (!live || !live.id) {
-    listSpinner.fail('未找到 live 主题')
-    return null
-  }
-  liveId = live.id
-  listSpinner.succeed(`已找到 live 主题：${live.name ?? ''}（${liveId}）`)
-
-  // 输入关键值并拼接主题名：[<env>] <活动> | <负责人> | <YYYYMMDD>
+  // 输入关键值（主题名 = [env] 活动 | 负责人 | YYYYMMDD，日期由 core 拼接）
   let activity, owner
   try {
     activity = await input({
@@ -87,46 +36,30 @@ export async function copyLiveTheme(ctx, { envName, envConfig, showLinks = true 
     }
     throw err
   }
-  const now = new Date()
-  const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
-  const themeName = `[${envName}] ${activity.trim()} | ${owner.trim()} | ${dateStr}`
-  log.info(`主题名：${themeName}`)
 
-  // 复制主题
-  const dupSpinner = ora(`正在复制主题「${themeName}」…`).start()
-  const dupRes = await captureShopify([
-    'theme',
-    'duplicate',
-    '--theme',
-    String(liveId),
-    '--name',
-    themeName,
-    '--force',
-    '-e',
+  // 复制 live 主题（获取 live id + duplicate 都在 core 里完成）
+  const spinner = ora(`正在复制 ${envName} 的 live 主题 …`).start()
+  const res = await duplicateLiveTheme({
+    cwd: process.cwd(),
     envName,
-    '-j',
-  ])
-  if (dupRes.code !== 0) {
-    dupSpinner.fail(`复制主题失败，退出码 ${dupRes.code}`)
-    if (dupRes.stderr) console.log(dupRes.stderr.trim())
+    envConfig,
+    activity,
+    owner,
+  })
+  if (!res.ok) {
+    spinner.fail(`复制主题失败（${res.stage}，退出码 ${res.code}）`)
+    if (res.stderr) console.log(res.stderr.trim())
+    if (res.stdout) console.log(res.stdout.trim())
     return null
   }
-  const dup = parseJson(dupRes.stdout)
-  const newTheme = dup?.theme
-  if (!newTheme || !newTheme.id) {
-    dupSpinner.fail('复制主题失败：未解析到新主题信息')
-    if (dupRes.stdout) console.log(dupRes.stdout.trim())
-    return null
-  }
-  dupSpinner.succeed(`已复制主题：${newTheme.name}（${newTheme.id}）`)
+  spinner.succeed(`已复制主题：${res.name}（${res.id}）`)
 
   if (showLinks) {
-    const { adminLink, editorLink } = buildLinks({ ...envConfig, theme: String(newTheme.id) })
-    log.info(`主题后台：${adminLink}`)
-    log.info(`主题编辑：${editorLink}`)
+    log.info(`主题后台：${res.links.adminLink}`)
+    log.info(`主题编辑：${res.links.editorLink}`)
   }
 
-  return { id: String(newTheme.id), name: newTheme.name }
+  return { id: res.id, name: res.name }
 }
 
 export default {

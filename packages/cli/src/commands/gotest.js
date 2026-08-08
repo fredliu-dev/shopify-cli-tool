@@ -65,7 +65,7 @@ async function promptNewTemplate(log) {
       validate: VALIDATE.nonempty,
     })
     const content = await input({
-      message: '模板内容（{{@person as 姓名}} {{@url as 链接}} {{@title as 标题}} {{@all}}；多行用 \\n）：',
+      message: '模板内容（{{@person as 姓名}} {{@url as 链接}} {{@title as 标题}} {{@content as 备注}} {{@all}}；多行用 \\n）：',
       validate: VALIDATE.nonempty,
     })
     return { id: randomUUID(), name: name.trim(), content: content.replace(/\\n/g, '\n') }
@@ -179,6 +179,7 @@ async function resolvePlaceholders(log, ph, defaults, previewLink, description) 
     ...ph.persons.map((it) => ({ ...it, type: 'person' })),
     ...ph.urls.filter((it) => !(previewLink && it.token === '@url')).map((it) => ({ ...it, type: 'url' })),
     ...ph.titles.filter((it) => !(description && it.token === '@title')).map((it) => ({ ...it, type: 'title' })),
+    ...ph.contents.map((it) => ({ ...it, type: 'content' })),
   ]
   if (!items.length) return { values, inputValues }
 

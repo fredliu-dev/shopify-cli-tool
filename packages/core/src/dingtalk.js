@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createHmac } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import { userDataDir, ensureDataDir } from './paths.js'
 
 const DATA_DIR = userDataDir()
@@ -118,4 +118,81 @@ export async function sendText(text, { webhook, secret }, at = {}) {
     throw new Error(`钉钉返回错误 errcode=${body.errcode}：${body.errmsg ?? '未知错误'}`)
   }
   return body?.errmsg ?? 'ok'
+}
+
+/* ---------------- 单条 CRUD（供桌面端群/模板管理） ---------------- */
+
+/**
+ * 新增或更新一个通知群（无 id=新增，有 id=更新）。
+ * @param {{ id?: string, name: string, webhook: string, secret?: string }} data
+ * @returns {object} 新增/更新后的完整群实体
+ */
+export function upsertDingtalkGroup(data) {
+  const cfg = loadDingtalkConfig()
+  const now = {
+    name: (data.name ?? '').trim(),
+    webhook: (data.webhook ?? '').trim(),
+    secret: (data.secret ?? '').trim(),
+  }
+  if (data.id) {
+    const idx = cfg.groups.findIndex((g) => g.id === data.id)
+    if (idx >= 0) {
+      cfg.groups[idx] = { ...cfg.groups[idx], ...now }
+      saveDingtalkConfig(cfg)
+      return cfg.groups[idx]
+    }
+  }
+  const created = { id: randomUUID(), ...now }
+  cfg.groups.push(created)
+  saveDingtalkConfig(cfg)
+  return created
+}
+
+/**
+ * 按 id 删除一个通知群。
+ * @param {string} id
+ */
+export function removeDingtalkGroup(id) {
+  const cfg = loadDingtalkConfig()
+  cfg.groups = cfg.groups.filter((g) => g.id !== id)
+  saveDingtalkConfig(cfg)
+}
+
+/**
+ * 新增或更新一条消息模板（无 id=新增，有 id=更新）。
+ * 桌面端只编辑 name/content，**务必透传保留模板已有的 defaults**（CLI gotest 占位符默认值），
+ * 避免编辑模板后 defaults 被清空。
+ * @param {{ id?: string, name: string, content: string, defaults?: object }} data
+ * @returns {object} 新增/更新后的完整模板实体
+ */
+export function upsertDingtalkTemplate(data) {
+  const cfg = loadDingtalkConfig()
+  const now = { name: (data.name ?? '').trim(), content: data.content ?? '' }
+  if (data.defaults !== undefined) now.defaults = data.defaults
+  if (data.id) {
+    const idx = cfg.templates.findIndex((t) => t.id === data.id)
+    if (idx >= 0) {
+      const prev = cfg.templates[idx]
+      const merged = { ...prev, ...now }
+      // 本次未提供 defaults 时，保留旧值（不被 undefined 覆盖）
+      if (data.defaults === undefined && prev.defaults !== undefined) merged.defaults = prev.defaults
+      cfg.templates[idx] = merged
+      saveDingtalkConfig(cfg)
+      return cfg.templates[idx]
+    }
+  }
+  const created = { id: randomUUID(), ...now }
+  cfg.templates.push(created)
+  saveDingtalkConfig(cfg)
+  return created
+}
+
+/**
+ * 按 id 删除一条消息模板。
+ * @param {string} id
+ */
+export function removeDingtalkTemplate(id) {
+  const cfg = loadDingtalkConfig()
+  cfg.templates = cfg.templates.filter((t) => t.id !== id)
+  saveDingtalkConfig(cfg)
 }

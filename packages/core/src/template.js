@@ -5,6 +5,7 @@
  *   {{@person as 张三}}     → @ 张三（输入其钉钉手机号；可在模板 defaults 里设默认值）
  *   {{@url as 预览链接}}    → 替换成链接（提测本地项目时自动用项目提测链接）
  *   {{@title as 活动名称}}  → 替换成标题（提测本地项目时自动用项目描述）
+ *   {{@content as 备注}}   → 替换成自由文本（工单号/备注/需求等，提测时手输）
  *   {{@all}}                → @ 所有人
  * 规则：
  *   - 花括号内空格数量任意，不影响匹配：{{ @person1  as  复审 }} 等价于 {{@person1 as 复审}}。
@@ -12,12 +13,12 @@
  *   - 数字后缀区分多个同类：@person / @person1 / @url1 …
  */
 
-const PLACEHOLDER_RE = /\{\{\s*@(person|url|title|all)(\d*)\s*(?:as\s+(.+?))?\s*\}\}/g
+const PLACEHOLDER_RE = /\{\{\s*@(person|url|title|content|all)(\d*)\s*(?:as\s+(.+?))?\s*\}\}/g
 
 /**
  * 收集模板里去重且保序的占位符。
  * @param {string} content
- * @returns {{ persons: {token:string,label:string}[], urls: {token:string,label:string}[], titles: {token:string,label:string}[], hasAll: boolean }}
+ * @returns {{ persons: {token:string,label:string}[], urls: {token:string,label:string}[], titles: {token:string,label:string}[], contents: {token:string,label:string}[], hasAll: boolean }}
  */
 export function parsePlaceholders(content) {
   const push = (arr, token, label) => {
@@ -26,6 +27,7 @@ export function parsePlaceholders(content) {
   const persons = []
   const urls = []
   const titles = []
+  const contents = []
   let hasAll = false
   for (const m of content.matchAll(PLACEHOLDER_RE)) {
     const type = m[1]
@@ -34,9 +36,10 @@ export function parsePlaceholders(content) {
     if (type === 'person') push(persons, token, label)
     else if (type === 'url') push(urls, token, label)
     else if (type === 'title') push(titles, token, label)
+    else if (type === 'content') push(contents, token, label)
     else hasAll = true
   }
-  return { persons, urls, titles, hasAll }
+  return { persons, urls, titles, contents, hasAll }
 }
 
 /**
@@ -55,7 +58,7 @@ export function fillTemplate(content, values) {
       if (phone) atMobiles.push(phone)
       return phone ? `@${phone}` : full
     }
-    if (type === 'url' || type === 'title') {
+    if (type === 'url' || type === 'title' || type === 'content') {
       return (values?.[token] ?? '').trim() || full
     }
     // all

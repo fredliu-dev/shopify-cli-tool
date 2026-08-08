@@ -1,6 +1,6 @@
 {
   "name": "@shopify-cli-tool/core",
-  "version": "1.0.0",
+  "version": "1.0.6",
   "description": "Shopify CLI 工具的共享核心逻辑（headless，无终端依赖，CLI 与桌面应用共用）",
   "type": "module",
   "main": "./src/index.js",

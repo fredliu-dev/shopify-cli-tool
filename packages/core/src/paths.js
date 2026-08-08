@@ -22,3 +22,18 @@ export function ensureDataDir() {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   return dir
 }
+
+/**
+ * 用户自建模板目录（位于数据目录下的 templates/）。
+ * 内置模板随包发布、只读且升级会覆盖；用户在 GUI 新建的模板写到这里，升级/重装不丢。
+ */
+export function userTemplatesDir() {
+  return join(userDataDir(), 'templates')
+}
+
+/** 确保用户模板目录存在并返回其路径。 */
+export function ensureUserTemplatesDir() {
+  const dir = userTemplatesDir()
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}

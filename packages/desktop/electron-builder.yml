@@ -22,10 +22,12 @@ mac:
       arch:
         - arm64
   category: public.app-category.developer-tools
+  icon: build/icon.icns
   # 暂不签名/公证（个人/内部使用）：用户首次打开需右键 → 打开
   # identity: null
 
 win:
+  icon: build/icon.ico
   target:
     - target: nsis # 出 .exe 安装包
       arch:
