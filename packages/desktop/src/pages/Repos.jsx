@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   AppstoreOutlined,
   ArrowRightOutlined,
@@ -51,12 +51,248 @@ const { TextArea } = Input
 const isTemplateJson = (p) => /(^|\/)templates?\//i.test(p) && /\.json$/i.test(p)
 const templatesOf = (repo) => (repo?.changedFiles || []).filter(isTemplateJson)
 
-// 卡片网格：自适应列宽，不再独占整行
-const GRID = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fill, minmax(440px, 1fr))',
-  gap: 12,
-  alignItems: 'start',
+// 按自定义顺序（path 数组）重排仓库列表：order 里出现的按其顺序优先，未出现的保持原相对顺序追加在后。
+// sort 稳定（ES2019+），故两个都不在 order 中的项维持原序。
+function orderByPaths(list, paths) {
+  if (!paths?.length) return list
+  const idx = new Map(paths.map((p, i) => [p, i]))
+  return [...list].sort((a, b) => {
+    const ia = idx.get(a.path)
+    const ib = idx.get(b.path)
+    if (ia != null && ib != null) return ia - ib
+    if (ia != null) return -1
+    if (ib != null) return 1
+    return 0
+  })
+}
+
+// 行序瀑布流（Masonry）：卡片按文档顺序从左到右排，每 N 张换行（N=列数），第 i 张落在第 (i % N) 列；
+// 同列卡片紧贴上一张（top = 该列已堆叠高度），列与列高度独立 → 卡片高度不一时也无垂直间隙。
+// 解决两个纯 CSS 方案都做不到的事：grid 的 auto-fill/minmax 会把同行卡片拉到同一行高、矮卡下方留白；
+// CSS columns 则是「列序」排布（先填满一列再下一列），不是用户要的「行序换行」。
+// 实现：首帧以 grid 渲染（item 宽度=列宽、测量准确、不闪烁），useLayoutEffect 内测高、算位、切 absolute。
+function Masonry({ minColWidth = 440, gap = 12, draggable = false, onReorder, children }) {
+  const containerRef = useRef(null)
+  const itemRefs = useRef([])
+  const items = React.Children.toArray(children)
+  const ids = items.map((c, i) => c.key ?? i)
+  const keySig = ids.join('\n') // 父传入顺序变化（重排）时 key 顺序变 → 触发 order 重置
+
+  const [layout, setLayout] = useState(null) // null=首帧 grid 测量；否则 { positions, heights, colWidth, height }
+  const [animated, setAnimated] = useState(false)
+  useEffect(() => {
+    // 首次定位完成后再启用过渡：否则卡片会从原点 (0,0) 一路弹到目标位置。双 rAF 确保首帧已绘制。
+    const id = requestAnimationFrame(() => requestAnimationFrame(() => setAnimated(true)))
+    return () => cancelAnimationFrame(id)
+  }, [])
+
+  // order：显示顺序（itemIndex 的排列）。初始自然序；父重排后（keySig 变）重置回自然序。
+  const [order, setOrder] = useState(() => items.map((_, i) => i))
+  const orderRef = useRef(order)
+  orderRef.current = order
+  useEffect(() => {
+    setOrder(items.map((_, i) => i))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keySig])
+
+  // 拖拽：pending（未超阈值）用 ref；正式 drag 用 state（驱动被拖卡跟手渲染）。
+  const pendingRef = useRef(null)
+  const [drag, setDrag] = useState(null) // { itemIndex, pointerId, offX, offY, curLeft, curTop }
+
+  const measure = useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    const w = el.clientWidth
+    const cols = Math.max(1, Math.floor((w + gap) / (minColWidth + gap)))
+    const colWidth = (w - gap * (cols - 1)) / cols
+    const colHeights = new Array(cols).fill(0)
+    const positions = {}
+    const heights = {}
+    orderRef.current.forEach((itemIndex, visIdx) => {
+      const col = visIdx % cols
+      const top = colHeights[col]
+      positions[itemIndex] = { top, left: col * (colWidth + gap), width: colWidth }
+      const node = itemRefs.current[itemIndex]
+      const h = node ? node.offsetHeight : 0
+      heights[itemIndex] = h
+      colHeights[col] = top + h + gap
+    })
+    setLayout({ positions, heights, colWidth, height: Math.max(0, Math.max(...colHeights) - gap) })
+  }, [minColWidth, gap])
+
+  // 容器宽度变化（缩窗、侧栏开合）→ 列数变化 → 重算
+  useLayoutEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    measure()
+    return () => ro.disconnect()
+  }, [measure])
+
+  // 任一卡片高度变化（项目面板展开/折叠、内容更新）→ 重排后续所有卡片
+  useLayoutEffect(() => {
+    const ro = new ResizeObserver(measure)
+    itemRefs.current.forEach((n) => n && ro.observe(n))
+    return () => ro.disconnect()
+  }, [items.length, measure])
+
+  // 显示顺序变化（拖拽让位）→ 按新 order 重算坐标
+  useEffect(() => {
+    measure()
+  }, [order, measure])
+
+  // ---- 拖拽排序（draggable 时启用）----
+  const onPointerDown = (itemIndex) => (e) => {
+    if (!draggable || e.button !== 0) return
+    const p = layout?.positions?.[itemIndex]
+    if (!p) return
+    // 立即俘获指针：保证后续 move/up 不因鼠标移出卡片而丢失；未超阈值则 up 时释放、按普通点击处理
+    itemRefs.current[itemIndex]?.setPointerCapture?.(e.pointerId)
+    const rect = containerRef.current.getBoundingClientRect()
+    pendingRef.current = {
+      itemIndex,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      offX: e.clientX - rect.left - p.left, // 鼠标相对卡片左上角偏移，让卡片精确跟手
+      offY: e.clientY - rect.top - p.top,
+      cardLeft: p.left,
+      cardTop: p.top,
+    }
+  }
+
+  const onPointerMove = (e) => {
+    const pend = pendingRef.current
+    if (pend) {
+      // 5px 阈值：移动够多才正式进入拖拽，避免点按钮/下拉时误触
+      const dx = e.clientX - pend.startX
+      const dy = e.clientY - pend.startY
+      if (dx * dx + dy * dy < 25) return
+      pendingRef.current = null
+      setDrag({ itemIndex: pend.itemIndex, pointerId: pend.pointerId, offX: pend.offX, offY: pend.offY, curLeft: pend.cardLeft, curTop: pend.cardTop })
+      return
+    }
+    if (!drag) return
+    const rect = containerRef.current.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+    setDrag((d) => (d ? { ...d, curLeft: mx - d.offX, curTop: my - d.offY } : d))
+    // 让位：找鼠标最近的其它卡片，把被拖卡移到其前/后 → 其余卡片借 transition Q弹顺延
+    const hover = findHover(mx, my)
+    if (hover) reorderTo(hover)
+  }
+
+  // 找鼠标最近的非被拖卡片；before 表示鼠标在其上半 → 插它前面
+  const findHover = (mx, my) => {
+    if (!layout) return null
+    const { positions, heights, colWidth } = layout
+    let best = null
+    let bestDist = Infinity
+    order.forEach((itemIndex, visIdx) => {
+      if (drag && itemIndex === drag.itemIndex) return
+      const p = positions[itemIndex]
+      if (!p) return
+      const h = heights[itemIndex] || 0
+      const cx = p.left + colWidth / 2
+      const cy = p.top + h / 2
+      const d = Math.abs(my - cy) + Math.abs(mx - cx) * 0.6 // y 权重更高（纵向排列为主）
+      if (d < bestDist) {
+        bestDist = d
+        best = { visIdx, before: my < cy }
+      }
+    })
+    return best
+  }
+
+  // 把被拖卡 D 移到「鼠标最近卡片 R」的前/后；无变化时返回原引用避免无效重渲
+  const reorderTo = ({ visIdx, before }) => {
+    const D = drag?.itemIndex
+    if (D == null) return
+    setOrder((prev) => {
+      const R = prev[visIdx]
+      const next = prev.filter((i) => i !== D)
+      const target = next.indexOf(R) + (before ? 0 : 1)
+      next.splice(target, 0, D)
+      return next.join() === prev.join() ? prev : next
+    })
+  }
+
+  const onPointerUp = () => {
+    const pend = pendingRef.current
+    if (pend) {
+      // 未启动拖拽：释放俘获、当作普通点击（按钮 click 不受影响）
+      itemRefs.current[pend.itemIndex]?.releasePointerCapture?.(pend.pointerId)
+      pendingRef.current = null
+      return
+    }
+    if (!drag) return
+    itemRefs.current[drag.itemIndex]?.releasePointerCapture?.(drag.pointerId)
+    const newOrder = order.slice()
+    setDrag(null)
+    onReorder?.(newOrder.map((i) => ids[i])) // 提交新的 key 顺序，由父重排数据
+  }
+
+  if (!layout) {
+    // 首帧：grid 撑出列宽，item 自然高度可准确测量；paint 前即被切到 absolute，用户看不到这一帧
+    return (
+      <div
+        ref={containerRef}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: `repeat(auto-fill, minmax(${minColWidth}px, 1fr))`,
+          gap,
+          alignItems: 'start',
+        }}
+      >
+        {items.map((child, i) => (
+          <div key={ids[i]} ref={(n) => { itemRefs.current[i] = n }}>
+            {child}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      style={{ position: 'relative', height: layout.height }}
+      onPointerMove={draggable ? onPointerMove : undefined}
+      onPointerUp={draggable ? onPointerUp : undefined}
+      onPointerCancel={draggable ? onPointerUp : undefined}
+    >
+      {items.map((child, i) => {
+        const p = layout.positions[i] || { top: 0, left: 0, width: '100%' }
+        const isDrag = drag?.itemIndex === i
+        return (
+          <div
+            key={ids[i]}
+            ref={(n) => { itemRefs.current[i] = n }}
+            onPointerDown={draggable ? onPointerDown(i) : undefined}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: p.width,
+              // transform 走 GPU 合成层（不触发重排）→ 60fps；被拖卡即时跟手故无过渡
+              transform: isDrag
+                ? `translate3d(${drag.curLeft}px, ${drag.curTop}px, 0) scale(1.03)`
+                : `translate3d(${p.left}px, ${p.top}px, 0)`,
+              transition: isDrag ? 'none' : animated ? 'transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)' : 'none',
+              zIndex: isDrag ? 10 : undefined,
+              opacity: isDrag ? 0.92 : undefined,
+              boxShadow: isDrag ? '0 14px 36px rgba(0,0,0,0.55)' : undefined,
+              cursor: isDrag ? 'grabbing' : draggable ? 'grab' : undefined,
+              touchAction: 'none', // pointer 拖拽时禁止触屏滚动/手势干扰
+            }}
+          >
+            {child}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 // 区块小标题：左侧色点 + 加粗小字，作为视觉锚点（区别于普通辅助文案）
@@ -79,6 +315,15 @@ const GLASS = {
   WebkitBackdropFilter: 'blur(24px) saturate(180%)',
   border: '1px solid rgba(255,255,255,0.1)',
   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)',
+}
+
+// hover 玻璃亮光：提亮底色与描边、增强顶部内高光、加柔光投影 → 玻璃被光打到、悬浮起来的感觉。
+// 配合 Card 上的 translateY(-3px) 轻微上浮与 0.25s 过渡，鼠标移上时整张卡「亮起来、浮起来」。
+const HOVER_GLASS = {
+  background: 'rgba(255,255,255,0.1)',
+  border: '1px solid rgba(255,255,255,0.24)',
+  boxShadow:
+    'inset 0 1px 0 rgba(255,255,255,0.22), inset 0 -1px 0 rgba(255,255,255,0.05), 0 14px 34px rgba(0,0,0,0.42)',
 }
 
 /* ---------------- 初始化 Modal（shop init 可视化，针对某仓库目录） ---------------- */
@@ -1958,6 +2203,7 @@ function GitFlowSteps({ repo, project, onAction }) {
 /* ---------------- 仓库卡片（已配对项目则内嵌项目面板，圈在一起） ---------------- */
 function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts }) {
   const matched = !!repo.matched
+  const [hovered, setHovered] = useState(false) // 玻璃亮光 hover 态（仅本卡重渲，不影响其它卡片）
 
   // 下拉展开时实时获取分支（不缓存）：每次 reload 直连 listAllBranches，其 local/remote 均已
   // 去重；不再用仓库列表里那份可能过时/带重复的 repo.branches 缓存来渲染下拉。
@@ -1997,7 +2243,15 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
   return (
     <Card
       size="small"
-      style={{ ...GLASS, borderRadius: 16 }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        ...GLASS,
+        ...(hovered ? HOVER_GLASS : {}), // hover 时提亮底色/描边/高光，覆盖 GLASS 同名属性
+        borderRadius: 16,
+        transition: 'background .25s ease, border-color .25s ease, box-shadow .25s ease, transform .25s ease',
+        transform: hovered ? 'translateY(-3px)' : undefined,
+      }}
       title={
         <Space size={6} style={{ alignItems: 'baseline' }}>
           <Text strong>{repo.name}</Text>
@@ -2379,6 +2633,7 @@ export default function Repos() {
   const { message } = App.useApp()
   const [workspaceDir, setWorkspaceDir] = useState('')
   const [repos, setRepos] = useState([])
+  const [repoOrder, setRepoOrder] = useState([]) // 用户拖拽自定义的仓库顺序（path 数组），持久化于 settings.repoOrder
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
@@ -2415,7 +2670,11 @@ export default function Repos() {
       const res = await window.api.repos.scan(dir)
       setScanning(false)
       if (res.ok) {
-        setRepos(res.data || [])
+        // 读自定义顺序并据此重排（重启/重扫后仍按用户上次拖拽的顺序展示）
+        const s = await window.api.settings.get()
+        const order = s?.repoOrder || []
+        setRepoOrder(order)
+        setRepos(orderByPaths(res.data || [], order))
         // 同步刷新「创建项目」可选模板（带 _github 且未在工作区存在的）
         window.api.repos.cloneableTemplates(dir).then((r) => {
           if (r.ok) setCloneable(r.data || [])
@@ -2427,6 +2686,13 @@ export default function Repos() {
     },
     [message],
   )
+
+  // 拖拽排序回调：即时重排 repos 并持久化到 settings.repoOrder（重启/重扫后仍保留）
+  const handleReorder = useCallback((newPaths) => {
+    setRepoOrder(newPaths)
+    setRepos((prev) => orderByPaths(prev, newPaths))
+    window.api.settings.set({ repoOrder: newPaths })
+  }, [])
 
   const refreshProjects = useCallback(async () => {
     const res = await window.api.shops.ls()
@@ -2464,11 +2730,11 @@ export default function Repos() {
   // 工作区目录监听：仓库新增/删除后主进程推送完整新列表，整体替换
   useEffect(() => {
     const off = window.api.repos.onReposChanged(({ data }) => {
-      if (Array.isArray(data)) setRepos(data)
+      if (Array.isArray(data)) setRepos(orderByPaths(data, repoOrder))
       refreshCloneable()
     })
     return () => off?.()
-  }, [refreshCloneable])
+  }, [refreshCloneable, repoOrder])
 
   const pickAndScan = async () => {
     const res = await window.api.dialog.pickDir()
@@ -2751,7 +3017,7 @@ export default function Repos() {
       ) : repos.length === 0 ? (
         <Empty description="该工作区下未发现 Git 仓库" style={{ marginBottom: 24 }} />
       ) : (
-        <div style={GRID}>
+        <Masonry minColWidth={440} gap={12} draggable onReorder={handleReorder}>
           {repos.map((r) => (
             <RepoCard
               key={r.path}
@@ -2762,7 +3028,7 @@ export default function Repos() {
               onProjectAction={projectAction}
             />
           ))}
-        </div>
+        </Masonry>
       )}
 
       {/* 初始化 / 本地保存 弹窗 */}

@@ -29,4 +29,14 @@ export function registerSettingsIpc() {
       return { ok: false, error: err.message }
     }
   })
+
+  // 通用偏好写入（浅合并）：供渲染层持久化任意设置项，如仓库卡片的自定义排序 repoOrder
+  ipcMain.handle('settings:set', async (_evt, patch) => {
+    const { saveSettings } = await load()
+    try {
+      return { ok: true, data: saveSettings(patch || {}) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
 }

@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld('api', {
   },
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
+    set: (patch) => ipcRenderer.invoke('settings:set', patch),
     setWorkspace: (dir) => ipcRenderer.invoke('settings:setWorkspace', dir),
     setEditor: (editorId) => ipcRenderer.invoke('settings:setEditor', editorId),
   },
