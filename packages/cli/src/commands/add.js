@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs'
-import { input, checkbox, confirm } from '@inquirer/prompts'
+import { input, checkbox, confirm, list } from '@inquirer/prompts'
 import initCmd from './init.js'
 import { copyLiveTheme } from './copy.js'
-import { loadThemeConfig, setEnvField, storeToTemplate, loadProjects, saveProjects, listBranches } from '@shopify-cli-tool/core'
+import { loadThemeConfig, setEnvField, storeToTemplate, listTemplates, loadProjects, saveProjects, listBranches } from '@shopify-cli-tool/core'
 
 // 需要齐全的字段（store 作为环境身份，是前置门槛；其余缺了就补填）
 const REQUIRED_FIELDS = [
@@ -20,7 +20,7 @@ const REQUIRED_FIELDS = [
  *   2. 取所有带 store 的环境；逐个补填缺失字段，并写回配置文件
  *      （theme 缺失时询问是否复制线上 live 主题，是则复制并回填新 id）
  *   3. 多选要保存的环境（此时都已补全）
- *   4. 按 store 匹配模板，构建项目并 upsert 到 projects.json（五要素全同视为已存在）
+ *   4. 按 store 匹配模板（反查不到则让用户选），构建项目并新增到 projects.json（六要素全同视为已存在）
  */
 export default {
   name: 'add',
@@ -134,14 +134,31 @@ export default {
       return
     }
 
-    // ⑤ 按 store 匹配模板，构建并新增（五要素全同视为已存在 → 跳过；否则追加为新项目）
+    // ⑤ 按 store 匹配模板（反查不到则让用户选），构建并新增（六要素全同视为已存在 → 跳过；否则追加为新项目）
     const projects = loadProjects()
     let added = 0
     let skipped = 0
-    selected.forEach((sel, i) => {
-      const templateName = storeToTemplate(sel.env.store)
+    for (let i = 0; i < selected.length; i++) {
+      const sel = selected[i]
+      let templateName = storeToTemplate(sel.env.store)
       if (!templateName) {
-        log.warn(`[${sel.name}] store "${sel.env.store}" 未匹配到任何模板`)
+        const tpls = listTemplates().filter((t) => t.name !== 'empty')
+        if (tpls.length) {
+          try {
+            templateName = await list({
+              message: `[${sel.name}] store "${sel.env.store}" 未匹配到模板，请选择：`,
+              choices: tpls.map((t) => ({ name: t.name, value: t.name })),
+            })
+          } catch (err) {
+            if (err?.name === 'ExitPromptError') {
+              log.info('已取消')
+              return
+            }
+            throw err
+          }
+        } else {
+          log.warn(`[${sel.name}] store "${sel.env.store}" 未匹配到模板，且无可用模板，templateName 留空`)
+        }
       }
       const proj = {
         id: (Date.now() + i).toString(),
@@ -150,12 +167,12 @@ export default {
         store: sel.env.store,
         domain: sel.env.domain,
         theme: String(sel.env.theme),
-        previewKey: String(sel.env.preview_key),
+        previewKey: String(sel.env.preview_key ?? ''),
         port: String(sel.env.port),
         description: sel.env.project_desc,
         _branch: currentBranch || null,
       }
-      // 六要素全相同视为已存在：project_desc / domain / theme / store / preview_key / _branch
+      // 六要素全相同视为已存在：store / domain / theme / preview_key / project_desc / _branch
       // （历史项目无 _branch 视为通配，避免升级后已存项目全部失配）
       const duplicated = projects.find(
         (p) =>
@@ -169,11 +186,11 @@ export default {
       if (duplicated) {
         skipped++
         log.warn(`[${sel.name}] 项目已存在（store=${sel.env.store}），跳过保存`)
-        return
+        continue
       }
       projects.push(proj)
       added++
-    })
+    }
     saveProjects(projects)
     log.success(`已新增 ${added} 个项目${skipped > 0 ? `（跳过 ${skipped} 个已存在）` : ''}`)
   },

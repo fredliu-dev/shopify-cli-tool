@@ -47,6 +47,8 @@ contextBridge.exposeInMainWorld('api', {
     merge: (opts) => ipcRenderer.invoke('repos:merge', opts),
     cloneableTemplates: (workspaceDir) => ipcRenderer.invoke('repos:cloneableTemplates', workspaceDir),
     clone: (opts) => ipcRenderer.invoke('repos:clone', opts),
+    templates: () => ipcRenderer.invoke('repos:templates'),
+    resolveTemplate: (store) => ipcRenderer.invoke('repos:resolveTemplate', store),
     // 仓库文件（配置/templates）变动后，主进程推送的最新仓库数据
     // 返回真正的注销函数（ipcRenderer.on 返回的是 ipcRenderer 对象本身，非函数；
     // 渲染层清理时直接调用返回值会抛 "off is not a function"，故包成 removeListener）

@@ -59,6 +59,28 @@ const GRID = {
   alignItems: 'start',
 }
 
+// 区块小标题：左侧色点 + 加粗小字，作为视觉锚点（区别于普通辅助文案）
+function SectionLabel({ color = '#1677ff', children }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+      <span style={{ width: 6, height: 6, borderRadius: 3, background: color, flexShrink: 0 }} />
+      <Text strong style={{ fontSize: 12 }}>
+        {children}
+      </Text>
+    </div>
+  )
+}
+
+// 毛玻璃卡片（iOS 风格）：半透明背景 + 背景模糊 + 高光描边；
+// 需配合 App.jsx Content 的彩色光晕背景，blur 才能透出色彩。
+const GLASS = {
+  background: 'rgba(255,255,255,0.055)',
+  backdropFilter: 'blur(24px) saturate(180%)',
+  WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+  border: '1px solid rgba(255,255,255,0.1)',
+  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)',
+}
+
 /* ---------------- 初始化 Modal（shop init 可视化，针对某仓库目录） ---------------- */
 function InitRepoModal({ open, repo, onClose, onDone }) {
   const { message } = App.useApp()
@@ -127,6 +149,9 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [copyOpen, setCopyOpen] = useState(false)
+  // store 反查模板：undefined=加载中，null=反查不到需手选，字符串=已确定（直接用反查值）
+  const [resolvedTpl, setResolvedTpl] = useState(undefined)
+  const [tplOptions, setTplOptions] = useState([])
   const [copyForm] = Form.useForm()
   const [copyLoading, setCopyLoading] = useState(false)
 
@@ -145,6 +170,19 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repo])
+
+  // 打开时按 store 反查模板：查到则自动用（不显示选择），查不到则拉模板列表让用户选
+  useEffect(() => {
+    if (!open || !dev.store) return
+    setResolvedTpl(undefined)
+    Promise.all([window.api.repos.resolveTemplate(dev.store), window.api.repos.templates()]).then(
+      ([r1, r2]) => {
+        setResolvedTpl(r1.ok ? r1.data : null)
+        setTplOptions(r2.ok ? r2.data : [])
+      },
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, dev.store])
 
   const doCopyLive = async (vals) => {
     setCopyLoading(true)
@@ -200,6 +238,7 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
         preview_key: vals.preview_key,
         project_desc: vals.project_desc,
       },
+      templateName: resolvedTpl || vals.template || null,
     })
     setLoading(false)
     if (res.ok) {
@@ -219,6 +258,15 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
         <Form.Item label="domain（取自配置，不可改）">
           <Input value={dev.domain || ''} disabled />
         </Form.Item>
+        {resolvedTpl === null && (
+          <Form.Item
+            name="template"
+            label="模板（store 未匹配到模板，请选择）"
+            rules={[{ required: true, message: '请选择模板' }]}
+          >
+            <Select options={tplOptions.map((t) => ({ label: t, value: t }))} placeholder="选择模板" />
+          </Form.Item>
+        )}
         <Form.Item name="port" label="port" rules={[{ required: true, message: '请输入 port' }, { pattern: /^\d+$/, message: '需为数字' }]}>
           <Input />
         </Form.Item>
@@ -1774,7 +1822,7 @@ function GitFlowSteps({ repo, project, onAction }) {
   // 第三阶段：创建 release + 合并（两个按钮置于卡内 footer；创建 release 用绿色描边作主操作）
   const releaseFooter = (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
-      <Button size="small" style={{ borderColor: '#52c41a', color: '#73d13d', background: 'rgba(82,196,26,0.16)' }} onClick={() => onAction('release', repo)}>
+      <Button size="small" style={{ borderColor: 'rgba(82,196,26,0.45)', color: '#95de64', background: 'rgba(82,196,26,0.1)' }} onClick={() => onAction('release', repo)}>
         创建 release
       </Button>
       <Tooltip title={!hasBranch ? '请先在 [environments.dev] 补 _branch' : '把 _branch 合并进 release'}>
@@ -1813,7 +1861,7 @@ function GitFlowSteps({ repo, project, onAction }) {
 }
 
 /* ---------------- 仓库卡片（已配对项目则内嵌项目面板，圈在一起） ---------------- */
-function RepoCard({ repo, project, onAction, onProjectAction, branchProjectCounts }) {
+function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts }) {
   const matched = !!repo.matched
 
   // 下拉展开时实时获取分支（不缓存）：每次 reload 直连 listAllBranches，其 local/remote 均已
@@ -1854,12 +1902,11 @@ function RepoCard({ repo, project, onAction, onProjectAction, branchProjectCount
   return (
     <Card
       size="small"
+      style={{ ...GLASS, borderRadius: 16 }}
       title={
         <Space size={6} style={{ alignItems: 'baseline' }}>
           <Text strong>{repo.name}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {repo.branchCount} 分支
-          </Text>
+          <Text style={{ fontSize: 12, color: '#69b1ff' }}>{repo.branchCount} 分支</Text>
         </Space>
       }
       extra={
@@ -1925,9 +1972,7 @@ function RepoCard({ repo, project, onAction, onProjectAction, branchProjectCount
 
       {/* 配置操作 */}
       <div style={{ marginBottom: 14 }}>
-        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-          配置操作
-        </Text>
+        <SectionLabel color="#1677ff">配置操作</SectionLabel>
         <Space wrap size={[6, 6]}>
           {!repo.hasToml ? (
             <Button size="small" type="primary" onClick={() => onAction('init', repo)}>
@@ -1950,14 +1995,14 @@ function RepoCard({ repo, project, onAction, onProjectAction, branchProjectCount
 
       {/* Git 流程：开发→拉分支 / 开发完→提测 / 提测完→release 创建+合并 */}
       <div>
-        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-          Git 流程
-        </Text>
-        <GitFlowSteps repo={repo} project={project} onAction={onAction} />
+        <SectionLabel color="#52c41a">Git 流程</SectionLabel>
+        <GitFlowSteps repo={repo} project={repo.matched} onAction={onAction} />
       </div>
 
-      {/* 关联的本地项目：内嵌圈起来 */}
-      {project && <ProjectPanel project={project} onAction={onProjectAction} embedded />}
+      {/* 关联的本地项目：同 store 的多条都内嵌展示 */}
+      {projects.map((p) => (
+        <ProjectPanel key={p.id} project={p} onAction={onProjectAction} embedded />
+      ))}
     </Card>
   )
 }
@@ -2119,8 +2164,8 @@ function ProjectPanel({ project, onAction, embedded }) {
   }
 
   const wrapperStyle = embedded
-    ? { marginTop: 12, padding: 12, borderRadius: 8, background: 'rgba(22,119,255,0.10)', border: '1px dashed rgba(22,119,255,0.45)' }
-    : { padding: 16, borderRadius: 10, background: '#1f1f1f', border: '1px solid #303030' }
+    ? { marginTop: 12, padding: 12, borderRadius: 12, background: 'rgba(22,119,255,0.08)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '1px solid rgba(22,119,255,0.25)' }
+    : { padding: 16, borderRadius: 14, ...GLASS }
 
   const title = project.description || project.templateName || project.store || '-'
 
@@ -2443,33 +2488,41 @@ export default function Repos() {
     if (repoPath) execRun(repoPath, files)
   }
 
-  // 本地项目 ↔ 仓库关联（按命中项目的 id 反查仓库，拿到 repoPath 与 changedFiles）
-  const repoByProjectId = useMemo(() => {
+  // 本地项目 ↔ 仓库关联（按 store：同 store 的所有本地项目都归属到 dev.store 一致的仓库，
+  // 实现 1:N —— 一个仓库卡展示同 store 的多条项目，而非只展示 matched 那一条）
+  const repoByStore = useMemo(() => {
     const m = new Map()
     repos.forEach((r) => {
-      if (r.matched?.id) m.set(r.matched.id, r)
+      if (r.devEnv?.store) m.set(r.devEnv.store, r)
     })
     return m
   }, [repos])
 
-  // 每个 project 注入关联仓库路径 + 改动模板
+  // 每个 project 注入关联仓库路径 + 改动模板（按 store 关联）
   const enrichedProjects = useMemo(
     () =>
       projects.map((p) => {
-        const r = repoByProjectId.get(p.id)
+        const r = repoByStore.get(p.store)
         return { ...p, repoPath: r?.path, changedTemplates: templatesOf(r) }
       }),
-    [projects, repoByProjectId],
+    [projects, repoByStore],
   )
 
-  // 仓库路径 → 关联项目（用于仓库卡内嵌项目面板）
-  const projectByRepoPath = useMemo(() => {
+  // 仓库路径 → 关联项目列表（1:N：同 store 且与仓库当前分支一致的项目才展示）。
+  // 跟随分支：切到某分支只看该分支保存的项目；历史项目无 _branch 不归属具体分支、不展示。
+  const projectsByRepoPath = useMemo(() => {
     const m = new Map()
+    const branchByPath = new Map()
+    repos.forEach((r) => branchByPath.set(r.path, r.currentBranch))
     enrichedProjects.forEach((p) => {
-      if (p.repoPath) m.set(p.repoPath, p)
+      if (!p.repoPath) return
+      const branch = branchByPath.get(p.repoPath)
+      if (branch && p._branch !== branch) return
+      if (!m.has(p.repoPath)) m.set(p.repoPath, [])
+      m.get(p.repoPath).push(p)
     })
     return m
-  }, [enrichedProjects])
+  }, [enrichedProjects, repos])
 
   // 各 store 下、每个分支绑定的本地项目数：项目身份 = store + _branch（见 core/shops.js），
   // 故按 store 归属仓库、按 _branch 归属分支；切分支下拉框据此标识"该分支有几个本地项目"。
@@ -2495,7 +2548,7 @@ export default function Repos() {
   if (!workspaceDir) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
-        <Card style={{ textAlign: 'center', padding: '24px 48px' }}>
+        <Card style={{ textAlign: 'center', padding: '24px 48px', ...GLASS, borderRadius: 16 }}>
           <Title level={4} style={{ marginBottom: 8 }}>
             选择工作区文件夹
           </Title>
@@ -2522,35 +2575,37 @@ export default function Repos() {
           justifyContent: 'space-between',
           gap: 16,
           marginBottom: 16,
-          padding: '10px 16px',
-          background: '#1f1f1f',
-          borderRadius: 10,
-          border: '1px solid #303030',
+          padding: '12px 20px',
+          ...GLASS,
+          borderRadius: 14,
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 2px 8px rgba(0,0,0,0.3)',
         }}
       >
-        <Space size={8} style={{ minWidth: 0, cursor: 'pointer' }} onClick={pickAndScan}>
-          <FolderOpenOutlined style={{ color: '#1677ff', fontSize: 16 }} />
-          <Text strong ellipsis={{ tooltip: workspaceDir }} style={{ maxWidth: 320 }}>
-            {workspaceDir}
-          </Text>
-          <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-            · 切换
-          </Text>
-        </Space>
+        <div onClick={pickAndScan} style={{ minWidth: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <FolderOpenOutlined style={{ color: '#1677ff', fontSize: 18, flexShrink: 0 }} />
+          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: 1 }}>
+            <Text type="secondary" style={{ fontSize: 11, letterSpacing: '0.04em' }}>
+              工作区
+            </Text>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
+              <Text strong ellipsis={{ tooltip: workspaceDir }} style={{ maxWidth: 340, minWidth: 0 }}>
+                {workspaceDir}
+              </Text>
+              <Text style={{ fontSize: 12, color: '#69b1ff', flexShrink: 0 }}>{repos.length} 个仓库</Text>
+            </div>
+          </div>
+        </div>
         <Space size={8} style={{ flexShrink: 0 }}>
-          <Button icon={<ReloadOutlined />} onClick={() => scan(workspaceDir)} loading={scanning}>
+          <Button variant="outlined" icon={<ReloadOutlined />} onClick={() => scan(workspaceDir)} loading={scanning}>
             重新扫描
           </Button>
           <Tooltip title={cloneable.some((t) => !t.exists) ? `可克隆：${cloneable.filter((t) => !t.exists).map((t) => t.name).join('、')}` : '所有模板项目都已存在于工作区'}>
             <span>
-              <Button icon={<PlusOutlined />} disabled={!cloneable.some((t) => !t.exists)} onClick={() => setCreateProjectOpen(true)}>
+              <Button type="primary" icon={<PlusOutlined />} disabled={!cloneable.some((t) => !t.exists)} onClick={() => setCreateProjectOpen(true)}>
                 创建项目
               </Button>
             </span>
           </Tooltip>
-          <Button icon={<DownloadOutlined />} onClick={exportConfig}>
-            导出配置
-          </Button>
           <Dropdown
             placement="bottomRight"
             menu={{
@@ -2560,6 +2615,7 @@ export default function Repos() {
                 { key: 'groups', icon: <MessageOutlined />, label: '通知群管理' },
                 { key: 'dingtalkTemplates', icon: <FileTextOutlined />, label: '信息模板管理' },
                 { key: 'localConfig', icon: <FolderOpenOutlined />, label: '本地配置' },
+                { key: 'exportConfig', icon: <DownloadOutlined />, label: '导出配置' },
                 { type: 'divider' },
                 {
                   key: 'settings',
@@ -2574,12 +2630,13 @@ export default function Repos() {
                 else if (key === 'groups') setGroupsOpen(true)
                 else if (key === 'dingtalkTemplates') setTemplatesOpen(true)
                 else if (key === 'localConfig') openLocalConfig()
+                else if (key === 'exportConfig') exportConfig()
                 else if (key === 'settings') setSettingsOpen(true)
                 else if (key === 'about') setAboutOpen(true)
               },
             }}
           >
-            <Button icon={<MoreOutlined />}>更多</Button>
+            <Button variant="outlined" icon={<MoreOutlined />}>更多</Button>
           </Dropdown>
         </Space>
       </div>
@@ -2588,7 +2645,7 @@ export default function Repos() {
         <Title level={5} style={{ margin: 0 }}>
           Git 仓库（{repos.length}）
         </Title>
-        <Text type="secondary" style={{ fontSize: 12 }}>
+        <Text type="secondary" style={{ fontSize: 11 }}>
           已配对本地项目的仓库，项目会内嵌在同一张卡里
         </Text>
       </div>
@@ -2604,7 +2661,7 @@ export default function Repos() {
             <RepoCard
               key={r.path}
               repo={r}
-              project={projectByRepoPath.get(r.path)}
+              projects={projectsByRepoPath.get(r.path) || []}
               branchProjectCounts={branchProjectCountsByStore.get(r.devEnv?.store) || {}}
               onAction={repoAction}
               onProjectAction={projectAction}

@@ -84,18 +84,23 @@ export function getDevLinks({ startDir, envName = 'dev', args } = {}) {
 }
 
 /**
- * 项目身份判定：store + _branch。
- * store 是环境身份；_branch 区分分支级项目（同一 store 不同分支视为不同项目）。
- * domain/theme/preview_key/project_desc 都是可编辑属性，不参与身份判定——否则用户在
- * 「本地保存」里把这些字段留空或改值后，项目就无法再与仓库关联（保存的项目与 toml 现值不一致即失配）。
+ * 项目身份判定：与 CLI `shop add` 一致的六要素——store + domain + theme + preview_key + project_desc + _branch。
+ * 任一可编辑属性（domain/theme/preview_key/project_desc）变化即视为新项目，使 CLI 与桌面端行为统一：
+ * previewKey 改了之后两边都会新增项目（而非 UI 仍命中旧项目导致保存按钮不可点 / 孤儿项目不可见）。
+ * 字段名映射：project 用 previewKey/description，env(toml) 用 preview_key/project_desc；
+ * theme、preview_key 比对前规范化（String + ?? ''），避免数字/undefined 造成误判。
  * 历史项目未记录 _branch（null/undefined）时视为通配，避免升级后已存项目全部失配。
  * @param {object} p 已存项目
- * @param {object} env toml 环境对象（只需 store）
+ * @param {object} env toml 环境对象
  * @param {string} [branch] 当前 git 分支（由调用方从 git 取得传入）
  * @returns {boolean}
  */
 function isSameProject(p, env, branch) {
   if (p.store !== env.store) return false
+  if (p.domain !== env.domain) return false
+  if (String(p.theme) !== String(env.theme)) return false
+  if (String(p.previewKey ?? '') !== String(env.preview_key ?? '')) return false
+  if (p.description !== env.project_desc) return false
   // 新项目必须与当前分支一致；历史项目无 _branch 视为通配
   if (p._branch == null) return true
   return p._branch === branch
@@ -133,13 +138,15 @@ export function getRepoStatus(repoPath, branch) {
  * 把某 toml 环境「保存为本地项目」的 headless 逻辑（shop add 的核心，去掉交互）。
  *   1. 读 toml 的 env，合并调用方填好的 fields（domain/port/theme/preview_key/project_desc）
  *   2. 把 fields 写回 shopify.theme.toml（保持格式）；同时把当前分支记到 _branch（供「合并」取源分支）
- *   3. 按 store 定位模板，构 project；按 store + _branch 命中已有项目则跳过，否则新增
- * @param {{ startDir: string, envName?: string, fields?: object, branch?: string }} opts
- *   fields 用 toml 键名（preview_key / project_desc）；branch 为当前 git 分支
+ *   3. 按 store 定位模板（可由 templateName 覆盖，用于 store 反查不到模板时由调用方指定），构 project；
+ *      按六要素（store/domain/theme/preview_key/project_desc/_branch）命中已有项目则跳过，否则新增
+ * @param {{ startDir: string, envName?: string, fields?: object, branch?: string, templateName?: string }} opts
+ *   fields 用 toml 键名（preview_key / project_desc）；branch 为当前 git 分支；
+ *   templateName 覆盖按 store 反查到的模板（GUI 在 store 反查不到模板时让用户选好后传入）
  * @returns {{ project: object, created: boolean }} project 含 links
  * @throws {Error} 缺配置文件 / 缺环境 / 缺 store 时抛错，由调用方提示
  */
-export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}, branch }) {
+export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}, branch, templateName } = {}) {
   const cfg = loadThemeConfig(startDir)
   if (!cfg) throw new Error('未找到 shopify.theme.toml')
   const env = cfg.environments[envName]
@@ -159,11 +166,11 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
 
   const proj = {
     envName,
-    templateName: storeToTemplate(resolved.store) ?? null,
+    templateName: templateName || storeToTemplate(resolved.store) || null,
     store: resolved.store,
     domain: resolved.domain,
     theme: String(resolved.theme),
-    previewKey: String(resolved.preview_key),
+    previewKey: String(resolved.preview_key ?? ''),
     port: String(resolved.port),
     description: resolved.project_desc,
     _branch: branch || null,

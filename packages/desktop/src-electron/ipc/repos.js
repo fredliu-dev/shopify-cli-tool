@@ -164,12 +164,33 @@ export function registerReposIpc() {
   })
 
   // 保存为本地项目（shop add 的 headless 核心）：写回 toml + upsert projects.json
-  ipcMain.handle('repos:save', async (_evt, { dir, envName, fields }) => {
+  // templateName 由前端在 store 反查不到模板时让用户选好后传入，覆盖按 store 的反查
+  ipcMain.handle('repos:save', async (_evt, { dir, envName, fields, templateName }) => {
     const { upsertProjectFromConfig, listBranches } = await load()
     try {
       // 取当前分支记入 _branch（区分不同分支的项目，并供「合并」取源分支）
       const { current: branch } = await listBranches(dir)
-      return { ok: true, data: upsertProjectFromConfig({ startDir: dir, envName, fields, branch }) }
+      return { ok: true, data: upsertProjectFromConfig({ startDir: dir, envName, fields, branch, templateName }) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 模板名列表（过滤 empty 占位）：供「本地保存」在 store 反查不到模板时让用户选
+  ipcMain.handle('repos:templates', async () => {
+    const { listTemplates } = await load()
+    try {
+      return { ok: true, data: listTemplates().filter((t) => t.name !== 'empty').map((t) => t.name) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 按 store 反查模板名；store 不在任何模板的 dev.store 里时返回 null（前端据此弹出模板选择）
+  ipcMain.handle('repos:resolveTemplate', async (_evt, store) => {
+    const { storeToTemplate } = await load()
+    try {
+      return { ok: true, data: storeToTemplate(store) ?? null }
     } catch (err) {
       return { ok: false, error: err.message }
     }

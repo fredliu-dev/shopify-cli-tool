@@ -37,7 +37,17 @@ export default function App() {
   return (
     <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }} theme={theme}>
       <Layout style={{ height: '100vh' }}>
-        <Content style={{ padding: 20, overflow: 'auto', background: '#0d0d0f' }}>
+        <Content
+          style={{
+            padding: 20,
+            overflow: 'auto',
+            background: '#0d0d0f',
+            // 彩色光晕：毛玻璃卡片 blur 后透出的色彩来源（iOS 控制中心式背景）
+            backgroundImage:
+              'radial-gradient(circle at 12% 18%, rgba(22,119,255,0.14), transparent 38%), radial-gradient(circle at 88% 12%, rgba(114,46,241,0.12), transparent 36%), radial-gradient(circle at 78% 88%, rgba(19,194,194,0.10), transparent 40%)',
+            backgroundAttachment: 'fixed',
+          }}
+        >
           <Repos />
         </Content>
       </Layout>
