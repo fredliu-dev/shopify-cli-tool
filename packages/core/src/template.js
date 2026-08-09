@@ -59,7 +59,8 @@ export function fillTemplate(content, values) {
       return phone ? `@${phone}` : full
     }
     if (type === 'url' || type === 'title' || type === 'content') {
-      return (values?.[token] ?? '').trim() || full
+      // 空值替换为空串（而非保留原文占位符）：避免未填的 {{@content}} 等原样出现在发出的消息里
+      return (values?.[token] ?? '').trim() || ''
     }
     // all
     isAtAll = true

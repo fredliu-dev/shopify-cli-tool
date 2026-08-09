@@ -88,6 +88,7 @@ contextBridge.exposeInMainWorld('api', {
     removeGroup: (id) => ipcRenderer.invoke('dingtalk:removeGroup', id),
     upsertTemplate: (opts) => ipcRenderer.invoke('dingtalk:upsertTemplate', opts),
     removeTemplate: (id) => ipcRenderer.invoke('dingtalk:removeTemplate', id),
+    saveDefaults: (opts) => ipcRenderer.invoke('dingtalk:saveDefaults', opts),
     parsePlaceholders: (templateId) => ipcRenderer.invoke('dingtalk:parsePlaceholders', templateId),
     gotest: (opts) => ipcRenderer.invoke('dingtalk:gotest', opts),
   },

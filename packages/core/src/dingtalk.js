@@ -196,3 +196,20 @@ export function removeDingtalkTemplate(id) {
   cfg.templates = cfg.templates.filter((t) => t.id !== id)
   saveDingtalkConfig(cfg)
 }
+
+/**
+ * 设置某模板的占位符默认值（CLI gotest 的 @person 默认手机号）。
+ * defaults 为非空对象时写入，否则删除该键（用于清除）。桌面端「保存/清除默认值」共用。
+ * @param {string} id 模板 id
+ * @param {Record<string, string>} defaults token -> 值（@person 存手机号，兼容 CLI 的「手机号（姓名）」）
+ * @returns {object|null} 更新后的模板，找不到返回 null
+ */
+export function setDingtalkTemplateDefaults(id, defaults) {
+  const cfg = loadDingtalkConfig()
+  const idx = cfg.templates.findIndex((t) => t.id === id)
+  if (idx < 0) return null
+  if (defaults && Object.keys(defaults).length) cfg.templates[idx].defaults = defaults
+  else delete cfg.templates[idx].defaults
+  saveDingtalkConfig(cfg)
+  return cfg.templates[idx]
+}

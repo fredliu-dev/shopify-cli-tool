@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs'
-import { input, checkbox, confirm, list } from '@inquirer/prompts'
+import { input, checkbox, confirm, select } from '@inquirer/prompts'
 import initCmd from './init.js'
 import { copyLiveTheme } from './copy.js'
 import { loadThemeConfig, setEnvField, storeToTemplate, listTemplates, loadProjects, saveProjects, listBranches } from '@shopify-cli-tool/core'
@@ -145,7 +145,7 @@ export default {
         const tpls = listTemplates().filter((t) => t.name !== 'empty')
         if (tpls.length) {
           try {
-            templateName = await list({
+            templateName = await select({
               message: `[${sel.name}] store "${sel.env.store}" 未匹配到模板，请选择：`,
               choices: tpls.map((t) => ({ name: t.name, value: t.name })),
             })

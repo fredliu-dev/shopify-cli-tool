@@ -1105,6 +1105,17 @@ function DingtalkTemplatesModal({ open, onClose, onChange }) {
     }
   }
 
+  const handleClearDefaults = async (id) => {
+    const res = await window.api.dingtalk.saveDefaults({ templateId: id, defaults: {} })
+    if (res.ok) {
+      message.success('已清除默认值')
+      refresh()
+      onChange?.()
+    } else {
+      message.error(res.error || '清除失败')
+    }
+  }
+
   const columns = [
     { title: '模板名称', dataIndex: 'name', key: 'name' },
     {
@@ -1115,14 +1126,29 @@ function DingtalkTemplatesModal({ open, onClose, onChange }) {
       render: (c) => <Text style={{ fontSize: 12 }}>{(c || '').replace(/\n/g, ' ')}</Text>,
     },
     {
+      title: '默认负责人',
+      key: 'defaults',
+      ellipsis: true,
+      render: (_, t) => {
+        const d = t.defaults
+        if (!d || !Object.keys(d).length) return <Text type="secondary">—</Text>
+        return <Text style={{ fontSize: 12 }}>{Object.values(d).join('，')}</Text>
+      },
+    },
+    {
       title: '操作',
       key: 'action',
-      width: 130,
+      width: 180,
       render: (_, t) => (
-        <Space size={6}>
+        <Space size={6} wrap>
           <Button size="small" onClick={() => setEditTarget(t)}>
             编辑
           </Button>
+          {t.defaults && Object.keys(t.defaults).length > 0 && (
+            <Popconfirm title="清除该模板的默认负责人？" okText="清除" cancelText="取消" onConfirm={() => handleClearDefaults(t.id)}>
+              <Button size="small">清默认</Button>
+            </Popconfirm>
+          )}
           <Popconfirm title={`删除模板「${t.name}」？`} okText="删除" cancelText="取消" onConfirm={() => handleDelete(t.id)}>
             <Button size="small" danger>
               删除
@@ -1156,8 +1182,8 @@ function DingtalkTemplatesModal({ open, onClose, onChange }) {
 }
 
 /* ---------------- 提测通知（参考 shop gotest：选群+模板，预填项目链接/描述后发钉钉） ---------------- */
-function GotestModal({ open, project, contacts, onClose }) {
-  const { message } = App.useApp()
+function GotestModal({ open, project, projects, contacts, onClose }) {
+  const { message, modal } = App.useApp()
   const [groups, setGroups] = useState([])
   const [templates, setTemplates] = useState([])
   const [groupId, setGroupId] = useState()
@@ -1166,6 +1192,7 @@ function GotestModal({ open, project, contacts, onClose }) {
   const [values, setValues] = useState({}) // token -> 值（person 存手机号）
   const [parsing, setParsing] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [selProject, setSelProject] = useState(project) // 当前选中的本地项目（默认=入口传入的仓库项目，可切换）
 
   // 打开时加载群+模板，重置选择
   useEffect(() => {
@@ -1180,11 +1207,32 @@ function GotestModal({ open, project, contacts, onClose }) {
       setTemplateId(undefined)
       setFields([])
       setValues({})
+      setSelProject(project)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, project])
 
-  // 选完模板：解析占位符，并按字段类型预填（url→提测链接，title→项目描述）
+  // 按占位符类型，用项目信息预填 url（提测链接）/ title（描述）；person/content 不在此处理
+  const applyProject = (p, fs) => {
+    const next = {}
+    ;(fs || []).forEach((f) => {
+      if (f.kind === 'url') next[f.token] = p?.links?.previewLink || ''
+      else if (f.kind === 'title') next[f.token] = p?.description || ''
+    })
+    return next
+  }
+
+  // 兼容 CLI「手机号（姓名）」存法：拆出纯手机号；并按手机号从 contacts 反查展示名
+  const splitPhone = (raw) => {
+    const m = String(raw).match(/^(.+?)\s*[（(](.+?)[）)]\s*$/)
+    return m ? { phone: m[1].trim(), display: m[2].trim() } : { phone: String(raw).trim(), display: String(raw).trim() }
+  }
+  const phoneDisplay = (phone) => {
+    const c = (contacts || []).find((x) => x.phone === phone)
+    return c ? `${c.name}（${phone}）` : phone
+  }
+
+  // 选完模板：解析占位符并按字段类型预填；有 person 默认值则询问是否使用（与 CLI gotest 一致）
   const onTemplateChange = async (id) => {
     setTemplateId(id)
     if (!id) {
@@ -1200,12 +1248,25 @@ function GotestModal({ open, project, contacts, onClose }) {
     }
     const fs = res.data?.fields || []
     setFields(fs)
-    const next = {}
-    fs.forEach((f) => {
-      if (f.kind === 'url') next[f.token] = project?.links?.previewLink || ''
-      else if (f.kind === 'title') next[f.token] = project?.description || ''
-    })
-    setValues(next)
+    setValues(applyProject(selProject, fs))
+    // 默认值仅 person：模板存了 @person 默认值时，询问是否使用并展示
+    const defaults = templates.find((t) => t.id === id)?.defaults || {}
+    const personFields = fs.filter((f) => f.kind === 'person' && defaults[f.token])
+    if (personFields.length) {
+      const preview = personFields.map((f) => `${f.label}：${phoneDisplay(splitPhone(defaults[f.token]).phone)}`).join('\n')
+      modal.confirm({
+        title: '检测到默认负责人，是否使用？',
+        content: <Text style={{ whiteSpace: 'pre-wrap' }}>{preview}</Text>,
+        okText: '使用默认',
+        cancelText: '不用',
+        onOk: () =>
+          setValues((s) => {
+            const next = { ...s }
+            personFields.forEach((f) => (next[f.token] = splitPhone(defaults[f.token]).phone))
+            return next
+          }),
+      })
+    }
   }
 
   const submit = async () => {
@@ -1235,6 +1296,25 @@ function GotestModal({ open, project, contacts, onClose }) {
     if (res.ok) {
       const g = groups.find((x) => x.id === groupId)
       message.success(`已发送到「${g?.name || '群'}」`)
+      // 发送成功后询问是否把本次 person 存为默认值（与 CLI gotest 一致）
+      const picked = {}
+      fields.filter((f) => f.kind === 'person' && values[f.token]).forEach((f) => (picked[f.token] = values[f.token]))
+      if (Object.keys(picked).length) {
+        const preview = Object.entries(picked)
+          .map(([tok, ph]) => `${fields.find((f) => f.token === tok)?.label || tok}：${phoneDisplay(ph)}`)
+          .join('\n')
+        modal.confirm({
+          title: '是否将本次负责人保存为默认值？',
+          content: <Text style={{ whiteSpace: 'pre-wrap' }}>{preview}</Text>,
+          okText: '保存',
+          cancelText: '不保存',
+          onOk: async () => {
+            const r = await window.api.dingtalk.saveDefaults({ templateId, defaults: picked })
+            if (r.ok) message.success('已保存为默认值')
+            else message.error(r.error || '保存失败')
+          },
+        })
+      }
       onClose?.()
     } else {
       message.error({ content: `发送失败：${res.error}`, duration: 8 })
@@ -1246,7 +1326,7 @@ function GotestModal({ open, project, contacts, onClose }) {
 
   return (
     <Modal
-      title={`提测通知 - ${project?.description || project?.store || ''}`}
+      title={`提测通知 - ${selProject?.description || selProject?.store || ''}`}
       open={open}
       onCancel={onClose}
       onOk={submit}
@@ -1256,6 +1336,21 @@ function GotestModal({ open, project, contacts, onClose }) {
       width={560}
     >
       <Form layout="vertical">
+        <Form.Item label="本地项目" required>
+          <Select
+            showSearch
+            placeholder="选择本地项目"
+            value={selProject?.id}
+            onChange={(id) => {
+              const p = (projects || []).find((x) => x.id === id)
+              setSelProject(p)
+              // 模板已选时，切换项目重填 url/title；person/content 保持不动
+              if (fields.length) setValues((s) => ({ ...s, ...applyProject(p, fields) }))
+            }}
+            options={(projects || []).map((p) => ({ value: p.id, label: p.description || p.store }))}
+            optionFilterProp="label"
+          />
+        </Form.Item>
         <Form.Item label="通知群" required>
           <Select
             placeholder={noGroups ? '请先在「通知群管理」添加群' : '选择通知群'}
@@ -2748,7 +2843,15 @@ export default function Repos() {
       <DingtalkTemplatesModal open={templatesOpen} onClose={() => setTemplatesOpen(false)} />
 
       {/* 提测通知（选群+模板，自动预填项目提测链接/描述后发钉钉） */}
-      <GotestModal open={!!gotestFor} project={gotestFor} contacts={contacts} onClose={() => setGotestFor(null)} />
+      {/* 提测通知（选群+模板，自动预填项目提测链接/描述后发钉钉）
+          下拉只列「当前仓库·当前分支」下的项目（复用 projectsByRepoPath 的过滤口径），不展示其它仓库/分支的项目 */}
+      <GotestModal
+        open={!!gotestFor}
+        project={gotestFor}
+        projects={gotestFor ? (projectsByRepoPath.get(gotestFor.repoPath) || [gotestFor]) : []}
+        contacts={contacts}
+        onClose={() => setGotestFor(null)}
+      />
 
       {/* 编辑本地项目（仅 非 _ 开头字段） */}
       <EditProjectModal

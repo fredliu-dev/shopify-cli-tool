@@ -60,6 +60,18 @@ export function registerDingtalkIpc() {
     }
   })
 
+  // 设置模板的占位符默认值（@person 手机号）；defaults 为空对象则清除
+  ipcMain.handle('dingtalk:saveDefaults', async (_evt, { templateId, defaults }) => {
+    const { setDingtalkTemplateDefaults } = await load()
+    try {
+      const tpl = setDingtalkTemplateDefaults(templateId, defaults)
+      if (!tpl) return { ok: false, error: '未找到该消息模板' }
+      return { ok: true, data: tpl }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
   // 解析某模板的占位符，返回渲染提测表单所需的字段列表
   ipcMain.handle('dingtalk:parsePlaceholders', async (_evt, templateId) => {
     const { loadDingtalkConfig, parsePlaceholders } = await load()

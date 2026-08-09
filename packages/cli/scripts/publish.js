@@ -41,6 +41,8 @@ writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8')
 
 console.log(`版本已更新：${pkg.version} → ${nextVersion}`)
 
-console.log('正在执行 npm publish …')
-const result = spawnSync('npm', ['publish'], { stdio: 'inherit', shell: true })
+// 必须用 pnpm publish：它会自动把 workspace:^ 等协议解析成真实版本号。
+// npm publish 不做这个替换，会把 "workspace:^" 原样发上去，导致安装时 EUNSUPPORTEDPROTOCOL。
+console.log('正在执行 pnpm publish …')
+const result = spawnSync('pnpm', ['publish', '--no-git-checks'], { stdio: 'inherit', shell: true })
 process.exit(result.status ?? 0)
