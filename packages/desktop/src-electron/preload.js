@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('api', {
   config: {
     templates: () => ipcRenderer.invoke('config:templates'),
     dataDir: () => ipcRenderer.invoke('config:dataDir'),
+    export: () => ipcRenderer.invoke('config:export'),
     createTemplate: (opts) => ipcRenderer.invoke('config:createTemplate', opts),
     templateEnv: (name) => ipcRenderer.invoke('config:templateEnv', name),
     updateTemplate: (opts) => ipcRenderer.invoke('config:updateTemplate', opts),

@@ -66,10 +66,14 @@ export async function listBranches(repoPath) {
   const br = await runGit(['branch', '--list'], repoPath)
   const branches =
     br.code === 0
-      ? br.stdout
-          .split('\n')
-          .map((l) => l.replace(/^\* /, '').trim())
-          .filter(Boolean)
+      ? [
+          ...new Set(
+            br.stdout
+              .split('\n')
+              .map((l) => l.replace(/^\* /, '').trim())
+              .filter(Boolean),
+          ),
+        ]
       : []
   return { current, branches }
 }

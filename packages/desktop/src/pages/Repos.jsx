@@ -5,6 +5,7 @@ import {
   BranchesOutlined,
   CodeOutlined,
   DashboardOutlined,
+  DownloadOutlined,
   ExperimentOutlined,
   EyeOutlined,
   FileTextOutlined,
@@ -1465,8 +1466,8 @@ function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
       }
       return
     }
-    // 未勾选复制主题：直接创建分支
-    const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName })
+    // 未勾选复制主题：直接创建分支（同样推送到远程，与勾选复制主题的路径一致）
+    const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName, push: true })
     setLoading(false)
     if (res.ok) {
       message.success(`已创建并切换到分支 ${branchName}（已推送远程）`)
@@ -1812,8 +1813,31 @@ function GitFlowSteps({ repo, project, onAction }) {
 }
 
 /* ---------------- 仓库卡片（已配对项目则内嵌项目面板，圈在一起） ---------------- */
-function RepoCard({ repo, project, onAction, onProjectAction, branchLoading }) {
+function RepoCard({ repo, project, onAction, onProjectAction, branchProjectCounts }) {
   const matched = !!repo.matched
+
+  // 下拉展开时实时获取分支（不缓存）：每次 reload 直连 listAllBranches，其 local/remote 均已
+  // 去重；不再用仓库列表里那份可能过时/带重复的 repo.branches 缓存来渲染下拉。
+  const { local, remote, loading: branchLoading, reload } = useRepoBranches(repo)
+
+  // 分组下拉数据：本地 / 远程，每个分支附该分支绑定的本地项目数（n>0 才显蓝标）。
+  // 用 options + optionRender：optionRender 仅负责下拉项外观，value/label 始终是纯分支名，
+  // 选中框由 labelRender 显示纯分支名，checkout 拿到的 value 不受任何影响。
+  // 本地分支再 Set 去重一次（防御）；远程组保留全部——本地已有同名的，远程组也照常显示。
+  const localBranches = [...new Set(local || [])]
+  const branchOptions = []
+  if (localBranches.length) {
+    branchOptions.push({
+      label: '本地分支',
+      options: localBranches.map((b) => ({ value: b, label: b, count: branchProjectCounts?.[b] || 0 })),
+    })
+  }
+  if ((remote || []).length) {
+    branchOptions.push({
+      label: '远程分支',
+      options: (remote || []).map((b) => ({ value: b, label: b, count: branchProjectCounts?.[b] || 0 })),
+    })
+  }
 
   const saveBtn = matched ? (
     <Tooltip title="该配置已在本地缓存项目中，无需重复添加">
@@ -1847,28 +1871,41 @@ function RepoCard({ repo, project, onAction, onProjectAction, branchLoading }) {
           placeholder="切换分支"
           style={{ minWidth: 160, maxWidth: 260 }}
           popupMatchSelectWidth={false}
-          onDropdownVisibleChange={(open) => open && onAction('fetchBranches', repo)}
+          options={branchOptions}
+          optionFilterProp="label"
+          onDropdownVisibleChange={(open) => open && reload()}
           onChange={(b) => onAction('checkout', { repo, branch: b })}
-        >
-          {(repo.branches || []).length > 0 && (
-            <Select.OptGroup label="本地分支">
-              {(repo.branches || []).map((b) => (
-                <Select.Option key={`l/${b}`} value={b}>
-                  {b}
-                </Select.Option>
-              ))}
-            </Select.OptGroup>
-          )}
-          {(repo.remoteBranches || []).length > 0 && (
-            <Select.OptGroup label="远程分支">
-              {(repo.remoteBranches || []).map((b) => (
-                <Select.Option key={`r/${b}`} value={b}>
-                  {b}
-                </Select.Option>
-              ))}
-            </Select.OptGroup>
-          )}
-        </Select>
+          optionRender={(option) => {
+            // rc-select 把 option 扁平化为 { data, label, value, ... }：自定义字段在 option.data，
+            // label/value 被提到顶层。所以 count 取 option.data.count，label 用 option.label。
+            const count = option?.data?.count ?? 0
+            return (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, width: '100%' }}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{option.label}</span>
+                {count > 0 && (
+                  <span
+                    title={`${count} 个本地项目`}
+                    style={{
+                      flexShrink: 0,
+                      fontSize: 11,
+                      lineHeight: '16px',
+                      height: 16,
+                      minWidth: 16,
+                      padding: '0 5px',
+                      borderRadius: 8,
+                      background: 'rgba(22,119,255,0.22)',
+                      color: '#69b1ff',
+                      textAlign: 'center',
+                    }}
+                  >
+                    {count}
+                  </span>
+                )}
+              </div>
+            )
+          }}
+          labelRender={(props) => props.value ?? props.label}
+        />
       }
     >
       <Tooltip title={repo.path}>
@@ -2222,7 +2259,6 @@ export default function Repos() {
   const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false)
   const [gitModal, setGitModal] = useState(null) // { mode:'branch'|'release'|'merge', repo }
   const [editProject, setEditProject] = useState(null) // 编辑本地项目
-  const [branchLoading, setBranchLoading] = useState({}) // repoPath -> 正在拉取远程分支
 
   // 刷新「创建项目」可选模板（带 _github 且未在工作区存在的）
   const refreshCloneable = useCallback(async (dir) => {
@@ -2315,6 +2351,14 @@ export default function Repos() {
     if (!res?.ok) message.error(res.error || '打开失败')
   }
 
+  // 一键导出本地配置为 zip（含 README 说明 win/mac 路径与恢复步骤）；用户取消则静默
+  const exportConfig = async () => {
+    const res = await window.api.config.export()
+    if (!res || res.canceled) return
+    if (res.ok) message.success(`已导出：${res.path}`)
+    else message.error(res.error || '导出失败')
+  }
+
   // init/save 后：刷新该仓库状态 + 刷新本地项目列表
   const refreshRepo = async (repoPath) => {
     const res = await window.api.repos.status(repoPath)
@@ -2328,7 +2372,6 @@ export default function Repos() {
     else if (type === 'save') setEditRepo({ mode: 'save', repo: payload })
     else if (type === 'templates') setTplModal(payload)
     else if (type === 'checkout') checkoutBranch(payload.repo.path, payload.branch)
-    else if (type === 'fetchBranches') fetchBranches(payload.path)
     else if (type === 'branch' || type === 'release' || type === 'merge') setGitModal({ mode: type, repo: payload })
     else if (type === 'gotest') setGotestFor(payload)
   }
@@ -2345,11 +2388,17 @@ export default function Repos() {
   // 删除本地缓存项目
   const handleDeleteProject = async (project) => {
     const res = await window.api.shops.delete([project.id])
-    if (res.ok) {
-      message.success('已删除')
-      refreshProjects()
-    } else {
+    if (!res.ok) {
       message.error(res.error || '删除失败')
+      return
+    }
+    message.success('已删除')
+    // 删除后须刷新关联仓库的 matched 状态：否则仓库卡「本地保存」仍因旧 matched 被禁用，
+    // 要点「重新扫描」才恢复。refreshRepo 内部已含 refreshProjects。
+    if (project.repoPath) {
+      refreshRepo(project.repoPath)
+    } else {
+      refreshProjects()
     }
   }
 
@@ -2359,22 +2408,6 @@ export default function Repos() {
     if (res.ok) message.success(`已切换到 ${branch}`)
     else message.error(res.error || '切换失败')
     refreshRepo(repoPath) // 成功/失败都刷新：成功更新当前分支，失败还原 Select 显示
-  }
-
-  // 分支下拉展开时懒加载：fetch origin 后按本地/远程分组存入该仓库；
-  // remoteBranches 仅保留本地没有的远程分支，避免与本地组重复展示。
-  const fetchBranches = async (repoPath) => {
-    setBranchLoading((m) => ({ ...m, [repoPath]: true }))
-    const res = await window.api.repos.remoteBranches(repoPath)
-    setBranchLoading((m) => ({ ...m, [repoPath]: false }))
-    if (res.ok) {
-      const { local = [], remote = [] } = res.data || {}
-      // 远程分支保持齐全（不去除本地已有的同名分支）：常需基于 origin/master 等建分支，
-      // 去重会让本地已有的 master 在远程组消失，误以为远程没有。
-      setRepos((prev) =>
-        prev.map((r) => (r.path === repoPath ? { ...r, branches: local, remoteBranches: remote } : r)),
-      )
-    }
   }
 
   // 运行流程：先查改动 json → 有则弹多选拉取 → 选完后打开编辑器并复制启动命令到剪贴板
@@ -2438,12 +2471,18 @@ export default function Repos() {
     return m
   }, [enrichedProjects])
 
-  // 未关联到当前工作区仓库的本地项目（独立分区展示）
-  const matchedRepoPaths = useMemo(() => new Set(repos.map((r) => r.path)), [repos])
-  const orphanProjects = useMemo(
-    () => enrichedProjects.filter((p) => !p.repoPath || !matchedRepoPaths.has(p.repoPath)),
-    [enrichedProjects, matchedRepoPaths],
-  )
+  // 各 store 下、每个分支绑定的本地项目数：项目身份 = store + _branch（见 core/shops.js），
+  // 故按 store 归属仓库、按 _branch 归属分支；切分支下拉框据此标识"该分支有几个本地项目"。
+  const branchProjectCountsByStore = useMemo(() => {
+    const byStore = new Map()
+    projects.forEach((p) => {
+      if (!p.store || !p._branch) return // 历史项目无 _branch，不归属具体分支
+      if (!byStore.has(p.store)) byStore.set(p.store, {})
+      const o = byStore.get(p.store)
+      o[p._branch] = (o[p._branch] || 0) + 1
+    })
+    return byStore
+  }, [projects])
 
   if (loading) {
     return (
@@ -2509,6 +2548,9 @@ export default function Repos() {
               </Button>
             </span>
           </Tooltip>
+          <Button icon={<DownloadOutlined />} onClick={exportConfig}>
+            导出配置
+          </Button>
           <Dropdown
             placement="bottomRight"
             menu={{
@@ -2563,30 +2605,12 @@ export default function Repos() {
               key={r.path}
               repo={r}
               project={projectByRepoPath.get(r.path)}
+              branchProjectCounts={branchProjectCountsByStore.get(r.devEnv?.store) || {}}
               onAction={repoAction}
               onProjectAction={projectAction}
-              branchLoading={!!branchLoading[r.path]}
             />
           ))}
         </div>
-      )}
-
-      {orphanProjects.length > 0 && (
-        <>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '24px 0 8px' }}>
-            <Title level={5} style={{ margin: 0 }}>
-              未关联仓库的本地项目（{orphanProjects.length}）
-            </Title>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              这些项目暂未在工作区找到对应仓库
-            </Text>
-          </div>
-          <div style={GRID}>
-            {orphanProjects.map((p) => (
-              <ProjectPanel key={p.id} project={p} onAction={projectAction} embedded={false} />
-            ))}
-          </div>
-        </>
       )}
 
       {/* 初始化 / 本地保存 弹窗 */}

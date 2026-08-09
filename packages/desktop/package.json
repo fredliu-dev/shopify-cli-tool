@@ -1,6 +1,6 @@
 {
   "name": "@shopify-cli-tool/desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Shopify CLI 工具的 Electron 桌面应用",
   "main": "./out/main/index.js",
@@ -9,11 +9,13 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "package": "electron-vite build && electron-builder",
-    "package:dir": "electron-vite build && electron-builder --dir"
+    "package:dir": "electron-vite build && electron-builder --dir",
+    "release": "electron-vite build && electron-builder --publish always"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
     "@shopify-cli-tool/core": "workspace:*",
+    "adm-zip": "^0.6.0",
     "electron-updater": "^6.3.9"
   },
   "devDependencies": {
