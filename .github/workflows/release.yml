@@ -7,6 +7,11 @@ on:
     tags:
       - 'desktop-v*'
 
+# electron-builder 要用 GITHUB_TOKEN 创建 Release 并上传产物，必须显式授 contents: write。
+# 否则报 403 "Resource not accessible by integration"（默认 token 权限不含写）。
+permissions:
+  contents: write
+
 jobs:
   release:
     strategy:
