@@ -92,5 +92,6 @@ contextBridge.exposeInMainWorld('api', {
     saveDefaults: (opts) => ipcRenderer.invoke('dingtalk:saveDefaults', opts),
     parsePlaceholders: (templateId) => ipcRenderer.invoke('dingtalk:parsePlaceholders', templateId),
     gotest: (opts) => ipcRenderer.invoke('dingtalk:gotest', opts),
+    notify: (opts) => ipcRenderer.invoke('dingtalk:notify', opts),
   },
 })

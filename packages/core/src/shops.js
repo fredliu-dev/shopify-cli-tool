@@ -140,13 +140,14 @@ export function getRepoStatus(repoPath, branch) {
  *   2. 把 fields 写回 shopify.theme.toml（保持格式）；同时把当前分支记到 _branch（供「合并」取源分支）
  *   3. 按 store 定位模板（可由 templateName 覆盖，用于 store 反查不到模板时由调用方指定），构 project；
  *      按六要素（store/domain/theme/preview_key/project_desc/_branch）命中已有项目则跳过，否则新增
- * @param {{ startDir: string, envName?: string, fields?: object, branch?: string, templateName?: string }} opts
+ * @param {{ startDir: string, envName?: string, fields?: object, branch?: string, templateName?: string, tapd?: string }} opts
  *   fields 用 toml 键名（preview_key / project_desc）；branch 为当前 git 分支；
- *   templateName 覆盖按 store 反查到的模板（GUI 在 store 反查不到模板时让用户选好后传入）
+ *   templateName 覆盖按 store 反查到的模板（GUI 在 store 反查不到模板时让用户选好后传入）；
+ *   tapd 为从 project_desc 复合文本里拆出的工单链接，只记到 projects.json 的 _tapd（不写回 toml）
  * @returns {{ project: object, created: boolean }} project 含 links
  * @throws {Error} 缺配置文件 / 缺环境 / 缺 store 时抛错，由调用方提示
  */
-export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}, branch, templateName } = {}) {
+export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}, branch, templateName, tapd } = {}) {
   const cfg = loadThemeConfig(startDir)
   if (!cfg) throw new Error('未找到 shopify.theme.toml')
   const env = cfg.environments[envName]
@@ -174,11 +175,19 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
     port: String(resolved.port),
     description: resolved.project_desc,
     _branch: branch || null,
+    _tapd: tapd || null,
   }
 
   const projects = loadProjects()
   const dup = projects.find((p) => isSameProject(p, resolved, branch))
-  if (dup) return { project: withLinks(dup), created: false }
+  if (dup) {
+    // 命中已有项目：_tapd 是衍生数据（不在六要素里），单独更新即可，不算"新建"
+    if (tapd && dup._tapd !== tapd) {
+      dup._tapd = tapd
+      saveProjects(projects)
+    }
+    return { project: withLinks(dup), created: false }
+  }
 
   proj.id = String(Date.now())
   projects.push(proj)

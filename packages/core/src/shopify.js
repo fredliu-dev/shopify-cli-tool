@@ -1,9 +1,9 @@
+import { buildLinks } from './links.js'
 /**
  * shopify CLI 主题相关调用的 headless 封装（CLI 与桌面应用共用）。
  * 只跑 shopify 子进程、解析输出，不打印、不提问；展示与交互由各自的壳负责。
  */
 import { captureShopify } from './runner.js'
-import { buildLinks } from './links.js'
 
 /**
  * 从 shopify -j 的 stdout 里解析 JSON。
@@ -12,21 +12,21 @@ import { buildLinks } from './links.js'
  * @returns {any | null}
  */
 function parseJson(stdout) {
-  const text = stdout.trim()
-  if (!text) return null
-  try {
-    return JSON.parse(text)
-  } catch {
-    const matches = text.match(/\[[\s\S]*\]|\{[\s\S]*\}/g)
-    if (matches) {
-      for (let i = matches.length - 1; i >= 0; i--) {
-        try {
-          return JSON.parse(matches[i])
-        } catch {}
-      }
+    const text = stdout.trim()
+    if (!text) return null
+    try {
+        return JSON.parse(text)
+    } catch {
+        const matches = text.match(/\[[\s\S]*\]|\{[\s\S]*\}/g)
+        if (matches) {
+            for (let i = matches.length - 1; i >= 0; i--) {
+                try {
+                    return JSON.parse(matches[i])
+                } catch { }
+            }
+        }
+        return null
     }
-    return null
-  }
 }
 
 /**
@@ -41,43 +41,43 @@ function parseJson(stdout) {
  * @returns {Promise<{ ok: true, id: string, name: string, links: object } | { ok: false, stage: string, code: number, stderr: string, stdout: string }>}
  */
 export async function duplicateLiveTheme({ cwd, envName, envConfig, activity, owner, namePrefix }) {
-  // 拉 live 主题
-  const listRes = await captureShopify(['theme', 'list', '--role', 'live', '-j', '-e', envName], { cwd })
-  if (listRes.code !== 0) {
-    return { ok: false, stage: 'list', code: listRes.code, stderr: listRes.stderr, stdout: listRes.stdout }
-  }
-  const list = parseJson(listRes.stdout)
-  const live = Array.isArray(list) ? list.find((t) => t.role === 'live') ?? list[0] : null
-  if (!live || !live.id) {
-    return { ok: false, stage: 'list', code: 0, stderr: '未找到 live 主题', stdout: listRes.stdout }
-  }
+    // 拉 live 主题
+    const listRes = await captureShopify(['theme', 'list', '--role', 'live', '-j', '-e', envName], { cwd })
+    if (listRes.code !== 0) {
+        return { ok: false, stage: 'list', code: listRes.code, stderr: listRes.stderr, stdout: listRes.stdout }
+    }
+    const list = parseJson(listRes.stdout)
+    const live = Array.isArray(list) ? list.find((t) => t.role === 'live') ?? list[0] : null
+    if (!live || !live.id) {
+        return { ok: false, stage: 'list', code: 0, stderr: '未找到 live 主题', stdout: listRes.stdout }
+    }
 
-  // 拼主题名：[<前缀>] <活动> | <负责人> | <YYYYMMDD>（前缀默认用 envName，可被 namePrefix 覆盖）
-  const now = new Date()
-  const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
-  const prefix = namePrefix ?? envName
-  const themeName = `[${prefix}] ${String(activity).trim()} | ${String(owner).trim()} | ${dateStr}`
+    // 拼主题名：[<前缀>] <活动> | <负责人> | <YYYYMMDD>（前缀默认用 envName，可被 namePrefix 覆盖）
+    const now = new Date()
+    const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+    const prefix = namePrefix ?? envName
+    const themeName = `[${prefix}] ${String(activity).trim()} | ${String(owner).trim()} | ${dateStr}`
 
-  // 复制主题
-  const dupRes = await captureShopify(
-    ['theme', 'duplicate', '--theme', String(live.id), '--name', themeName, '--force', '-e', envName, '-j'],
-    { cwd },
-  )
-  if (dupRes.code !== 0) {
-    return { ok: false, stage: 'duplicate', code: dupRes.code, stderr: dupRes.stderr, stdout: dupRes.stdout }
-  }
-  const dup = parseJson(dupRes.stdout)
-  const newTheme = dup?.theme
-  if (!newTheme || !newTheme.id) {
-    return { ok: false, stage: 'parse', code: 0, stderr: '未解析到新主题信息', stdout: dupRes.stdout }
-  }
+    // 复制主题
+    const dupRes = await captureShopify(
+        ['theme', 'duplicate', '--theme', String(live.id), '--name', themeName, '--force', '-e', envName, '-j'],
+        { cwd },
+    )
+    if (dupRes.code !== 0) {
+        return { ok: false, stage: 'duplicate', code: dupRes.code, stderr: dupRes.stderr, stdout: dupRes.stdout }
+    }
+    const dup = parseJson(dupRes.stdout)
+    const newTheme = dup?.theme
+    if (!newTheme || !newTheme.id) {
+        return { ok: false, stage: 'parse', code: 0, stderr: '主题数量已达上限，需删除主题', stdout: dupRes.stdout }
+    }
 
-  return {
-    ok: true,
-    id: String(newTheme.id),
-    name: newTheme.name,
-    links: buildLinks({ ...envConfig, theme: String(newTheme.id) }),
-  }
+    return {
+        ok: true,
+        id: String(newTheme.id),
+        name: newTheme.name,
+        links: buildLinks({ ...envConfig, theme: String(newTheme.id) }),
+    }
 }
 
 /**
@@ -88,7 +88,7 @@ export async function duplicateLiveTheme({ cwd, envName, envConfig, activity, ow
  * @returns {Promise<{ ok: boolean, code: number, stderr: string }>}
  */
 export async function pullTemplateJson({ cwd, env, files }) {
-  const onlyArgs = (files || []).flatMap((f) => ['--only', f])
-  const res = await captureShopify(['theme', 'pull', '-e', env, ...onlyArgs], { cwd })
-  return { ok: res.code === 0, code: res.code, stderr: res.stderr }
+    const onlyArgs = (files || []).flatMap((f) => ['--only', f])
+    const res = await captureShopify(['theme', 'pull', '-e', env, ...onlyArgs], { cwd })
+    return { ok: res.code === 0, code: res.code, stderr: res.stderr }
 }

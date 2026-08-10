@@ -165,12 +165,12 @@ export function registerReposIpc() {
 
   // 保存为本地项目（shop add 的 headless 核心）：写回 toml + upsert projects.json
   // templateName 由前端在 store 反查不到模板时让用户选好后传入，覆盖按 store 的反查
-  ipcMain.handle('repos:save', async (_evt, { dir, envName, fields, templateName }) => {
+  ipcMain.handle('repos:save', async (_evt, { dir, envName, fields, templateName, tapd }) => {
     const { upsertProjectFromConfig, listBranches } = await load()
     try {
-      // 取当前分支记入 _branch（区分不同分支的项目，并供「合并」取源分支）
+      // 取当前分支记入 _branch（区分不同分支的项目）
       const { current: branch } = await listBranches(dir)
-      return { ok: true, data: upsertProjectFromConfig({ startDir: dir, envName, fields, branch, templateName }) }
+      return { ok: true, data: upsertProjectFromConfig({ startDir: dir, envName, fields, branch, templateName, tapd }) }
     } catch (err) {
       return { ok: false, error: err.message }
     }

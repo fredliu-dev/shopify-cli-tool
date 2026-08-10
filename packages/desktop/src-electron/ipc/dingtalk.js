@@ -108,4 +108,19 @@ export function registerDingtalkIpc() {
       return { ok: false, error: err.message }
     }
   })
+
+  // 第④步「获取合并提交信息」发送：前端已按每个项目渲染并拼接好最终文本，这里直接发。
+  // text/atMobiles/isAtAll 均由前端算好传入（不再走 fillTemplate）。
+  ipcMain.handle('dingtalk:notify', async (_evt, { groupId, text, atMobiles, isAtAll }) => {
+    const { loadDingtalkConfig, sendText } = await load()
+    try {
+      const cfg = loadDingtalkConfig()
+      const group = cfg.groups.find((g) => g.id === groupId)
+      if (!group) return { ok: false, error: '未找到该通知群' }
+      const errmsg = await sendText(text, group, { atMobiles: atMobiles || [], isAtAll: !!isAtAll })
+      return { ok: true, errmsg }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
 }

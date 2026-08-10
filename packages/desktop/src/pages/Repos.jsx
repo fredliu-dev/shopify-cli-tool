@@ -473,7 +473,17 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
     }
   }
 
+  // 从 project_desc 复合文本拆出标题与工单链接：任意 http(s) 链接 → _tapd（不写 toml）；剩余去【】括号 → 标题
+  const splitDesc = (raw) => {
+    if (!raw) return { desc: '', tapd: null }
+    const m = String(raw).match(/https?:\/\/\S+/i)
+    const tapd = m ? m[0] : null
+    const desc = (tapd ? String(raw).replace(tapd, '') : String(raw)).replace(/[【】]/g, '').trim()
+    return { desc, tapd }
+  }
+
   const submit = async (vals) => {
+    const { desc, tapd } = splitDesc(vals.project_desc)
     setLoading(true)
     const res = await window.api.repos.save({
       dir: repo.path,
@@ -483,9 +493,10 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
         port: vals.port,
         theme: vals.theme,
         preview_key: vals.preview_key,
-        project_desc: vals.project_desc,
+        project_desc: desc,
       },
       templateName: resolvedTpl || vals.template || null,
+      tapd,
     })
     setLoading(false)
     if (res.ok) {
@@ -528,8 +539,8 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
         <Form.Item name="preview_key" label="preview_key">
           <Input />
         </Form.Item>
-        <Form.Item name="project_desc" label="project_desc" rules={[{ required: true, message: '请输入 project_desc' }]}>
-          <Input />
+        <Form.Item name="project_desc" label="project_desc（标题，可附工单链接）" rules={[{ required: true, message: '请输入 project_desc' }]}>
+          <Input.TextArea autoSize={{ minRows: 1, maxRows: 4 }} placeholder="活动标题；可另起一行粘贴工单链接，自动拆为 _tapd" />
         </Form.Item>
         <Button type="primary" htmlType="submit" loading={loading}>
           保存为本地项目
@@ -1655,6 +1666,201 @@ function GotestModal({ open, project, projects, contacts, onClose }) {
   )
 }
 
+/* ---------------- 获取合并提交信息（第④步：多选当前分支项目，标题/工单去重，按模板生成合并通知） ---------------- */
+function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
+  const { message } = App.useApp()
+  const [groups, setGroups] = useState([])
+  const [templates, setTemplates] = useState([])
+  const [selectedIds, setSelectedIds] = useState([])
+  const [groupId, setGroupId] = useState()
+  const [templateId, setTemplateId] = useState()
+  const [fields, setFields] = useState([]) // parsePlaceholders 返回的字段（person/content 供用户填）
+  const [values, setValues] = useState({}) // person/content 的 token -> 值
+  const [parsing, setParsing] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  // 打开时加载群+模板，重置选择
+  useEffect(() => {
+    if (!open) return
+    ;(async () => {
+      const res = await window.api.dingtalk.load()
+      if (res.ok) {
+        setGroups(res.data?.groups || [])
+        setTemplates(res.data?.templates || [])
+      }
+      setGroupId(undefined)
+      setTemplateId(undefined)
+      setFields([])
+      setValues({})
+      setSelectedIds([])
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, repo])
+
+  const selected = (projects || []).filter((p) => selectedIds.includes(p.id))
+  const tpl = templates.find((t) => t.id === templateId)
+
+  // 选模板：解析占位符（person/content 供用户填；title/tapd 由选中项目自动去重填充，不在表单展示）
+  const onTemplateChange = async (id) => {
+    setTemplateId(id)
+    if (!id) {
+      setFields([])
+      return
+    }
+    setParsing(true)
+    const res = await window.api.dingtalk.parsePlaceholders(id)
+    setParsing(false)
+    if (!res.ok) {
+      message.error(res.error || '解析模板失败')
+      return
+    }
+    setFields(res.data?.fields || [])
+  }
+
+  // 每个选中项目渲染一份模板（不去重，选几个项目就几份）：title=项目描述、url=预览链接、
+  // tapd=工单链接；person/content 用用户输入（所有项目共用）；@all 由钉钉处理。
+  const PLACEHOLDER_RE = /\{\{\s*@(person|url|title|content|tapd|all)(\d*)\s*(?:as\s+(.+?))?\s*\}\}/g
+  const renderOne = (content, p) => {
+    const atMobiles = []
+    let isAtAll = false
+    const text = content.replace(PLACEHOLDER_RE, (_full, type, num) => {
+      const token = `@${type}${num ?? ''}`
+      if (type === 'person') {
+        const phone = (values?.[token] ?? '').trim()
+        if (phone) atMobiles.push(phone)
+        return phone ? `@${phone}` : ''
+      }
+      if (type === 'title') return p?.description || ''
+      if (type === 'url') return p?.links?.previewLink || ''
+      if (type === 'tapd') return p?._tapd || ''
+      if (type === 'all') {
+        isAtAll = true
+        return ''
+      }
+      return (values?.[token] ?? '').trim()
+    })
+    return { text, atMobiles, isAtAll }
+  }
+  // 选 N 个项目 → N 份模板，空行分隔拼接；手机号/@all 合并（去重手机号）
+  const rendered = (() => {
+    if (!tpl || !selected.length) return { text: '', atMobiles: [], isAtAll: false }
+    const parts = selected.map((p) => renderOne(tpl.content, p))
+    return {
+      text: parts.map((x) => x.text).join('\n\n'),
+      atMobiles: [...new Set(parts.flatMap((x) => x.atMobiles))],
+      isAtAll: parts.some((x) => x.isAtAll),
+    }
+  })()
+  const preview = rendered.text
+
+  const doCopy = async () => {
+    if (!preview) return
+    const res = await window.api.shell.copy(preview)
+    if (res.ok) message.success('已复制到剪贴板')
+    else message.error('复制失败')
+  }
+
+  const doSend = async () => {
+    if (!selectedIds.length) return message.warning('请选择至少一个项目')
+    if (!templateId) return message.warning('请选择消息模板')
+    if (!groupId) return message.warning('请选择通知群')
+    const missing = fields.find((f) => f.kind === 'person' && !values[f.token])
+    if (missing) return message.warning(`请为「${missing.label}」选择人员`)
+    setLoading(true)
+    const res = await window.api.dingtalk.notify({ groupId, text: rendered.text, atMobiles: rendered.atMobiles, isAtAll: rendered.isAtAll })
+    setLoading(false)
+    if (res.ok) {
+      const g = groups.find((x) => x.id === groupId)
+      message.success(`已发送到「${g?.name || '群'}」`)
+      onClose?.()
+    } else {
+      message.error({ content: `发送失败：${res.error}`, duration: 8 })
+    }
+  }
+
+  const noGroups = groups.length === 0
+  const noTemplates = templates.length === 0
+  const inputFields = fields.filter((f) => f.kind === 'person' || f.kind === 'content')
+
+  return (
+    <Modal title={`获取合并提交信息 - ${repo?.name || ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose width={620}>
+      <Form layout="vertical">
+        <Form.Item label="本地项目（多选，仅含工单链接）" required>
+          <Select
+            mode="multiple"
+            showSearch
+            maxTagCount="responsive"
+            placeholder="选择当前分支下的本地项目"
+            value={selectedIds}
+            onChange={setSelectedIds}
+            options={(projects || []).map((p) => ({ value: p.id, label: p.description || p.store }))}
+            optionFilterProp="label"
+          />
+        </Form.Item>
+        <Form.Item label="消息模板" required>
+          <Select
+            placeholder={noTemplates ? '请先在「信息模板管理」添加模板' : '选择消息模板'}
+            value={templateId}
+            onChange={onTemplateChange}
+            options={templates.map((t) => ({ value: t.id, label: t.name }))}
+            disabled={noTemplates}
+            loading={parsing}
+          />
+        </Form.Item>
+        {inputFields.map((f) => (
+          <Form.Item key={f.token} label={f.label} required={f.kind === 'person'}>
+            {f.kind === 'person' ? (
+              <Select
+                showSearch
+                placeholder="选择人员（按其手机号 @）"
+                value={values[f.token]}
+                onChange={(v) => setValues((s) => ({ ...s, [f.token]: v }))}
+                options={(contacts || []).map((c) => ({ value: c.phone, label: `${c.name}（${c.phone}）` }))}
+                optionFilterProp="label"
+              />
+            ) : (
+              <TextArea
+                rows={2}
+                placeholder="输入文本内容"
+                value={values[f.token] || ''}
+                onChange={(e) => setValues((s) => ({ ...s, [f.token]: e.target.value }))}
+              />
+            )}
+          </Form.Item>
+        ))}
+        <Form.Item label="通知群（发送用，不选则只复制）">
+          <Select
+            allowClear
+            placeholder={noGroups ? '请先在「通知群管理」添加群' : '选择要发送的群（可留空仅复制）'}
+            value={groupId}
+            onChange={setGroupId}
+            options={groups.map((g) => ({ value: g.id, label: g.name }))}
+            disabled={noGroups}
+          />
+        </Form.Item>
+        <Form.Item label="通知内容预览（每个项目一份，按项目填充）">
+          <TextArea value={preview} readOnly autoSize={{ minRows: 4, maxRows: 12 }} placeholder="选择项目和模板后在此预览" />
+        </Form.Item>
+        <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+          <Button onClick={doCopy} disabled={!preview}>
+            复制
+          </Button>
+          <Button type="primary" loading={loading} disabled={!preview || !groupId} onClick={doSend}>
+            发送到群
+          </Button>
+        </Space>
+        {(noGroups || noTemplates) && (
+          <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 8 }}>
+            提示：需先在顶部「更多」里配置{noGroups ? '通知群' : ''}
+            {noGroups && noTemplates ? '、' : ''}
+            {noTemplates ? '信息模板' : ''}。
+          </Text>
+        )}
+      </Form>
+    </Modal>
+  )
+}
+
 /* ---------------- 拉取分支（新功能/紧急热修复/缺陷修复） ---------------- */
 const BRANCH_TYPES = [
   { value: 'feature', label: '新功能' },
@@ -1976,14 +2182,25 @@ function StageCard({ index, color, Icon, stageName, title, disabled, tooltip, on
   return tooltip ? <Tooltip title={tooltip}>{card}</Tooltip> : card
 }
 
-function GitFlowSteps({ repo, project, onAction }) {
+function GitFlowSteps({ repo, project, projects, onAction }) {
   const hasProject = !!project
+  // 当前分支下含工单链接（_tapd）的项目：第④步「获取合并提交信息」的多选候选
+  const tapdProjects = (projects || []).filter((p) => p.description && p._tapd)
 
   // 第三阶段：创建 release（绿色描边按钮置于卡内 footer）
   const releaseFooter = (
     <div style={{ marginTop: 6 }}>
       <Button size="small" style={{ borderColor: 'rgba(82,196,26,0.45)', color: '#95de64', background: 'rgba(82,196,26,0.1)' }} onClick={() => onAction('release', repo)}>
         创建 release
+      </Button>
+    </div>
+  )
+
+  // 第四阶段：获取合并提交信息（紫色；当前分支下无含工单项目时置灰）
+  const mergeInfoFooter = (
+    <div style={{ marginTop: 6 }}>
+      <Button size="small" style={{ borderColor: 'rgba(114,46,241,0.45)', color: '#b37feb', background: 'rgba(114,46,241,0.1)' }} disabled={tapdProjects.length === 0} onClick={() => onAction('mergeInfo', repo)}>
+        获取合并提交信息
       </Button>
     </div>
   )
@@ -2011,6 +2228,16 @@ function GitFlowSteps({ repo, project, onAction }) {
       />
       <FlowArrow />
       <StageCard index={3} color="#52c41a" Icon={RocketOutlined} title="release" stageName="提测完" footer={releaseFooter} />
+      <FlowArrow />
+      <StageCard
+        index={4}
+        color="#722ed1"
+        Icon={MessageOutlined}
+        title="合并提交信息"
+        stageName="上线前"
+        tooltip={tapdProjects.length === 0 ? '当前分支下没有含工单链接的本地项目' : '汇总多个项目的标题/工单，按模板生成合并通知'}
+        footer={mergeInfoFooter}
+      />
     </div>
   )
 }
@@ -2160,7 +2387,7 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
       {/* Git 流程：开发→拉分支 / 开发完→提测 / 提测完→release 创建 */}
       <div>
         <SectionLabel color="#52c41a">Git 流程</SectionLabel>
-        <GitFlowSteps repo={repo} project={repo.matched} onAction={onAction} />
+        <GitFlowSteps repo={repo} project={repo.matched} projects={projects} onAction={onAction} />
       </div>
 
       {/* 关联的本地项目：同 store 的多条都内嵌展示 */}
@@ -2460,6 +2687,7 @@ export default function Repos() {
   const [groupsOpen, setGroupsOpen] = useState(false)
   const [templatesOpen, setTemplatesOpen] = useState(false)
   const [gotestFor, setGotestFor] = useState(null) // 提测目标 project
+  const [mergeInfoFor, setMergeInfoFor] = useState(null) // 第④步「获取合并提交信息」目标 repo
 
   const [pullFor, setPullFor] = useState(null) // { repoPath, files }：运行前的模板多选（执行方式）
   const [tplModal, setTplModal] = useState(null) // { title, files }
@@ -2595,6 +2823,7 @@ export default function Repos() {
     else if (type === 'checkout') checkoutBranch(payload.repo.path, payload.branch)
     else if (type === 'branch' || type === 'release') setGitModal({ mode: type, repo: payload })
     else if (type === 'gotest') setGotestFor(payload)
+    else if (type === 'mergeInfo') setMergeInfoFor(payload)
   }
 
   // 项目卡片动作分发
@@ -2932,6 +3161,15 @@ export default function Repos() {
         projects={gotestFor ? (projectsByRepoPath.get(gotestFor.repoPath) || [gotestFor]) : []}
         contacts={contacts}
         onClose={() => setGotestFor(null)}
+      />
+
+      {/* 获取合并提交信息（第④步：多选当前分支含工单项目，标题/工单去重，按模板生成合并通知） */}
+      <MergeInfoModal
+        open={!!mergeInfoFor}
+        repo={mergeInfoFor}
+        projects={mergeInfoFor ? (projectsByRepoPath.get(mergeInfoFor.path) || []).filter((p) => p.description && p._tapd) : []}
+        contacts={contacts}
+        onClose={() => setMergeInfoFor(null)}
       />
 
       {/* 编辑本地项目（仅 非 _ 开头字段） */}
