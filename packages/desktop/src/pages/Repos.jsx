@@ -1666,6 +1666,17 @@ function GotestModal({ open, project, projects, contacts, onClose }) {
   )
 }
 
+// 把 git 远程地址（SSH/HTTPS）归一化为 https，并拼出「当前分支」的 GitHub 页链接。
+// 非 http(s)、缺分支或缺地址返回 null（不渲染链接）。SSH 形式浏览器打不开，必须转 https。
+function githubTreeUrl(remoteUrl, branch) {
+  if (!remoteUrl || !branch) return null
+  let u = String(remoteUrl).trim().replace(/\.git$/, '')
+  u = u.replace(/^git@([^:]+):/, 'https://$1/')
+  u = u.replace(/^git:\/\//, 'https://')
+  u = u.replace(/^ssh:\/\/(?:[^/@]+@)?/, 'https://')
+  return /^https?:\/\//.test(u) ? `${u}/tree/${encodeURIComponent(branch)}` : null
+}
+
 /* ---------------- 获取合并提交信息（第④步：多选当前分支项目，标题/工单去重，按模板生成合并通知） ---------------- */
 function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
   const { message } = App.useApp()
@@ -1752,6 +1763,8 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
     }
   })()
   const preview = rendered.text
+  // 当前分支的 GitHub 页链接（repo.remoteUrl 由 getRepoInfo 取 origin；点省略号在新标签打开）
+  const branchUrl = githubTreeUrl(repo?.remoteUrl, repo?.currentBranch)
 
   const doCopy = async () => {
     if (!preview) return
@@ -1838,17 +1851,31 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
             disabled={noGroups}
           />
         </Form.Item>
+        {branchUrl && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 12 }}>
+            <Text type="secondary">当前分支：</Text>
+            <ALink
+              onClick={async () => {
+                const res = await window.api.shell.openExternal(branchUrl)
+                if (!res?.ok) message.error('打开链接失败')
+              }}
+              title={branchUrl}
+            >
+              {repo?.currentBranch} ↗
+            </ALink>
+          </div>
+        )}
         <Form.Item label="通知内容预览（每个项目一份，按项目填充）">
           <TextArea value={preview} readOnly autoSize={{ minRows: 4, maxRows: 12 }} placeholder="选择项目和模板后在此预览" />
         </Form.Item>
-        <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button onClick={doCopy} disabled={!preview}>
             复制
           </Button>
           <Button type="primary" loading={loading} disabled={!preview || !groupId} onClick={doSend}>
             发送到群
           </Button>
-        </Space>
+        </div>
         {(noGroups || noTemplates) && (
           <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 8 }}>
             提示：需先在顶部「更多」里配置{noGroups ? '通知群' : ''}
@@ -2188,18 +2215,26 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
   const tapdProjects = (projects || []).filter((p) => p.description && p._tapd)
 
   // 第三阶段：创建 release（绿色描边按钮置于卡内 footer）
+  // 与第四阶段同样 width:100%，两卡 footer 等宽对齐
   const releaseFooter = (
     <div style={{ marginTop: 6 }}>
-      <Button size="small" style={{ borderColor: 'rgba(82,196,26,0.45)', color: '#95de64', background: 'rgba(82,196,26,0.1)' }} onClick={() => onAction('release', repo)}>
+      <Button size="small" style={{ width: '100%', borderColor: 'rgba(82,196,26,0.45)', color: '#95de64', background: 'rgba(82,196,26,0.1)' }} onClick={() => onAction('release', repo)}>
         创建 release
       </Button>
     </div>
   )
 
   // 第四阶段：获取合并提交信息（紫色；当前分支下无含工单项目时置灰）
+  // 卡片四等分很窄：按钮 width:100% 撑满内容区，文字过长 whiteSpace:normal 自动换行，
+  // 否则「获取合并提交信息」会撑破卡片右边界（用户反馈的样式问题）
   const mergeInfoFooter = (
     <div style={{ marginTop: 6 }}>
-      <Button size="small" style={{ borderColor: 'rgba(114,46,241,0.45)', color: '#b37feb', background: 'rgba(114,46,241,0.1)' }} disabled={tapdProjects.length === 0} onClick={() => onAction('mergeInfo', repo)}>
+      <Button
+        size="small"
+        style={{ width: '100%', whiteSpace: 'normal', height: 'auto', lineHeight: 1.25, padding: '2px 6px', borderColor: 'rgba(114,46,241,0.45)', color: '#b37feb', background: 'rgba(114,46,241,0.1)' }}
+        disabled={tapdProjects.length === 0}
+        onClick={() => onAction('mergeInfo', repo)}
+      >
         获取合并提交信息
       </Button>
     </div>
@@ -2435,6 +2470,8 @@ function EditProjectModal({ open, project, onClose, onDone }) {
       editableKeys.forEach((k) => {
         vals[k] = project[k] != null ? String(project[k]) : ''
       })
+      // 工单链接（_ 开头字段被 editableKeys 过滤掉）单独回填，允许编辑
+      vals._tapd = project._tapd ?? ''
       form.setFieldsValue(vals)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2477,6 +2514,9 @@ function EditProjectModal({ open, project, onClose, onDone }) {
             </Form.Item>
           ),
         )}
+        <Form.Item name="_tapd" label="工单（tapd 链接）">
+          <Input placeholder="工单链接，可留空" />
+        </Form.Item>
         <Button type="primary" htmlType="submit" loading={loading}>
           保存
         </Button>

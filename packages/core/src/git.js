@@ -55,6 +55,18 @@ async function detectBaseBranch(repoPath) {
 }
 
 /**
+ * 取仓库的 origin 远程地址（git remote get-url origin）。无 origin / 非 git 仓库返回 null。
+ * 供拼接「当前分支的 GitHub 页」等外链：原始地址可能是 SSH 或 HTTPS，用 normalizeGitUrl 归一化。
+ * @param {string} repoPath
+ * @returns {Promise<string | null>}
+ */
+export async function getRemoteUrl(repoPath) {
+  if (!isGitRepo(repoPath)) return null
+  const r = await runGit(['remote', 'get-url', 'origin'], repoPath)
+  return r.code === 0 ? r.stdout.trim() : null
+}
+
+/**
  * 轻量取仓库分支信息：当前分支 + 本地分支列表。供弹窗选基准/目标/主分支用（不计算 changedFiles）。
  * @param {string} repoPath
  * @returns {Promise<{ current: string | null, branches: string[] }>}
@@ -178,16 +190,19 @@ export function isGitRepo(dir) {
 export async function getRepoInfo(repoPath, { maxCount = 20 } = {}) {
   const name = basename(repoPath)
   if (!isGitRepo(repoPath)) {
-    return { path: repoPath, name, isRepo: false, currentBranch: null, branches: [], branchCount: 0, changedFiles: [] }
+    return { path: repoPath, name, isRepo: false, currentBranch: null, branches: [], branchCount: 0, changedFiles: [], remoteUrl: null }
   }
 
-  // 当前分支 + 本地分支列表（复用 listBranches）
-  const { current: currentBranch, branches } = await listBranches(repoPath)
+  // 当前分支 + 本地分支列表（复用 listBranches）；远程地址（origin）并行取，供拼接分支外链
+  const [{ current: currentBranch, branches }, remoteUrl] = await Promise.all([
+    listBranches(repoPath),
+    getRemoteUrl(repoPath),
+  ])
 
   // 当前分支最终的改动文件（已提交 ∪ 工作区未提交，去重）
   const changedFiles = await getChangedFiles(repoPath, { maxCount })
 
-  return { path: repoPath, name, isRepo: true, currentBranch, branches, branchCount: branches.length, changedFiles }
+  return { path: repoPath, name, isRepo: true, currentBranch, branches, branchCount: branches.length, changedFiles, remoteUrl }
 }
 
 /**
@@ -234,6 +249,24 @@ export function repoNameFromUrl(url) {
   // SSH 用 ':' 分隔 host:path；HTTPS 用 '/'。统一取最后一段。
   const last = cleaned.replace(/^.*[:/]/, '')
   return last || cleaned
+}
+
+/**
+ * 把任意 git 远程地址归一化为 https URL（去 .git；SSH/git/ssh 协议头 → https）。
+ *   git@github.com:org/Repo.git    → https://github.com/org/Repo
+ *   https://github.com/org/Repo.git → https://github.com/org/Repo
+ * 供「拼接当前分支页」等外链用（非 https 形式浏览器打不开）。空值返回 ''。
+ * @param {string} url
+ * @returns {string}
+ */
+export function normalizeGitUrl(url) {
+  let u = String(url || '').trim()
+  if (!u) return ''
+  u = u.replace(/\.git$/, '')
+  u = u.replace(/^git@([^:]+):/, 'https://$1/') // git@host:org/repo → https://host/org/repo
+  u = u.replace(/^git:\/\//, 'https://') // git://host/... → https://...
+  u = u.replace(/^ssh:\/\/(?:[^/@]+@)?/, 'https://') // ssh://[user@]host/... → https://host/...
+  return u
 }
 
 /**
