@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="box" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DBE2EE"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBBF24"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <clipPath id="sq">
+      <rect x="0" y="0" width="1024" height="1024" rx="230" ry="230"/>
+    </clipPath>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="230" ry="230" fill="url(#bg)"/>
+  <g clip-path="url(#sq)">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#gloss)"/>
+  </g>
+
+  <!-- 工具箱投影（加深） -->
+  <ellipse cx="512" cy="765" rx="262" ry="30" fill="#000" opacity="0.26" filter="url(#soft)"/>
+
+  <!-- 提手（拱形，放大） -->
+  <path d="M 340 387 L 340 350 Q 340 277 413 277 L 611 277 Q 684 277 684 350 L 684 387"
+        fill="none" stroke="url(#amber)" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 箱体（放大） -->
+  <rect x="232" y="387" width="560" height="360" rx="64" ry="64" fill="url(#box)"/>
+  <rect x="232" y="387" width="560" height="360" rx="64" ry="64" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="2"/>
+
+  <!-- 抽屉缝（加粗加深） -->
+  <line x1="300" y1="560" x2="724" y2="560" stroke="#AEB8C7" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- 卡扣（放大） -->
+  <rect x="480" y="618" width="64" height="44" rx="14" ry="14" fill="url(#amber)"/>
+</svg>

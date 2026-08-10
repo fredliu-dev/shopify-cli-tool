@@ -147,8 +147,9 @@ function Masonry({ minColWidth = 440, gap = 12, draggable = false, onReorder, ch
     if (!draggable || e.button !== 0) return
     const p = layout?.positions?.[itemIndex]
     if (!p) return
-    // 立即俘获指针：保证后续 move/up 不因鼠标移出卡片而丢失；未超阈值则 up 时释放、按普通点击处理
-    itemRefs.current[itemIndex]?.setPointerCapture?.(e.pointerId)
+    // 注意：此处不能 setPointerCapture！pointerdown 立即俘获指针会让兼容性 mouse 事件
+    // （mousedown/up/click）全部重定向到卡片层 → 卡片内的按钮永远收不到 click。
+    // 改为仅记 pending，等移动超阈值、确定是拖拽时（见 onPointerMove）再俘获指针。
     const rect = containerRef.current.getBoundingClientRect()
     pendingRef.current = {
       itemIndex,
@@ -170,6 +171,9 @@ function Masonry({ minColWidth = 440, gap = 12, draggable = false, onReorder, ch
       const dy = e.clientY - pend.startY
       if (dx * dx + dy * dy < 25) return
       pendingRef.current = null
+      // 确定是拖拽了才俘获指针：保证鼠标移出卡片/窗口时 move/up 不丢失。
+      // 推迟到此处才 capture，是卡片内按钮 click 能正常工作的关键。
+      itemRefs.current[pend.itemIndex]?.setPointerCapture?.(pend.pointerId)
       setDrag({ itemIndex: pend.itemIndex, pointerId: pend.pointerId, offX: pend.offX, offY: pend.offY, curLeft: pend.cardLeft, curTop: pend.cardTop })
       return
     }
@@ -221,8 +225,7 @@ function Masonry({ minColWidth = 440, gap = 12, draggable = false, onReorder, ch
   const onPointerUp = () => {
     const pend = pendingRef.current
     if (pend) {
-      // 未启动拖拽：释放俘获、当作普通点击（按钮 click 不受影响）
-      itemRefs.current[pend.itemIndex]?.releasePointerCapture?.(pend.pointerId)
+      // 未启动拖拽（此时未俘获指针）：当作普通点击，按钮 click 正常派发
       pendingRef.current = null
       return
     }
@@ -1784,77 +1787,50 @@ function CreateBranchModal({ open, repo, onClose, onDone, contacts }) {
   )
 }
 
-/* ---------------- 创建 release（release/version-{英文版本名}，可选 shop copy） ---------------- */
+/* ---------------- 创建 release（release/version-{英文版本名}；复制主题名称供后台手动建主题） ---------------- */
 function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
-  const { message, modal } = App.useApp()
+  const { message } = App.useApp()
   const { local, remote, loading: branchLoading, reload } = useRepoBranches(repo)
   const [loading, setLoading] = useState(false)
   const [form] = Form.useForm()
   const version = Form.useWatch('version', form)
-  const copyTheme = Form.useWatch('copyTheme', form)
-  const canCopy = !!repo?.devEnv // 复制主题需要 dev 环境配置（store）
+  const activity = Form.useWatch('activity', form)
+  const owner = Form.useWatch('owner', form)
 
   const branchName = version ? `release/version-${version}` : ''
 
   useEffect(() => {
     if (!open) return
-    form.setFieldsValue({ version: '', copyTheme: false, activity: '', owner: '' })
+    form.setFieldsValue({ version: '', activity: '', owner: '' })
     reload().then((snap) => snap?.current && form.setFieldValue('base', snap.current))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repo])
 
+  // 主题名命名规则与 core duplicateLiveTheme(namePrefix='release') 完全一致：
+  // [release] 活动 | 负责人 | YYYYMMDD。此处仅生成名称供复制，主题由用户在 Shopify 后台手动新建（不再自动 shop copy）。
+  const themeName = (() => {
+    const a = (activity || '').trim()
+    const o = (owner || '').trim()
+    if (!a || !o) return ''
+    const now = new Date()
+    const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+    return `[release] ${a} | ${o} | ${dateStr}`
+  })()
+
+  const copyThemeName = async () => {
+    if (!themeName) return
+    try {
+      await navigator.clipboard.writeText(themeName)
+      message.success(`已复制主题名称：${themeName}`)
+    } catch {
+      message.error('复制失败，请手动选中复制')
+    }
+  }
+
   const submit = async (vals) => {
     setLoading(true)
-    // 1) 可选：先复制主题（shop copy，主题名前缀 [release]）；失败则中止，不创建分支
-    if (vals.copyTheme && canCopy) {
-      const cr = await window.api.repos.copyLive({
-        dir: repo.path,
-        envName: 'dev', // 仍用 dev 环境取 store
-        envConfig: repo.devEnv,
-        activity: vals.activity,
-        owner: vals.owner,
-        namePrefix: 'release', // 主题名前缀用 release
-      })
-      if (!cr.ok) {
-        setLoading(false)
-        // 像「本地保存」一样弹详细框：显示 shopify 的 stderr，便于判断是没登录 / store 错 / 其它
-        modal.error({
-          title: '复制主题失败',
-          content: (
-            <div style={{ maxHeight: 280, overflow: 'auto' }}>
-              <div style={{ fontWeight: 500 }}>{cr.error}</div>
-              {cr.stderr && (
-                <pre
-                  style={{
-                    marginTop: 8,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    fontSize: 12,
-                    background: 'rgba(255,255,255,0.05)',
-                    padding: 8,
-                    borderRadius: 4,
-                  }}
-                >
-                  {cr.stderr.trim()}
-                </pre>
-              )}
-            </div>
-          ),
-        })
-        return // 主题没复制成功就不创建分支
-      }
-      // 2) 再创建 release 分支
-      const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName, push: true })
-      setLoading(false)
-      if (res.ok) {
-        message.success(`已复制主题：${cr.data.name}（${cr.data.id}）；已创建并切换到 ${branchName}（已推送远程）`)
-        onDone?.()
-      } else {
-        message.error(`主题已复制（${cr.data.name}），但创建分支失败：${res.error}`)
-      }
-      return
-    }
-    // 未勾选复制主题：直接创建分支（同样推送到远程，与勾选复制主题的路径一致）
+    // 主题不再由本工具复制：用户点「复制主题名称」后到 Shopify 后台手动新建。
+    // 这里只创建 release 分支（推送到远程）。
     const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName, push: true })
     setLoading(false)
     if (res.ok) {
@@ -1867,7 +1843,7 @@ function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
 
   return (
     <Modal title={`创建 release - ${repo?.name ?? ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose>
-      <Form form={form} layout="vertical" onFinish={submit} initialValues={{ copyTheme: false }}>
+      <Form form={form} layout="vertical" onFinish={submit}>
         <Form.Item name="base" label="基准分支" rules={[{ required: true, message: '请选择基准分支' }]}>
           <Select
             showSearch
@@ -1906,32 +1882,29 @@ function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
         >
           <Input placeholder="如 2024spring" />
         </Form.Item>
-        <Form.Item
-          name="copyTheme"
-          valuePropName="checked"
-          tooltip={canCopy ? '复制 live 主题为草稿，主题名前缀 [release]' : '需先初始化 dev 环境配置'}
-        >
-          <Checkbox disabled={!canCopy}>同时复制一份主题（shop copy，[release] 前缀）</Checkbox>
+        <Form.Item name="activity" label="活动名称">
+          <Input placeholder="用于生成主题名称" />
         </Form.Item>
-        {copyTheme && canCopy && (
-          <>
-            <Form.Item name="activity" label="活动名称" rules={[{ required: true, message: '请输入活动名称' }]}>
-              <Input />
-            </Form.Item>
-            <Form.Item name="owner" label="负责人" rules={[{ required: true, message: '请输入负责人' }]}>
-              <AutoComplete
-                options={(contacts || []).map((c) => ({ value: c.name }))}
-                filterOption={(v, o) => String(o.value).toLowerCase().includes(String(v).toLowerCase())}
-                style={{ width: '100%' }}
-              >
-                <Input placeholder="负责人（可从已录入人员选择或手输）" />
-              </AutoComplete>
-            </Form.Item>
-            <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-              主题名格式：[release] 活动 | 负责人 | 日期；需该 store 已 shopify login。
-            </Text>
-          </>
-        )}
+        <Form.Item name="owner" label="负责人">
+          <AutoComplete
+            options={(contacts || []).map((c) => ({ value: c.name }))}
+            filterOption={(v, o) => String(o.value).toLowerCase().includes(String(v).toLowerCase())}
+            style={{ width: '100%' }}
+          >
+            <Input placeholder="负责人（可从已录入人员选择或手输）" />
+          </AutoComplete>
+        </Form.Item>
+        <Form.Item label="主题名称">
+          <Space.Compact style={{ width: '100%' }}>
+            <Input value={themeName} readOnly placeholder="填写活动名称与负责人后生成主题名" />
+            <Button onClick={copyThemeName} disabled={!themeName}>
+              复制主题名称
+            </Button>
+          </Space.Compact>
+        </Form.Item>
+        <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+          命名格式：[release] 活动 | 负责人 | 日期。复制名称后，请到 Shopify 后台手动新建主题（不再自动复制 live 主题）。
+        </Text>
         <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
           分支名预览：<Text code>{branchName || 'release/version-{版本名}'}</Text>
         </Text>

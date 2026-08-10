@@ -9,7 +9,10 @@ packages/cli/src/projects/
 packages/desktop/dist
 packages/desktop/out
 packages/desktop/release
-packages/desktop/build
+# build/ 是 electron-builder 的静态资源目录（图标等），不是产物；
+# 忽略其中可能产生的杂物，但保留图标源文件
+packages/desktop/build/*
+!packages/desktop/build/icon.*
 
 # 杂项
 *.log
