@@ -1,6 +1,6 @@
 {
   "name": "@shopify-cli-tool/desktop",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Shopify CLI 工具的 Electron 桌面应用",
   "main": "./out/main/index.js",
@@ -15,8 +15,10 @@
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
     "@shopify-cli-tool/core": "workspace:*",
+    "@shopify/cli": "^4.5.2",
     "adm-zip": "^0.6.0",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "smol-toml": "^1.7.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
