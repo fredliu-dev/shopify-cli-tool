@@ -1,6 +1,12 @@
 appId: dev.fredliu.shopify-desktop
 productName: Shopify Toolbox
 
+# 不打 asar：runner.js 用 spawn 出去的「系统 node」跑 @shopify/cli 的 bin/run.js，
+# 而系统 node 无法读取 app.asar 归档（报 MODULE_NOT_FOUND）。
+# 关掉 asar 让 node_modules 以真实目录存在，require.resolve 拿到的就是可直接访问的路径。
+# （内部工具，不签名/公证，asar 的隐藏/启动加速收益可忽略。）
+asar: false
+
 # 产物输出目录
 directories:
   output: release

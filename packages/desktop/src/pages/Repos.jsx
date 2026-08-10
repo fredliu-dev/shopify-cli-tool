@@ -22,7 +22,6 @@ import {
 } from '@ant-design/icons'
 import {
   App,
-  Alert,
   AutoComplete,
   Badge,
   Button,
@@ -1916,160 +1915,9 @@ function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
   )
 }
 
-/* ---------------- 合并：开发分支(_branch) → release，先合主分支解冲突 ---------------- */
-function MergeModal({ open, repo, onClose, onDone }) {
-  const { message } = App.useApp()
-  const { local, remote, loading: branchLoading, reload } = useRepoBranches(repo)
-  const [dirty, setDirty] = useState([])
-  const [branchesLoaded, setBranchesLoaded] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [form] = Form.useForm()
-
-  const source = repo?.devEnv?._branch || ''
-  // release/* 分支：本地 + 远程合并（远程已去重），统一作为可选目标
-  const releaseBranches = [
-    ...local.filter((b) => b.startsWith('release/')),
-    ...remote.filter((b) => b.startsWith('release/')),
-  ]
-  const blocked = dirty.length > 0 || releaseBranches.length === 0 || !source
-
-  useEffect(() => {
-    if (!open || !repo?.path) return
-    ;(async () => {
-      const snap = await reload()
-      setBranchesLoaded(true) // 分支查询完成：之后才允许显示「暂无 release 分支」
-      const wt = await window.api.repos.workingTree({ dir: repo.path })
-      setDirty(wt.ok ? wt.data || [] : [])
-      if (snap) {
-        // 用本次 fetch 快照（而非 state）算默认值，避免拿到旧列表
-        const rel = [...snap.local, ...snap.remote].filter((b) => b.startsWith('release/'))
-        const mainGuess =
-          snap.local.find((b) => b === 'main' || b === 'master') ||
-          snap.remote.find((b) => b === 'main' || b === 'master')
-        form.setFieldsValue({
-          target: snap.current?.startsWith('release/') ? snap.current : rel[0],
-          main: mainGuess,
-        })
-      }
-    })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, repo])
-
-  const submit = async (vals) => {
-    setLoading(true)
-    const res = await window.api.repos.merge({ dir: repo.path, source, target: vals.target, main: vals.main })
-    setLoading(false)
-    if (res.ok) {
-      message.success('合并成功')
-      onDone?.()
-    } else {
-      message.error({
-        content: `合并失败${res.error || ''}`,
-        duration: 8,
-      })
-    }
-  }
-
-  return (
-    <Modal title={`合并 - ${repo?.name ?? ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose width={520}>
-      <Form form={form} layout="vertical" onFinish={submit}>
-        <Form.Item label="开发分支（源，取自 _branch）">
-          <Input value={source || '（未配置 _branch）'} disabled />
-        </Form.Item>
-        {dirty.length > 0 && (
-          <Alert
-            type="error"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="工作区有未提交文件，无法合并"
-            description={
-              <div style={{ maxHeight: 160, overflow: 'auto', fontFamily: 'monospace', fontSize: 12 }}>
-                {dirty.map((f) => (
-                  <div key={f}>{f}</div>
-                ))}
-              </div>
-            }
-          />
-        )}
-        {dirty.length === 0 && !branchesLoaded && (
-          <Alert type="info" showIcon style={{ marginBottom: 16 }} message="正在查询 release 分支，请稍候…" />
-        )}
-        {dirty.length === 0 && branchesLoaded && releaseBranches.length === 0 && (
-          <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="该仓库暂无 release/version-* 分支，请先「创建 release」" />
-        )}
-        <Form.Item name="target" label="目标 release 分支（合并到此）" rules={[{ required: true }]}>
-          <Select
-            showSearch
-            loading={branchLoading}
-            placeholder="选择 release 分支"
-            disabled={blocked}
-            popupMatchSelectWidth={false}
-            onDropdownVisibleChange={(o) => o && reload()}
-          >
-            {local.filter((b) => b.startsWith('release/')).length > 0 && (
-              <Select.OptGroup label="本地分支">
-                {local
-                  .filter((b) => b.startsWith('release/'))
-                  .map((b) => (
-                    <Select.Option key={`l/${b}`} value={b}>
-                      {b}
-                    </Select.Option>
-                  ))}
-              </Select.OptGroup>
-            )}
-            {remote.filter((b) => b.startsWith('release/')).length > 0 && (
-              <Select.OptGroup label="远程分支">
-                {remote
-                  .filter((b) => b.startsWith('release/'))
-                  .map((b) => (
-                    <Select.Option key={`r/${b}`} value={b}>
-                      {b}
-                    </Select.Option>
-                  ))}
-              </Select.OptGroup>
-            )}
-          </Select>
-        </Form.Item>
-        <Form.Item name="main" label="主分支（先合并进来解冲突）" rules={[{ required: true }]}>
-          <Select
-            showSearch
-            loading={branchLoading}
-            placeholder="选择主分支"
-            disabled={blocked}
-            popupMatchSelectWidth={false}
-            onDropdownVisibleChange={(o) => o && reload()}
-          >
-            {local.length > 0 && (
-              <Select.OptGroup label="本地分支">
-                {local.map((b) => (
-                  <Select.Option key={`l/${b}`} value={b}>
-                    {b}
-                  </Select.Option>
-                ))}
-              </Select.OptGroup>
-            )}
-            {remote.length > 0 && (
-              <Select.OptGroup label="远程分支">
-                {remote.map((b) => (
-                  <Select.Option key={`r/${b}`} value={b}>
-                    {b}
-                  </Select.Option>
-                ))}
-              </Select.OptGroup>
-            )}
-          </Select>
-        </Form.Item>
-        <Button type="primary" htmlType="submit" loading={loading} disabled={blocked}>
-          开始合并
-        </Button>
-      </Form>
-    </Modal>
-  )
-}
-
 /* ---------------- Git 流程：阶段式流程卡（开发→提测→release） ---------------- */
-// 三段彩色卡片用箭头串联：①开发·拉分支 → ②开发完·提测 → ③提测完·release（创建+合并）。
-// 禁用态沿用原逻辑：提测需先有本地项目；合并需 [environments.dev]._branch。
+// 三段彩色卡片用箭头串联：①开发·拉分支 → ②开发完·提测 → ③提测完·release（创建）。
+// 禁用态沿用原逻辑：提测需先有本地项目。
 function FlowArrow() {
   return <ArrowRightOutlined style={{ fontSize: 12, color: '#c9cdd4', flexShrink: 0, alignSelf: 'center' }} />
 }
@@ -2130,19 +1978,13 @@ function StageCard({ index, color, Icon, stageName, title, disabled, tooltip, on
 
 function GitFlowSteps({ repo, project, onAction }) {
   const hasProject = !!project
-  const hasBranch = !!repo?.devEnv?._branch
 
-  // 第三阶段：创建 release + 合并（两个按钮置于卡内 footer；创建 release 用绿色描边作主操作）
+  // 第三阶段：创建 release（绿色描边按钮置于卡内 footer）
   const releaseFooter = (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+    <div style={{ marginTop: 6 }}>
       <Button size="small" style={{ borderColor: 'rgba(82,196,26,0.45)', color: '#95de64', background: 'rgba(82,196,26,0.1)' }} onClick={() => onAction('release', repo)}>
         创建 release
       </Button>
-      <Tooltip title={!hasBranch ? '请先在 [environments.dev] 补 _branch' : '把 _branch 合并进 release'}>
-        <Button size="small" disabled={!hasBranch} onClick={() => onAction('merge', repo)}>
-          合并
-        </Button>
-      </Tooltip>
     </div>
   )
 
@@ -2315,7 +2157,7 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
         </Space>
       </div>
 
-      {/* Git 流程：开发→拉分支 / 开发完→提测 / 提测完→release 创建+合并 */}
+      {/* Git 流程：开发→拉分支 / 开发完→提测 / 提测完→release 创建 */}
       <div>
         <SectionLabel color="#52c41a">Git 流程</SectionLabel>
         <GitFlowSteps repo={repo} project={repo.matched} onAction={onAction} />
@@ -2625,7 +2467,7 @@ export default function Repos() {
   const [cloneable, setCloneable] = useState([]) // 模板 _github 项目 + 是否已存在（供「创建项目」查重）
   const [createProjectOpen, setCreateProjectOpen] = useState(false)
   const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false)
-  const [gitModal, setGitModal] = useState(null) // { mode:'branch'|'release'|'merge', repo }
+  const [gitModal, setGitModal] = useState(null) // { mode:'branch'|'release', repo }
   const [editProject, setEditProject] = useState(null) // 编辑本地项目
 
   // 刷新「创建项目」可选模板（带 _github 且未在工作区存在的）
@@ -2751,7 +2593,7 @@ export default function Repos() {
     else if (type === 'save') setEditRepo({ mode: 'save', repo: payload })
     else if (type === 'templates') setTplModal(payload)
     else if (type === 'checkout') checkoutBranch(payload.repo.path, payload.branch)
-    else if (type === 'branch' || type === 'release' || type === 'merge') setGitModal({ mode: type, repo: payload })
+    else if (type === 'branch' || type === 'release') setGitModal({ mode: type, repo: payload })
     else if (type === 'gotest') setGotestFor(payload)
   }
 
@@ -3106,7 +2948,7 @@ export default function Repos() {
       {/* 关于：版本信息 */}
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
 
-      {/* 拉取分支 / 创建 release / 合并 */}
+      {/* 拉取分支 / 创建 release */}
       {gitModal?.mode === 'branch' && (
         <CreateBranchModal
           open
@@ -3125,18 +2967,6 @@ export default function Repos() {
           open
           repo={gitModal.repo}
           contacts={contacts}
-          onClose={() => setGitModal(null)}
-          onDone={() => {
-            const path = gitModal.repo.path
-            setGitModal(null)
-            refreshRepo(path)
-          }}
-        />
-      )}
-      {gitModal?.mode === 'merge' && (
-        <MergeModal
-          open
-          repo={gitModal.repo}
           onClose={() => setGitModal(null)}
           onDone={() => {
             const path = gitModal.repo.path
