@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, clipboard } from 'electron'
+import { ipcMain, BrowserWindow } from 'electron'
 import { watch, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { listEditors, openInEditor } from '../editor.js'
@@ -8,11 +8,6 @@ const load = () => import('@shopify-cli-tool/core')
 /** 把消息推给渲染层（取首个窗口；桌面端只有一个主窗口）。 */
 const send = (channel, payload) => BrowserWindow.getAllWindows()[0]?.webContents.send(channel, payload)
 
-/** templates 下的 json 文件判定（与 CLI _pull-changed-json.js 一致）。 */
-function isTemplateJson(p) {
-  return /(^|\/)templates?\//i.test(p) && /\.json$/i.test(p)
-}
-
 /* -------- 文件监听：配置/templates 变动后重取该仓库状态并推给渲染层 -------- */
 const watchers = new Map() // repoPath -> FSWatcher[]
 const debounce = new Map() // repoPath -> timer
@@ -21,7 +16,7 @@ const debounce = new Map() // repoPath -> timer
 async function refreshAndSend(repoPath, core) {
   try {
     const info = await core.getRepoInfo(repoPath)
-    send('repos:repoUpdated', { repo: { ...info, ...core.getRepoStatus(repoPath, info.currentBranch) } })
+    send('repos:repoUpdated', { repo: { ...info, ...core.getRepoStatus(repoPath, info.currentBranch, { remote: info.remoteUrl }) } })
   } catch {
     /* 仓库被删等：忽略 */
   }
@@ -84,7 +79,7 @@ function closeAllWatchers() {
 async function rescanWorkspace(dir, core) {
   try {
     const repos = await core.scanGitRepos(dir)
-    const data = repos.map((r) => ({ ...r, ...core.getRepoStatus(r.path, r.currentBranch) }))
+    const data = repos.map((r) => ({ ...r, ...core.getRepoStatus(r.path, r.currentBranch, { remote: r.remoteUrl }) }))
     const nextPaths = new Set(repos.map((r) => r.path))
     // 已不存在的仓库：关闭其内部监听
     for (const p of [...watchers.keys()]) {
@@ -130,7 +125,7 @@ function watchWorkspace(dir, core) {
 }
 
 /**
- * repos 域 IPC handlers：仓库工作台（扫描/状态/初始化复用 config/保存/复制 live/拉取/运行/编辑器）。
+ * repos 域 IPC handlers：仓库工作台（扫描/状态/初始化复用 config/保存/复制 live/切换配置/编辑器）。
  * core 是 ESM 包，CJS 主进程用动态 import 加载。
  */
 export function registerReposIpc() {
@@ -139,7 +134,7 @@ export function registerReposIpc() {
     const core = await load()
     try {
       const repos = await core.scanGitRepos(dir)
-      const data = repos.map((r) => ({ ...r, ...core.getRepoStatus(r.path, r.currentBranch) }))
+      const data = repos.map((r) => ({ ...r, ...core.getRepoStatus(r.path, r.currentBranch, { remote: r.remoteUrl }) }))
       // 全量重扫：先关闭所有旧监听（含上一个工作区残留），再按新结果重建
       closeAllWatchers()
       // 为每个仓库建立文件监听（配置/templates 变动后实时刷新）
@@ -157,7 +152,7 @@ export function registerReposIpc() {
     const { getRepoInfo, getRepoStatus } = await load()
     try {
       const info = await getRepoInfo(repoPath)
-      return { ok: true, data: { ...info, ...getRepoStatus(repoPath, info.currentBranch) } }
+      return { ok: true, data: { ...info, ...getRepoStatus(repoPath, info.currentBranch, { remote: info.remoteUrl }) } }
     } catch (err) {
       return { ok: false, error: err.message }
     }
@@ -208,47 +203,12 @@ export function registerReposIpc() {
     }
   })
 
-  // 当前分支改动过的 templates json（供运行前多选拉取）
-  ipcMain.handle('repos:changedJson', async (_evt, { dir }) => {
-    const { getChangedFiles } = await load()
+  // 把仓库的 shopify.theme.toml 切换到指定本地项目配置（项目卡片「切换」按钮）：
+  // 不复制命令、不打开编辑器，只把 [environments.dev] 改成该项目字段，使其成为「当前生效」。
+  ipcMain.handle('repos:switchConfig', async (_evt, { dir, projectId }) => {
+    const { switchConfigToProject } = await load()
     try {
-      const files = (await getChangedFiles(dir)).filter(isTemplateJson)
-      return { ok: true, data: files }
-    } catch (err) {
-      return { ok: false, error: err.message }
-    }
-  })
-
-  /**
-   * 拼接「选中的改动 json pull + theme dev」为一条命令（与 shop async 对齐）。
-   * pullFiles 为空时只跑 dev。不含 cd：编辑器已用该仓库目录打开（openInEditor），
-   * 其集成终端 cwd 即为项目根，shopify 能直接定位 shopify.theme.toml，粘贴即用。
-   *
-   * 命令分隔符按平台选：mac/linux 用 `&&`（单行、pull 失败则不跑 dev、粘贴无多行确认弹窗；
-   * 这些 shell 都支持 &&）；Windows 改用换行——`&&` 在老版 PowerShell 5.1 不被支持，
-   * 而换行对 cmd / PowerShell（5.1 与 7）/ Git Bash 都通用（粘贴时逐行执行）。
-   * （此命令仅写入剪贴板由用户手动粘贴，故换行不会影响任何自动注入路径。）
-   */
-  function buildAsyncCommand(pullFiles, env = 'dev') {
-    const parts = []
-    if (Array.isArray(pullFiles) && pullFiles.length) {
-      const only = pullFiles.map((f) => `--only "${f}"`).join(' ')
-      parts.push(`shopify theme pull -e ${env} ${only}`)
-    }
-    parts.push(`shopify theme dev --theme-editor-sync -e ${env}`)
-    return parts.join(process.platform === 'win32' ? '\n' : ' && ')
-  }
-
-  // 打开编辑器到该仓库目录，并把启动命令（pull + theme dev）复制到剪贴板；不再自动注入/
-  // 执行——用户在编辑器终端粘贴运行即可。命令已含 cd + INIT_CWD，粘贴即用、无需改环境。
-  ipcMain.handle('repos:runCommand', async (_evt, { dir, editorId, pullFiles }) => {
-    try {
-      const command = buildAsyncCommand(pullFiles)
-      clipboard.writeText(command) // 启动命令写入剪贴板
-      try {
-        openInEditor(dir, editorId) // 打开编辑器到该仓库目录
-      } catch {}
-      return { ok: true, command }
+      return { ok: true, data: await switchConfigToProject(dir, projectId) }
     } catch (err) {
       return { ok: false, error: err.message }
     }
@@ -287,26 +247,32 @@ export function registerReposIpc() {
     }
   })
 
-  // 切换本地分支（git checkout）
+  // 切换本地分支（git checkout）：成功后同步 shopify.theme.toml 到目标分支对应的项目配置
+  // （该分支无项目则删 toml；toml 被 git 跟踪则跳过，由 git 自行切换）。createBranch 不走这里——
+  // 新建分支必然无项目，同步会删掉正在用的配置，故 createBranch 豁免。
   ipcMain.handle('repos:checkout', async (_evt, { dir, branch }) => {
-    const { checkoutBranch } = await load()
+    const { checkoutBranch, syncConfigForBranch } = await load()
     try {
       const res = await checkoutBranch(dir, branch)
-      if (res.ok) return { ok: true }
-      return { ok: false, error: res.error }
+      if (!res.ok) return { ok: false, error: res.error }
+      const sync = await syncConfigForBranch(dir, branch)
+      return { ok: true, data: { sync } }
     } catch (err) {
       return { ok: false, error: err.message }
     }
   })
 
   // 基于基准分支创建并切到新分支（先 fetch origin/<base>，回退本地 <base>）；
-  // push=true 时先校验远程同名分支再推到 origin（「拉取分支」用，远程已存在则拒绝创建）
+  // push=true 时先校验远程同名分支再推到 origin（「拉取分支」用，远程已存在则拒绝创建）。
+  // 与 checkout 一致：切到新分支后同步 toml——新分支名是全新的，几乎不会有对应本地项目，
+  // 故通常结果是「无项目 → 删除上分支残留的 toml」，逼用户在新分支重新初始化/保存。
   ipcMain.handle('repos:createBranch', async (_evt, { dir, base, name, push }) => {
-    const { createBranch } = await load()
+    const { createBranch, syncConfigForBranch } = await load()
     try {
       const res = await createBranch(dir, { base, name, fetch: true, push })
-      if (res.ok) return { ok: true }
-      return { ok: false, error: res.error }
+      if (!res.ok) return { ok: false, error: res.error }
+      const sync = await syncConfigForBranch(dir, name)
+      return { ok: true, data: { sync } }
     } catch (err) {
       return { ok: false, error: err.message }
     }

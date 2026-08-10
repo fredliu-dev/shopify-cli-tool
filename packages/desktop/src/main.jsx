@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { ConfigProvider, App as AntdApp, theme as antdTheme } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import 'antd/dist/reset.css'
+import './active-shimmer.css'
 import App from './App.jsx'
 
 // 外层就上 darkAlgorithm：AntdApp 提供的静态 modal/message（如提测默认值询问）才会跟 UI 一致为暗色，

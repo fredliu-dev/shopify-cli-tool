@@ -5,6 +5,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { getRecordedBase, recordBase } from './bases.js'
 
 /**
  * 在 cwd 跑一次 git 子进程，捕获 stdout/stderr。
@@ -42,16 +43,48 @@ function uniqLines(s) {
 }
 
 /**
- * 探测基准分支：优先 main，其次 master；都没有返回 null。
+ * 探测基准分支：用于 getChangedFiles 取「本分支自 fork-point 以来的改动」。
+ *
+ * 不能只用本地 main/master——团队协作里本地主干常因没 fetch 而过期（落后远端几十条提交），
+ * 用它当基准会让 merge-base 落在很老的 fork-point，changedFiles 多出一堆别分支并入的文件。
+ * 故候选**远端优先**（origin/main、origin/master 比本地新鲜），且只取「是 HEAD 祖先」者
+ * （HEAD 包含它的提交，才谈得上「从它拉出来」），并在其中取**HEAD 领先数最小**的一条——
+ * 领先数 = 本分支独有提交数，越小越接近真正的 fork-point，changedFiles 越准。
+ *
+ * 但纯拓扑在「已合并回 release」的分支上仍会失效（release 翻成下游、与兄弟分支难分），
+ * 故**优先用 createBranch 时记录的基准**（getRecordedBase，工作流已知、最准），记录不存在或
+ * 其引用已失效时才回退到下面的拓扑推断。
  * @param {string} repoPath
- * @returns {Promise<string | null>}
+ * @returns {Promise<string | null>} 基准分支全名（含 origin/ 前缀）；无合适候选返回 null
  */
 async function detectBaseBranch(repoPath) {
-  for (const candidate of ['main', 'master']) {
-    const r = await runGit(['rev-parse', '--verify', '--quiet', candidate], repoPath)
-    if (r.code === 0 && r.stdout.trim()) return candidate
+  // 1. 优先用创建分支时记录的基准（最准）；校验其引用仍在，否则回退
+  const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
+  if (head.code === 0) {
+    const recorded = getRecordedBase(repoPath, head.stdout.trim())
+    if (recorded) {
+      const ex = await runGit(['rev-parse', '--verify', '--quiet', recorded], repoPath)
+      if (ex.code === 0 && ex.stdout.trim()) return recorded
+    }
   }
-  return null
+  // 2. 回退：远端优先 + 取是祖先且领先数最小的候选
+  const candidates = ['origin/main', 'main', 'origin/master', 'master', 'origin/develop', 'develop']
+  let best = null
+  let bestAhead = Infinity
+  for (const c of candidates) {
+    const ex = await runGit(['rev-parse', '--verify', '--quiet', c], repoPath)
+    if (ex.code !== 0 || !ex.stdout.trim()) continue
+    // 必须是 HEAD 的祖先：is-ancestor 返回 0 表示 c 的提交全在 HEAD 里（即「HEAD 从 c 拉出来」）
+    const anc = await runGit(['merge-base', '--is-ancestor', c, 'HEAD'], repoPath)
+    if (anc.code !== 0) continue
+    const ahead = await runGit(['rev-list', '--count', `${c}..HEAD`], repoPath)
+    const n = ahead.code === 0 ? parseInt(ahead.stdout.trim(), 10) || 0 : Infinity
+    if (n < bestAhead) {
+      bestAhead = n
+      best = c
+    }
+  }
+  return best
 }
 
 /**
@@ -145,7 +178,10 @@ export async function getChangedFiles(repoPath, { maxCount = 20 } = {}) {
   let range = null
   if (base) {
     const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
-    const onBase = head.code === 0 && head.stdout.trim() === base
+    const cur = head.code === 0 ? head.stdout.trim() : ''
+    // 基准可能是 origin/master 这类远端名：正本地在 master 上时也算「在基准上」，
+    // 此时无 fork-point，走下面 maxCount 回退（与原 main/master 行为一致）
+    const onBase = cur === base || `origin/${cur}` === base
     if (!onBase) {
       const mb = await runGit(['merge-base', base, 'HEAD'], repoPath)
       if (mb.code === 0 && mb.stdout.trim()) range = `${mb.stdout.trim()}..HEAD`
@@ -332,6 +368,8 @@ export async function createBranch(repoPath, { base, name, fetch = true, push = 
   let r = await runGit(['checkout', '-b', name, `origin/${base}`], repoPath)
   if (r.code !== 0) r = await runGit(['checkout', '-b', name, base], repoPath)
   if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout || '创建分支失败').trim() }
+  // 记录基准：getChangedFiles 据此取准 fork-point（纯拓扑推断在已合并分支上不可靠）
+  recordBase(repoPath, name, base)
   if (push) {
     const pushed = await pushBranch(repoPath, name)
     if (!pushed.ok) return pushed
@@ -350,6 +388,18 @@ export async function checkoutBranch(repoPath, branch) {
   const r = await runGit(['checkout', branch], repoPath)
   if (r.code === 0) return { ok: true }
   return { ok: false, error: (r.stderr || r.stdout || '切换分支失败').trim() }
+}
+
+/**
+ * 判断 shopify.theme.toml 是否被 git 跟踪。用 `git ls-files --error-unmatch` 直接查索引：
+ * 退出码 0 = 已跟踪（在索引里）；非 0 = 未跟踪（含文件不存在）。供「切换分支同步配置」判断——
+ * 已跟踪时 git checkout 已切换了它，不能再删/重建（否则工作区变脏、阻塞后续合并）。
+ * @param {string} repoPath
+ * @returns {Promise<boolean>}
+ */
+export async function isTomlTracked(repoPath) {
+  const r = await runGit(['ls-files', '--error-unmatch', 'shopify.theme.toml'], repoPath)
+  return r.code === 0
 }
 
 /**

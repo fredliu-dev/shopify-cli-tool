@@ -5,8 +5,10 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadProjects, saveProjects } from './projects.js'
-import { loadTemplateEnv, resolveEnvironment, loadThemeConfig, setEnvField, storeToTemplate } from './config.js'
+import { buildThemeConfig, listTemplates, loadTemplateEnv, resolveEnvironment, loadThemeConfig, setEnvField, storeToTemplate } from './config.js'
 import { buildLinks } from './links.js'
+import { getRemoteUrl, isTomlTracked, repoNameFromUrl } from './git.js'
+import { getPortPids, killPort } from './port.js'
 
 /**
  * 给单个 project 补预览链接（domain/store 缺失时从模板补，同 assembleProjects）。
@@ -97,10 +99,12 @@ export function getDevLinks({ startDir, envName = 'dev', args } = {}) {
  */
 function isSameProject(p, env, branch) {
   if (p.store !== env.store) return false
-  if (p.domain !== env.domain) return false
-  if (String(p.theme) !== String(env.theme)) return false
-  if (String(p.previewKey ?? '') !== String(env.preview_key ?? '')) return false
-  if (p.description !== env.project_desc) return false
+  // 字符串字段比对前 trim：buildThemeConfig 写入会 trim、而项目存储未 trim，
+  // 不 trim 会导致切换分支重建 toml 后 matched 失配（「当前生效」标识消失）
+  if (String(p.domain ?? '').trim() !== String(env.domain ?? '').trim()) return false
+  if (String(p.theme).trim() !== String(env.theme).trim()) return false
+  if (String(p.previewKey ?? '').trim() !== String(env.preview_key ?? '').trim()) return false
+  if (String(p.description ?? '').trim() !== String(env.project_desc ?? '').trim()) return false
   // 新项目必须与当前分支一致；历史项目无 _branch 视为通配
   if (p._branch == null) return true
   return p._branch === branch
@@ -122,16 +126,46 @@ export function findSavedProject(env, branch) {
 /**
  * 取单个仓库的配置状态：有没有 shopify.theme.toml、dev 环境内容、是否已存为本地项目。
  * branch 为当前 git 分支，传入后参与本地项目的 _branch 比对（区分不同分支的项目）。
+ *
+ * toml 缺失时不再彻底失联：仓库↔项目的关联桥梁本就是 dev.store，而 store 可由仓库远程地址
+ * 反查模板得到（见 storeFromRemote）。故 toml 不在时，用 remote 推出 store 维持关联——
+ * 卡片上的本地项目不至于消失，且切到有项目的分支时 syncConfigForBranch 会按 store 重建 toml。
+ * remote 由调用方从 getRepoInfo().remoteUrl 传入（扫描时已取，不额外加 git 调用）。
  * @param {string} repoPath 仓库目录
  * @param {string} [branch] 当前 git 分支
+ * @param {{ remote?: string }} [opts] remote 为仓库 origin 地址，toml 缺失时用于反查 store
  * @returns {{ hasToml: boolean, devEnv: object | null, matched: object | null }}
  */
-export function getRepoStatus(repoPath, branch) {
+export function getRepoStatus(repoPath, branch, { remote } = {}) {
   const hasToml = existsSync(join(repoPath, 'shopify.theme.toml'))
-  if (!hasToml) return { hasToml: false, devEnv: null, matched: null }
-  const cfg = loadThemeConfig(repoPath)
-  const devEnv = cfg?.environments?.dev ?? null
-  return { hasToml: true, devEnv, matched: devEnv ? findSavedProject(devEnv, branch) : null }
+  if (hasToml) {
+    const cfg = loadThemeConfig(repoPath)
+    const devEnv = cfg?.environments?.dev ?? null
+    return { hasToml: true, devEnv, matched: devEnv ? findSavedProject(devEnv, branch) : null }
+  }
+  // toml 缺失：按远程地址反查 store，仅保留 store 作为关联身份（其余运行字段无来源，留空）
+  const store = remote ? storeFromRemote(remote) : null
+  const devEnv = store ? { store } : null
+  return { hasToml: false, devEnv, matched: devEnv ? findSavedProject(devEnv, branch) : null }
+}
+
+/**
+ * 由仓库远程地址反推 store：把 remote 与各模板 [environments.dev]._github 比对（按仓库名归一化，
+ * 兼容 SSH/HTTPS），命中模板的 store 即仓库身份。用于 toml 缺失/无 store 时仍能关联本地项目。
+ * @param {string} remoteUrl 仓库的 origin 地址
+ * @returns {string | null} 命中模板的 store；无 _github 或无 store 返回 null
+ */
+function storeFromRemote(remoteUrl) {
+  if (!remoteUrl) return null
+  const target = repoNameFromUrl(remoteUrl)
+  if (!target) return null
+  for (const t of listTemplates()) {
+    const env = loadTemplateEnv(t.name)
+    if (env?._github && repoNameFromUrl(env._github) === target && env.store) {
+      return env.store
+    }
+  }
+  return null
 }
 
 /**
@@ -193,4 +227,137 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
   projects.push(proj)
   saveProjects(projects)
   return { project: withLinks(proj), created: true }
+}
+
+/**
+ * 切换分支后同步 shopify.theme.toml 的 [environments.dev]：按目标分支对应的「最近一个本地项目」
+ * 重建配置；该分支无项目则清空运行字段（theme/port/preview_key/project_desc），保留 store/domain
+ * （仓库身份）。
+ *
+ * ⚠️ 不能删整个 toml：仓库↔项目的关联桥梁就是 dev.store（前端按它把 projects.json 的项目挂到
+ * 仓库卡上）。删了 toml → 该仓库下所有项目卡片失联——故「无项目」只清运行字段、保留身份。
+ *
+ * 仓库身份(store)的双重来源：优先读 toml 的 dev.store；toml 缺失/无 store 时，按仓库远程地址
+ * 反查模板（storeFromRemote：remote → 模板 _github → 该模板 store）。后者让「toml 被删/尚未初始化」
+ * 的仓库仍能按 store 命中本地项目、自愈重建——不再死锁于「读不到 store 就无法重建」。
+ *
+ * 项目缺 templateName 时按 store 反查模板兜底（storeToTemplate），避免历史未记 templateName 的项目
+ * 重建失败。toml 被 git 跟踪时整体跳过（git checkout 已切换它，再改会让工作区变脏、阻塞合并）。
+ *
+ * @param {string} repoPath 仓库目录
+ * @param {string} branch 切到的目标分支
+ * @returns {Promise<{ applied: boolean, project?: object, hadToml: boolean, reason?: 'no-project'|'no-store'|'template-missing', templateName?: string, skipped?: 'tracked' }>}
+ */
+export async function syncConfigForBranch(repoPath, branch) {
+  const tomlPath = join(repoPath, 'shopify.theme.toml')
+  const hadToml = existsSync(tomlPath)
+
+  // toml 被 git 跟踪：checkout 已切换它，不能再改
+  if (await isTomlTracked(repoPath)) {
+    return { applied: false, hadToml, skipped: 'tracked' }
+  }
+
+  // 仓库身份(store)：优先 toml 的 dev.store；缺失则按远程地址反查模板 store（自愈关键）
+  const cfg = loadThemeConfig(repoPath)
+  const store = cfg?.environments?.dev?.store || storeFromRemote(await getRemoteUrl(repoPath))
+  if (!store) {
+    // 既无 toml store、远程也反查不到模板：没有仓库身份，不动（避免误伤）
+    return { applied: false, hadToml, reason: 'no-store' }
+  }
+
+  // 该仓库(store)+该分支 最近保存的一条项目（reverse 后取首个 = 最后保存的）
+  const project = [...loadProjects()]
+    .reverse()
+    .find((p) => p.store && p.store === store && p._branch === branch)
+
+  if (project) {
+    // 有项目：用项目配置覆盖重建（templateName 缺失时按 store 反查模板兜底；先构建，抛错则保留旧 toml）
+    const templateName = project.templateName || storeToTemplate(store)
+    let content
+    try {
+      content = buildThemeConfig({
+        templateName,
+        theme: project.theme,
+        port: project.port,
+        previewKey: project.previewKey,
+        projectDesc: project.description,
+      })
+    } catch {
+      return { applied: false, hadToml, reason: 'template-missing', templateName }
+    }
+    content = setEnvField(content, 'dev', '_branch', branch)
+    writeFileSync(tomlPath, content, 'utf8')
+    return { applied: true, project: withLinks(project), hadToml }
+  }
+
+  // 无项目：有 toml 则清空运行字段、保留身份；无 toml 则不创建（切到有项目分支时自会按 store 重建）
+  if (!hadToml) {
+    return { applied: false, hadToml: false, reason: 'no-project' }
+  }
+  let content = readFileSync(tomlPath, 'utf8')
+  for (const k of ['theme', 'port', 'preview_key', 'project_desc']) {
+    content = setEnvField(content, 'dev', k, '')
+  }
+  content = setEnvField(content, 'dev', '_branch', branch)
+  writeFileSync(tomlPath, content, 'utf8')
+  return { applied: false, hadToml, reason: 'no-project' }
+}
+
+/**
+ * 把某仓库的 shopify.theme.toml 切换到「指定的本地项目」配置（桌面端项目卡片「切换」按钮）。
+ *
+ * 与 syncConfigForBranch 的区别：后者按分支取「该分支最近一条项目」，本函数按 projectId 精确指定——
+ * 同一分支下同 store 可存多条项目（不同 theme/port/preview_key），切换即把 toml 的 dev 段改成该项目，
+ * 使其成为「当前生效」（getRepoStatus 据此重算 matched）。不再复制启动命令、不再打开编辑器：
+ * 用户在自己的编辑器里跑 shopify theme dev 时读到的就是该项目配置。
+ *
+ * 写入语义与 syncConfigForBranch 完全一致（用项目配置覆盖重建 toml、补 _branch），
+ * 故无论是切分支还是点切换按钮，toml 行为统一。toml 被 git 跟踪时跳过（写它会污染工作区、阻塞合并）。
+ *
+ * @param {string} repoPath 仓库目录
+ * @param {string|number} projectId 目标项目的 id
+ * @returns {Promise<{ applied: boolean, project?: object, skipped?: 'tracked', reason?: 'no-project'|'template-missing', templateName?: string, port?: { port: number|null, wasOccupied: boolean, killed: number } }>}
+ */
+export async function switchConfigToProject(repoPath, projectId) {
+  const tomlPath = join(repoPath, 'shopify.theme.toml')
+
+  // toml 被 git 跟踪：改它会污染工作区、阻塞后续合并，跳过（与 syncConfigForBranch 一致）
+  if (await isTomlTracked(repoPath)) {
+    return { applied: false, skipped: 'tracked' }
+  }
+
+  // 按 id 精确定位项目（不像 syncConfigForBranch 按 store+branch 取最近一条）
+  const project = loadProjects().find((p) => p.id === projectId)
+  if (!project) {
+    return { applied: false, reason: 'no-project' }
+  }
+
+  // 用项目配置覆盖重建 toml（templateName 缺失时按 store 反查模板兜底；构建失败则保留旧 toml）
+  const templateName = project.templateName || storeToTemplate(project.store)
+  let content
+  try {
+    content = buildThemeConfig({
+      templateName,
+      theme: project.theme,
+      port: project.port,
+      previewKey: project.previewKey,
+      projectDesc: project.description,
+    })
+  } catch {
+    return { applied: false, reason: 'template-missing', templateName }
+  }
+  content = setEnvField(content, 'dev', '_branch', project._branch || '')
+  writeFileSync(tomlPath, content, 'utf8')
+
+  // 释放目标端口：切换后用户会用该端口跑 dev，若被旧 dev server 等占用则先杀掉，避免端口冲突。
+  // 仅在成功切换时执行（失败/跳过不动端口）；杀不掉不阻塞切换，结果随返回值带给前端提示。
+  const port = Number(project.port)
+  const occupying = port ? getPortPids(port) : []
+  const portInfo = {
+    port: port || null,
+    wasOccupied: occupying.length > 0,
+    killed: occupying.length ? killPort(port) : 0,
+  }
+
+  return { applied: true, project: withLinks(project), port: portInfo }
 }

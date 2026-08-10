@@ -2,11 +2,9 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   AppstoreOutlined,
   ArrowRightOutlined,
-  BranchesOutlined,
   CodeOutlined,
   DashboardOutlined,
   DownloadOutlined,
-  ExperimentOutlined,
   EyeOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
@@ -16,11 +14,11 @@ import {
   MoreOutlined,
   PlusOutlined,
   ReloadOutlined,
-  RocketOutlined,
   SettingOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
 import {
+  Alert,
   App,
   AutoComplete,
   Badge,
@@ -320,7 +318,7 @@ const GLASS = {
 }
 
 // hover 玻璃亮光：提亮底色与描边、增强顶部内高光、加柔光投影 → 玻璃被光打到、悬浮起来的感觉。
-// 配合 Card 上的 translateY(-3px) 轻微上浮与 0.25s 过渡，鼠标移上时整张卡「亮起来、浮起来」。
+// 配合 Card 上的 0.25s 过渡，鼠标移上时整张卡「亮起来」（不改位移，避免布局抖动）。
 const HOVER_GLASS = {
   background: 'rgba(255,255,255,0.1)',
   border: '1px solid rgba(255,255,255,0.24)',
@@ -573,52 +571,6 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
   )
 }
 
-/* ---------------- 运行前拉取改动 json 的多选 Modal ---------------- */
-function PullModal({ open, files, onClose, onConfirm }) {
-  const [selected, setSelected] = useState(files)
-  const all = files.length > 0 && selected.length === files.length
-
-  // 每次打开默认全选；用户取消任一文件后「全选」自动取消（标准全选联动）
-  useEffect(() => {
-    if (open) setSelected(files)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
-
-  const onCheckAll = (checked) => setSelected(checked ? [...files] : [])
-
-  return (
-    <Modal
-      title="拉取当前分支改动的 templates json"
-      open={open}
-      onCancel={onClose}
-      footer={[
-        <Button key="skip" onClick={() => onConfirm([])}>
-          跳过，仅运行 dev
-        </Button>,
-        <Button key="ok" type="primary" onClick={() => onConfirm(selected)}>
-          拉取并复制启动命令
-        </Button>,
-      ]}
-      destroyOnClose
-    >
-      <Checkbox checked={all} onChange={(e) => onCheckAll(e.target.checked)} style={{ marginBottom: 8 }}>
-        全选
-      </Checkbox>
-      <Checkbox.Group
-        value={selected}
-        onChange={(next) => setSelected(next.filter((f) => files.includes(f)))}
-        style={{ display: 'flex', flexDirection: 'column' }}
-      >
-        {files.map((f) => (
-          <Checkbox key={f} value={f}>
-            {f}
-          </Checkbox>
-        ))}
-      </Checkbox.Group>
-    </Modal>
-  )
-}
-
 /* ---------------- 查看改动模板 Modal（git 改动过的 templates/*.json 文件名） ---------------- */
 function ChangedTemplatesModal({ open, title, files, onClose }) {
   return (
@@ -634,6 +586,15 @@ function ChangedTemplatesModal({ open, title, files, onClose }) {
           ))}
         </div>
       )}
+      {/* 准确性提示：GitHub 网页拉的分支无记录基准，工具只能按主干推断，改动列表可能偏差。
+          用界面「拉取分支」会在创建时记录真实基准，Template 变动才准。 */}
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginTop: 12 }}
+        message="为使 Template 变动准确，建议通过本工具「Git 流程 → 拉取分支」创建分支"
+        description="在 GitHub 网页拉取的分支，工具无法识别其真实基准，改动可能按主干计算而出现偏差。"
+      />
     </Modal>
   )
 }
@@ -1677,6 +1638,24 @@ function githubTreeUrl(remoteUrl, branch) {
   return /^https?:\/\//.test(u) ? `${u}/tree/${encodeURIComponent(branch)}` : null
 }
 
+// 把「切换分支 / 创建分支」后后端同步 toml 的结果转成反馈消息（applied / 无项目 / 模板缺失）。
+// prefix 为「已切换到 X」/「已创建并切换到分支 X（已推送远程）」等前置文案。返回 null 表示无需额外提示：
+// toml 被 git 跟踪（skipped:'tracked'）、或原本就没 toml（hadToml=false 的 no-project）。
+function syncMessage(sync, prefix) {
+  if (!sync) return null
+  if (sync.applied) {
+    const name = sync.project?.description || sync.project?.templateName || sync.project?.store || ''
+    return { type: 'success', text: `${prefix}${name ? `，已套用项目「${name}」配置` : ''}` }
+  }
+  if (sync.reason === 'template-missing') {
+    return { type: 'warning', text: `${prefix}，项目引用的模板「${sync.templateName}」已删除，配置未切换` }
+  }
+  if (sync.reason === 'no-project' && sync.hadToml) {
+    return { type: 'info', text: `${prefix}，该分支无本地项目，运行配置已清空` }
+  }
+  return null
+}
+
 /* ---------------- 获取合并提交信息（第④步：多选当前分支项目，标题/工单去重，按模板生成合并通知） ---------------- */
 function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
   const { message } = App.useApp()
@@ -1945,15 +1924,19 @@ function CreateBranchModal({ open, repo, onClose, onDone, contacts }) {
 
   const submit = async (vals) => {
     setLoading(true)
-    // push=true：后端先校验远程是否已存在该分支（存在则拒绝创建并提示），再创建本地分支并推到远程
+    // push=true：后端先校验远程是否已存在该分支（存在则拒绝创建并提示），再创建本地分支并推到远程。
+    // 创建后同样按新分支同步 toml（新分支无项目→清配置），反馈与 checkout 一致。
     const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName, push: true })
     setLoading(false)
-    if (res.ok) {
-      message.success(`已创建并切换到分支 ${branchName}（已推送远程）`)
-      onDone?.()
-    } else {
+    if (!res.ok) {
       message.error(res.error || '创建失败')
+      return
     }
+    const prefix = `已创建并切换到分支 ${branchName}（已推送远程）`
+    const m = syncMessage(res.data?.sync, prefix)
+    if (m) message[m.type](m.text)
+    else message.success(prefix)
+    onDone?.()
   }
 
   return (
@@ -2062,15 +2045,18 @@ function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
   const submit = async (vals) => {
     setLoading(true)
     // 主题不再由本工具复制：用户点「复制主题名称」后到 Shopify 后台手动新建。
-    // 这里只创建 release 分支（推送到远程）。
+    // 这里只创建 release 分支（推送到远程）。创建后同样按新分支同步 toml（一般无项目→清配置）。
     const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName, push: true })
     setLoading(false)
-    if (res.ok) {
-      message.success(`已创建并切换到分支 ${branchName}（已推送远程）`)
-      onDone?.()
-    } else {
+    if (!res.ok) {
       message.error(res.error || '创建分支失败')
+      return
     }
+    const prefix = `已创建并切换到分支 ${branchName}（已推送远程）`
+    const m = syncMessage(res.data?.sync, prefix)
+    if (m) message[m.type](m.text)
+    else message.success(prefix)
+    onDone?.()
   }
 
   return (
@@ -2148,46 +2134,76 @@ function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
   )
 }
 
-/* ---------------- Git 流程：阶段式流程卡（开发→提测→release） ---------------- */
-// 三段彩色卡片用箭头串联：①开发·拉分支 → ②开发完·提测 → ③提测完·release（创建）。
-// 禁用态沿用原逻辑：提测需先有本地项目。
+/* ---------------- Git 流程：阶段式流程卡（开发→提测→release→合并信息） ---------------- */
+// 四段彩色卡片用箭头串联，结构同构：序号+图标+动作标题+阶段副标题，整卡可点击（禁用则置灰+tooltip）。
+// ①开发·拉分支 → ②开发完·提测 → ③提测完·创建 release → ④上线前·合并信息。
 function FlowArrow() {
   return <ArrowRightOutlined style={{ fontSize: 12, color: '#c9cdd4', flexShrink: 0, alignSelf: 'center' }} />
 }
 
-function StageCard({ index, color, Icon, stageName, title, disabled, tooltip, onClick, footer }) {
+function StageCard({ index, color, stageName, title, disabled, tooltip, onClick, footer }) {
   const [hover, setHover] = useState(false)
   const interactive = !!onClick && !disabled
   const border = disabled ? 'rgba(255,255,255,0.12)' : hover && interactive ? color : `${color}66`
   const card = (
     <div
       style={{
+        position: 'relative',
         flex: '1 1 0',
         minWidth: 0,
-        padding: '8px 10px',
-        borderRadius: 8,
+        padding: '10px 12px',
+        borderRadius: 10,
         border: `1px solid ${border}`,
         background: interactive && hover ? `${color}33` : disabled ? 'rgba(255,255,255,0.04)' : `${color}22`,
         opacity: disabled ? 0.55 : 1,
         cursor: interactive ? 'pointer' : 'default',
         transition: 'border-color .2s, background .2s',
+        overflow: 'hidden',
       }}
       onMouseEnter={() => interactive && setHover(true)}
       onMouseLeave={() => setHover(false)}
       onClick={interactive ? onClick : undefined}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+      {/* 阶段名做成钢印水印：右上角大圆章，文字镂空描边、整体很淡，叠在卡上作水印不占布局 */}
+      <span
+        aria-hidden
+        style={{
+          position: 'absolute',
+          top: 2,
+          right: 2,
+          width: 48,
+          height: 48,
+          borderRadius: '50%',
+          border: `1.5px solid ${disabled ? 'rgba(255,255,255,0.18)' : color}`,
+          color: disabled ? 'rgba(255,255,255,0.3)' : color,
+          fontSize: 14,
+          fontWeight: 700,
+          letterSpacing: 1,
+          writingMode: 'vertical-rl',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          opacity: 0.4,
+          transform: 'rotate(-12deg)',
+          background: 'transparent',
+          pointerEvents: 'none',
+        }}
+      >
+        {stageName}
+      </span>
+      {/* 序号 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
         <span
           style={{
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
-            width: 18,
-            height: 18,
-            borderRadius: 9,
+            width: 22,
+            height: 22,
+            borderRadius: 11,
             background: disabled ? '#d9d9d9' : color,
             color: '#fff',
-            fontSize: 11,
+            fontSize: 12,
             fontWeight: 600,
             lineHeight: 1,
             flexShrink: 0,
@@ -2195,13 +2211,10 @@ function StageCard({ index, color, Icon, stageName, title, disabled, tooltip, on
         >
           {index}
         </span>
-        <Icon style={{ color: disabled ? '#bfbfbf' : color, fontSize: 14, flexShrink: 0 }} />
-        <Text strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {title}
-        </Text>
       </div>
-      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginLeft: 24 }}>
-        {stageName}
+      {/* 动作标题：完整显示，窄卡内自动换行 */}
+      <Text strong style={{ fontSize: 14, display: 'block', wordBreak: 'break-word', lineHeight: 1.3 }}>
+        {title}
       </Text>
       {footer}
     </div>
@@ -2211,41 +2224,15 @@ function StageCard({ index, color, Icon, stageName, title, disabled, tooltip, on
 
 function GitFlowSteps({ repo, project, projects, onAction }) {
   const hasProject = !!project
-  // 当前分支下含工单链接（_tapd）的项目：第④步「获取合并提交信息」的多选候选
+  // 当前分支下含工单链接（_tapd）的项目：第④步「合并信息」的候选来源；无则置灰
   const tapdProjects = (projects || []).filter((p) => p.description && p._tapd)
-
-  // 第三阶段：创建 release（绿色描边按钮置于卡内 footer）
-  // 与第四阶段同样 width:100%，两卡 footer 等宽对齐
-  const releaseFooter = (
-    <div style={{ marginTop: 6 }}>
-      <Button size="small" style={{ width: '100%', borderColor: 'rgba(82,196,26,0.45)', color: '#95de64', background: 'rgba(82,196,26,0.1)' }} onClick={() => onAction('release', repo)}>
-        创建 release
-      </Button>
-    </div>
-  )
-
-  // 第四阶段：获取合并提交信息（紫色；当前分支下无含工单项目时置灰）
-  // 卡片四等分很窄：按钮 width:100% 撑满内容区，文字过长 whiteSpace:normal 自动换行，
-  // 否则「获取合并提交信息」会撑破卡片右边界（用户反馈的样式问题）
-  const mergeInfoFooter = (
-    <div style={{ marginTop: 6 }}>
-      <Button
-        size="small"
-        style={{ width: '100%', whiteSpace: 'normal', height: 'auto', lineHeight: 1.25, padding: '2px 6px', borderColor: 'rgba(114,46,241,0.45)', color: '#b37feb', background: 'rgba(114,46,241,0.1)' }}
-        disabled={tapdProjects.length === 0}
-        onClick={() => onAction('mergeInfo', repo)}
-      >
-        获取合并提交信息
-      </Button>
-    </div>
-  )
+  const noTapd = tapdProjects.length === 0
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 6 }}>
       <StageCard
         index={1}
         color="#1677ff"
-        Icon={BranchesOutlined}
         title="拉取分支"
         stageName="开发"
         onClick={() => onAction('branch', repo)}
@@ -2254,7 +2241,6 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
       <StageCard
         index={2}
         color="#fa8c16"
-        Icon={ExperimentOutlined}
         title="提测"
         stageName="开发完"
         disabled={!hasProject}
@@ -2262,23 +2248,88 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
         onClick={() => onAction('gotest', project)}
       />
       <FlowArrow />
-      <StageCard index={3} color="#52c41a" Icon={RocketOutlined} title="release" stageName="提测完" footer={releaseFooter} />
+      <StageCard
+        index={3}
+        color="#52c41a"
+        title="创建 release"
+        stageName="提测完"
+        onClick={() => onAction('release', repo)}
+      />
       <FlowArrow />
       <StageCard
         index={4}
         color="#722ed1"
-        Icon={MessageOutlined}
-        title="合并提交信息"
+        title="合并信息"
         stageName="上线前"
-        tooltip={tapdProjects.length === 0 ? '当前分支下没有含工单链接的本地项目' : '汇总多个项目的标题/工单，按模板生成合并通知'}
-        footer={mergeInfoFooter}
+        disabled={noTapd}
+        tooltip={noTapd ? '当前分支下没有含工单链接的本地项目' : '汇总多个项目的标题/工单，按模板生成合并通知'}
+        onClick={() => onAction('mergeInfo', repo)}
       />
     </div>
   )
 }
 
 /* ---------------- 仓库卡片（已配对项目则内嵌项目面板，圈在一起） ---------------- */
-function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts }) {
+/* ---------------- 用编辑器打开仓库目录 ----------------
+ * 配了默认编辑器→一键打开（核心诉求：用"配置的"编辑器）；未配→展开本机编辑器列表（懒加载）让选，
+ * 不至于在没设默认时卡住。打开走主进程 openInEditor（detached，不阻塞 UI）。
+ */
+function OpenEditorButton({ dir, defaultEditor }) {
+  const { message } = App.useApp()
+  const [editors, setEditors] = useState(null) // null=未加载；[]=已加载但无
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  const ensureEditors = async () => {
+    if (editors !== null) return
+    const res = await window.api.repos.editors()
+    setEditors(res.ok ? res.data || [] : [])
+  }
+
+  const openWith = async (editorId) => {
+    setMenuOpen(false)
+    const res = await window.api.repos.openInEditor({ dir, editorId })
+    if (!res.ok) message.error(res.error || '打开失败')
+  }
+
+  const onClick = async () => {
+    // 有默认编辑器：一键打开，不展开菜单
+    if (defaultEditor) {
+      const res = await window.api.repos.openInEditor({ dir, editorId: defaultEditor })
+      if (!res.ok) message.error(res.error || '打开失败')
+      return
+    }
+    // 无默认：展开列表让选
+    await ensureEditors()
+    setMenuOpen(true)
+  }
+
+  const onOpenChange = (v) => {
+    if (defaultEditor) return // 配了默认时点击是一键打开，不接管菜单开合
+    if (v) ensureEditors()
+    setMenuOpen(v)
+  }
+
+  const list = editors || []
+  const menuItems = list.length
+    ? list.map((ed) => ({ key: ed.id, label: ed.name, onClick: () => openWith(ed.id) }))
+    : [{ key: '_none', label: '未检测到编辑器', disabled: true }]
+
+  return (
+    <Tooltip title={defaultEditor ? '用默认编辑器打开' : '选择编辑器打开'}>
+      <Dropdown menu={{ items: menuItems }} open={menuOpen} onOpenChange={onOpenChange} trigger={['click']}>
+        <Button
+          type="text"
+          size="small"
+          icon={<FolderOpenOutlined />}
+          onClick={onClick}
+          style={{ color: 'rgba(255,255,255,0.65)', flexShrink: 0 }}
+        />
+      </Dropdown>
+    </Tooltip>
+  )
+}
+
+function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, defaultEditor }) {
   const matched = !!repo.matched
   const [hovered, setHovered] = useState(false) // 玻璃亮光 hover 态（仅本卡重渲，不影响其它卡片）
 
@@ -2317,6 +2368,9 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
     </Button>
   )
 
+  // 当前生效（toml dev 段对应）的项目：仅用于面板「当前生效」标识，不改变展示顺序
+  const matchedId = repo.matched?.id
+
   return (
     <Card
       size="small"
@@ -2326,8 +2380,8 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
         ...GLASS,
         ...(hovered ? HOVER_GLASS : {}), // hover 时提亮底色/描边/高光，覆盖 GLASS 同名属性
         borderRadius: 16,
-        transition: 'background .25s ease, border-color .25s ease, box-shadow .25s ease, transform .25s ease',
-        transform: hovered ? 'translateY(-3px)' : undefined,
+        transition: 'background .25s ease, border-color .25s ease, box-shadow .25s ease',
+        transform: undefined,
       }}
       title={
         <Space size={6} style={{ alignItems: 'baseline' }}>
@@ -2381,20 +2435,24 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
         />
       }
     >
-      <Tooltip title={repo.path}>
-        <div
-          style={{
-            fontSize: 12,
-            color: 'rgba(255,255,255,0.45)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            marginBottom: 12,
-          }}
-        >
-          {repo.path}
-        </div>
-      </Tooltip>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 12 }}>
+        <Tooltip title={repo.path}>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontSize: 12,
+              color: 'rgba(255,255,255,0.45)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {repo.path}
+          </div>
+        </Tooltip>
+        <OpenEditorButton dir={repo.path} defaultEditor={defaultEditor} />
+      </div>
 
       {/* 配置操作 */}
       <div style={{ marginBottom: 14 }}>
@@ -2425,9 +2483,9 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
         <GitFlowSteps repo={repo} project={repo.matched} projects={projects} onAction={onAction} />
       </div>
 
-      {/* 关联的本地项目：同 store 的多条都内嵌展示 */}
+      {/* 关联的本地项目：同 store 的多条都内嵌展示，保持原顺序不置顶 */}
       {projects.map((p) => (
-        <ProjectPanel key={p.id} project={p} onAction={onProjectAction} embedded />
+        <ProjectPanel key={p.id} project={p} onAction={onProjectAction} active={p.id === matchedId} embedded />
       ))}
     </Card>
   )
@@ -2582,9 +2640,20 @@ function InfoField({ label, value, copyable }) {
 }
 
 /* ---------------- 本地项目面板（仓库卡内嵌=圈起来；独立分区=无外框卡） ---------------- */
-function ProjectPanel({ project, onAction, embedded }) {
+// 项目面板的四个快捷链接：彩色 chip，各自配色在深色 glass 卡片上清晰可辨。
+// urlKey 对应 project.links 的字段；缺链接时渲染为禁用态（不可点、灰显）。
+const QUICK_LINKS = [
+  { key: 'dev', label: '开发', Icon: CodeOutlined, urlKey: 'devLink', color: '#52c41a', copyLabel: '开发链接' },
+  { key: 'preview', label: '提测', Icon: EyeOutlined, urlKey: 'previewLink', color: '#36cfc9', copyLabel: '提测链接' },
+  { key: 'admin', label: '后台', Icon: DashboardOutlined, urlKey: 'adminLink', color: '#faad14', copyLabel: '后台链接' },
+  { key: 'editor', label: '编辑器', Icon: FormatPainterOutlined, urlKey: 'editorLink', color: '#9254de', copyLabel: '编辑器链接' },
+]
+
+function ProjectPanel({ project, onAction, active, embedded }) {
   const { message } = App.useApp()
   const noRepo = !project.repoPath
+  // 仅「有仓库 且 非当前生效」时点卡片才切换：已是当前配置则点击为空操作（不写 toml、不弹提示）
+  const clickable = !noRepo && !active
 
   // 链接：复制到剪贴板 + 用系统默认浏览器打开
   const openLink = async (url, label) => {
@@ -2594,14 +2663,44 @@ function ProjectPanel({ project, onAction, embedded }) {
     if (res?.ok) message.success(`已复制${label}并在默认浏览器打开`)
   }
 
+  // 当前生效的面板整体提亮：绿色底 + 高亮描边 + 绿色辉光 + 闪光扫光（比仅靠小绿标更显眼）。
+  // position/overflow 让绝对定位的扫光层被圆角裁剪、不溢出面板。
+  const ACTIVE_GLOW = active
+    ? {
+        background: 'rgba(82,196,26,0.16)',
+        border: '1px solid rgba(82,196,26,0.6)',
+        boxShadow: '0 0 0 1px rgba(82,196,26,0.3), 0 8px 22px rgba(82,196,26,0.3)',
+        position: 'relative',
+        overflow: 'hidden',
+      }
+    : {}
   const wrapperStyle = embedded
-    ? { marginTop: 12, padding: 12, borderRadius: 12, background: 'rgba(22,119,255,0.08)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '1px solid rgba(22,119,255,0.25)' }
-    : { padding: 16, borderRadius: 14, ...GLASS }
+    ? { marginTop: 12, padding: 12, borderRadius: 12, background: 'rgba(22,119,255,0.08)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '1px solid rgba(22,119,255,0.25)', ...ACTIVE_GLOW }
+    : { padding: 16, borderRadius: 14, ...GLASS, ...ACTIVE_GLOW }
 
   const title = project.description || project.templateName || project.store || '-'
 
   return (
-    <div style={wrapperStyle}>
+    <div
+      style={{ ...wrapperStyle, cursor: clickable ? 'pointer' : undefined }}
+      title={clickable ? '点击切换为当前生效配置' : undefined}
+      onClick={clickable ? () => onAction('switch', project) : undefined}
+    >
+      {/* 当前生效：绿色高光带横向无限扫过（linear 时序 + 渐变两端透明 → 循环无跳变；pointer-events:none 不挡点击） */}
+      {active && (
+        <div
+          aria-hidden
+          style={{
+            position: 'absolute',
+            inset: 0,
+            borderRadius: 'inherit',
+            pointerEvents: 'none',
+            background: 'linear-gradient(110deg, transparent 25%, rgba(82,196,26,0.42) 50%, transparent 75%)',
+            backgroundSize: '200% 100%',
+            animation: 'sp-active-shimmer 4s linear infinite',
+          }}
+        />
+      )}
       {/* 标题：项目名 + 模板 + 仓库状态（长标题自动省略） */}
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 10 }}>
         <Text strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -2610,6 +2709,9 @@ function ProjectPanel({ project, onAction, embedded }) {
         {project.templateName && (
           <Tag style={{ marginInlineEnd: 0, flexShrink: 0 }}>{project.templateName}</Tag>
         )}
+        {active && (
+          <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>当前生效</Tag>
+        )}
         {noRepo && (
           <Text type="warning" style={{ fontSize: 12, flexShrink: 0 }}>
             （未找到仓库）
@@ -2617,42 +2719,51 @@ function ProjectPanel({ project, onAction, embedded }) {
         )}
       </div>
 
+      {/* 快捷链接：彩色 chip，点击复制并用默认浏览器打开（提到标题下方，比参考字段更醒目） */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }} onClick={(e) => e.stopPropagation()}>
+        {QUICK_LINKS.map((l) => {
+          const url = project.links?.[l.urlKey]
+          const off = !url
+          const { Icon } = l
+          return (
+            <ALink
+              key={l.key}
+              className="sp-qlink"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 4,
+                fontSize: 12,
+                lineHeight: '20px',
+                padding: '1px 8px',
+                borderRadius: 6,
+                color: off ? 'rgba(255,255,255,0.3)' : l.color,
+                background: off ? 'transparent' : `${l.color}1f`,
+                border: `1px solid ${off ? 'rgba(255,255,255,0.12)' : `${l.color}59`}`,
+                cursor: off ? 'not-allowed' : 'pointer',
+                flex: 1,
+              }}
+              onClick={() => !off && openLink(url, l.copyLabel)}
+            >
+              <Icon />
+              {l.label}
+            </ALink>
+          )
+        })}
+      </div>
+
       {/* 配置信息：store / theme / port / preview_key；theme、preview_key 点击复制 */}
-      <div style={INFO_BLOCK}>
+      <div style={INFO_BLOCK} onClick={(e) => e.stopPropagation()}>
         <InfoField label="store" value={project.store} />
         <InfoField label="theme" value={project.theme} copyable />
         <InfoField label="port" value={project.port} />
         <InfoField label="preview_key" value={project.previewKey} copyable />
       </div>
 
-      {/* 快捷链接：点击复制并用默认浏览器打开 */}
-      <Space size={16} style={{ marginBottom: 10 }}>
-        <ALink style={{ fontSize: 12, cursor: 'pointer' }} onClick={() => openLink(project.links?.devLink, '开发链接')}>
-          <CodeOutlined style={{ marginRight: 4 }} />
-          开发
-        </ALink>
-        <ALink style={{ fontSize: 12, cursor: 'pointer' }} onClick={() => openLink(project.links?.previewLink, '提测链接')}>
-          <EyeOutlined style={{ marginRight: 4 }} />
-          提测
-        </ALink>
-        <ALink style={{ fontSize: 12, cursor: 'pointer' }} onClick={() => openLink(project.links?.adminLink, '后台链接')}>
-          <DashboardOutlined style={{ marginRight: 4 }} />
-          后台
-        </ALink>
-        <ALink style={{ fontSize: 12, cursor: 'pointer' }} onClick={() => openLink(project.links?.editorLink, '编辑器链接')}>
-          <FormatPainterOutlined style={{ marginRight: 4 }} />
-          编辑器
-        </ALink>
-      </Space>
-
-      {/* 操作：左侧主操作（运行 / 改动模板），右侧管理操作（编辑 / 删除） */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+      {/* 操作：改动模板 / 提测 / 编辑 / 删除（整行 stopPropagation，避免点按钮误触发卡片切换） */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }} onClick={(e) => e.stopPropagation()}>
         <Space size={6}>
-          <Tooltip title={noRepo ? '未找到对应仓库' : '打开编辑器并复制启动命令到剪贴板'}>
-            <Button type="primary" size="small" disabled={noRepo} onClick={() => onAction('run', project)}>
-              运行
-            </Button>
-          </Tooltip>
           <Badge count={project.changedTemplates?.length || 0} size="small" offset={[-2, 0]} color={project.changedTemplates?.length ? '#faad14' : undefined}>
             <Button size="small" onClick={() => onAction('templates', { title, files: project.changedTemplates || [] })}>
               Template变动
@@ -2729,7 +2840,6 @@ export default function Repos() {
   const [gotestFor, setGotestFor] = useState(null) // 提测目标 project
   const [mergeInfoFor, setMergeInfoFor] = useState(null) // 第④步「获取合并提交信息」目标 repo
 
-  const [pullFor, setPullFor] = useState(null) // { repoPath, files }：运行前的模板多选（执行方式）
   const [tplModal, setTplModal] = useState(null) // { title, files }
   const [editRepo, setEditRepo] = useState(null) // { mode:'init'|'save', repo }
   const [cloneable, setCloneable] = useState([]) // 模板 _github 项目 + 是否已存在（供「创建项目」查重）
@@ -2868,7 +2978,7 @@ export default function Repos() {
 
   // 项目卡片动作分发
   const projectAction = (type, payload) => {
-    if (type === 'run') handleRun(payload.repoPath)
+    if (type === 'switch') handleSwitch(payload)
     else if (type === 'templates') setTplModal(payload)
     else if (type === 'edit') setEditProject(payload)
     else if (type === 'delete') handleDeleteProject(payload)
@@ -2892,45 +3002,48 @@ export default function Repos() {
     }
   }
 
-  // 切换仓库分支
+  // 切换仓库分支：后端在 checkout 后按目标分支同步 toml 配置（套用项目/清空），这里按结果给反馈
   const checkoutBranch = async (repoPath, branch) => {
     const res = await window.api.repos.checkout({ dir: repoPath, branch })
-    if (res.ok) message.success(`已切换到 ${branch}`)
-    else message.error(res.error || '切换失败')
-    refreshRepo(repoPath) // 成功/失败都刷新：成功更新当前分支，失败还原 Select 显示
-  }
-
-  // 运行流程：先查改动 json → 有则弹多选拉取 → 选完后打开编辑器并复制启动命令到剪贴板
-  const handleRun = async (repoPath) => {
-    if (!repoPath) return
-    if (!defaultEditor) {
-      message.warning('请先选择默认编辑器')
-      setSettingsOpen(true)
+    if (!res.ok) {
+      message.error(res.error || '切换失败')
+      refreshRepo(repoPath) // 失败也刷新：还原分支 Select 显示
       return
     }
-    const res = await window.api.repos.changedJson({ dir: repoPath })
-    if (res.ok && res.data.length) {
-      setPullFor({ repoPath, files: res.data }) // 先选执行方式
-    } else {
-      if (res.ok) message.info('当前分支无改动 templates json')
-      await execRun(repoPath, []) // 无改动：直接打开编辑器跑 dev
-    }
+    const m = syncMessage(res.data?.sync, `已切换到 ${branch}`)
+    if (m) message[m.type](m.text)
+    else message.success(`已切换到 ${branch}`)
+    refreshRepo(repoPath)
   }
 
-  // 选完要拉的改动后：打开编辑器到仓库目录，并把启动命令复制到剪贴板（不自动执行）
-  const execRun = async (repoPath, pullFiles) => {
-    const r = await window.api.repos.runCommand({ dir: repoPath, editorId: defaultEditor, pullFiles })
-    if (r.ok) {
-      message.success('启动命令已复制，在编辑器终端粘贴运行即可')
-    } else {
-      message.error(r.error || '执行失败')
+  // 把仓库的 shopify.theme.toml 切换到该项目的配置（不复制命令、不打开编辑器）。
+  // 切换后刷新该仓库状态：matched 重算，被切项目变「当前生效」并置顶展示。
+  const handleSwitch = async (project) => {
+    if (!project?.repoPath) return
+    const res = await window.api.repos.switchConfig({ dir: project.repoPath, projectId: project.id })
+    if (!res.ok) {
+      message.error(res.error || '切换失败')
+      return
     }
-  }
-
-  const confirmPull = (files) => {
-    const { repoPath } = pullFor || {}
-    setPullFor(null)
-    if (repoPath) execRun(repoPath, files)
+    const data = res.data || {}
+    if (data.applied) {
+      const name = data.project?.description || data.project?.templateName || data.project?.store || ''
+      let text = name ? `已切换到「${name}」配置` : '配置已切换'
+      // 端口占用处理：被占用且已杀进程则提示已释放；未能杀掉则单独告警
+      const port = data.port
+      if (port?.wasOccupied) {
+        if (port.killed > 0) text += `，已释放被占用的端口 ${port.port}`
+        else message.warning(`端口 ${port.port} 被占用且未能结束进程，请手动处理后重试`)
+      }
+      message.success(text)
+    } else if (data.skipped === 'tracked') {
+      message.warning('shopify.theme.toml 被 Git 跟踪，无法自动切换（请先在 .gitignore 忽略该文件）')
+    } else if (data.reason === 'template-missing') {
+      message.warning(`项目引用的模板「${data.templateName}」已删除，配置未切换`)
+    } else {
+      message.warning('配置未切换')
+    }
+    refreshRepo(project.repoPath)
   }
 
   // 本地项目 ↔ 仓库关联（按 store：同 store 的所有本地项目都归属到 dev.store 一致的仓库，
@@ -3110,6 +3223,7 @@ export default function Repos() {
               branchProjectCounts={branchProjectCountsByStore.get(r.devEnv?.store) || {}}
               onAction={repoAction}
               onProjectAction={projectAction}
+              defaultEditor={defaultEditor}
             />
           ))}
         </Masonry>
@@ -3141,14 +3255,6 @@ export default function Repos() {
           }}
         />
       )}
-
-      {/* 运行前拉取多选 */}
-      <PullModal
-        open={!!pullFor}
-        files={pullFor?.files || []}
-        onClose={() => setPullFor(null)}
-        onConfirm={confirmPull}
-      />
 
       {/* 查看改动模板 */}
       <ChangedTemplatesModal open={!!tplModal} title={tplModal?.title} files={tplModal?.files || []} onClose={() => setTplModal(null)} />

@@ -142,7 +142,9 @@ export function setEnvField(content, envName, key, value) {
     }
     const m = keyRe.exec(lines[i])
     if (m) {
-      const isQuoted = m[2] !== undefined
+      // 空值强制加引号：裸值字段（如 port = 9292）清空成 `port = `（无值）是非法 TOML，
+      // 会令整份 toml 解析失败、devEnv（含 store）全丢。故 value==='' 时一律按引号写入 ""。
+      const isQuoted = m[2] !== undefined || String(value) === ''
       const replacement = isQuoted
         ? '"' + String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
         : String(value)

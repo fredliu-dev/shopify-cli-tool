@@ -1,0 +1,20 @@
+/* 当前生效项目面板的绿色闪光：渐变高光带横向无限扫过。
+   用 background-position 平移 + linear 时序：两端均为 transparent，
+   到达循环边界时高光已离屏、无可察觉的跳变，故视觉上是连续循环（不会到尾端消失）。 */
+@keyframes sp-active-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* 项目面板快捷链接 chip：hover 时整体提亮（filter 不依赖具体配色，
+   适用于开发/提测/后台/编辑器每个 chip 各自的色值）。 */
+.sp-qlink {
+  transition: filter 0.15s ease;
+}
+.sp-qlink:hover {
+  filter: brightness(1.18);
+}
