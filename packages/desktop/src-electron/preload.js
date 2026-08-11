@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('api', {
     openInEditor: (opts) => ipcRenderer.invoke('repos:openInEditor', opts),
     branches: (dir) => ipcRenderer.invoke('repos:branches', dir),
     remoteBranches: (dir) => ipcRenderer.invoke('repos:remoteBranches', dir),
+    collaborators: (dir) => ipcRenderer.invoke('repos:collaborators', dir),
     checkout: (opts) => ipcRenderer.invoke('repos:checkout', opts),
     createBranch: (opts) => ipcRenderer.invoke('repos:createBranch', opts),
     workingTree: (opts) => ipcRenderer.invoke('repos:workingTree', opts),

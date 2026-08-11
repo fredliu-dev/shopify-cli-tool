@@ -247,6 +247,17 @@ export function registerReposIpc() {
     }
   })
 
+  // 取仓库的 GitHub 协作者列表：token 优先取 settings.githubToken，回退 GH_TOKEN 环境变量
+  ipcMain.handle('repos:collaborators', async (_evt, repoPath) => {
+    const { getCollaborators, loadSettings } = await load()
+    try {
+      const token = loadSettings()?.githubToken
+      return { ok: true, data: await getCollaborators(repoPath, token) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
   // 切换本地分支（git checkout）：成功后同步 shopify.theme.toml 到目标分支对应的项目配置
   // （该分支无项目则删 toml；toml 被 git 跟踪则跳过，由 git 自行切换）。createBranch 不走这里——
   // 新建分支必然无项目，同步会删掉正在用的配置，故 createBranch 豁免。

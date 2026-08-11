@@ -304,6 +304,51 @@ export function normalizeGitUrl(url) {
 }
 
 /**
+ * 从 git 远程地址解析 GitHub owner/repo（SSH/HTTPS 均可，复用 normalizeGitUrl 归一化）。
+ * 非 github.com / 解析失败返回 null。供调 GitHub REST API 拼 /repos/{owner}/{repo} 用。
+ * @param {string} url
+ * @returns {{ owner: string, repo: string } | null}
+ */
+export function parseOwnerRepoFromUrl(url) {
+  const https = normalizeGitUrl(url) // → https://github.com/owner/Repo
+  const m = https.match(/github\.com\/([^/]+)\/([^/?#]+)/i)
+  return m ? { owner: m[1], repo: m[2] } : null
+}
+
+/**
+ * 取仓库的 GitHub 协作者列表（login/头像/主页）。需 token；非 github 仓库返回 []。
+ * token 来源优先级：显式传入（来自 settings.githubToken）> 环境变量 GH_TOKEN/GITHUB_TOKEN（终端启动兼容）。
+ * 调 GitHub REST API /repos/{owner}/{repo}/collaborators（per_page=100；单仓库 >100 人需加分页，当前最多 46 够用）。
+ * 错误分层：无 origin / 非 github → []（下拉空、不报错）；无 token / API 失败 → throw（由 IPC 转 {ok:false}）。
+ * @param {string} repoPath
+ * @param {string} [token] 显式传入的 GitHub token（来自 settings.githubToken）
+ * @returns {Promise<Array<{ login: string, avatar: string, url: string }>>}
+ */
+export async function getCollaborators(repoPath, token) {
+  const url = await getRemoteUrl(repoPath)
+  if (!url) return []
+  const or = parseOwnerRepoFromUrl(url)
+  if (!or) return [] // 非 github 仓库
+  const tok = token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+  if (!tok) throw new Error('NO_TOKEN') // 特殊标识：前端据此显示 token 输入框（而非普通错误）
+  const res = await fetch(
+    `https://api.github.com/repos/${or.owner}/${or.repo}/collaborators?per_page=100`,
+    { headers: { Authorization: `Bearer ${tok}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) {
+    let body = null
+    try {
+      body = await res.json()
+    } catch {
+      /* 非 JSON 响应 */
+    }
+    throw new Error(`HTTP ${res.status}${body?.message ? `：${body.message}` : ''}`)
+  }
+  const list = await res.json()
+  return list.map((c) => ({ login: c.login, avatar: c.avatar_url, url: c.html_url }))
+}
+
+/**
  * 克隆远程仓库到指定目录（创建 intoDir/<repoName>）。
  * @param {string} url 远程地址（模板 `_github`）
  * @param {string} intoDir 目标父目录（工作区）

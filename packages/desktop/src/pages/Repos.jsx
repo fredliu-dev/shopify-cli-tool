@@ -20,6 +20,7 @@ import {
 import {
   App,
   AutoComplete,
+  Avatar,
   Badge,
   Button,
   Card,
@@ -1859,6 +1860,155 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
   )
 }
 
+/* ---------------- PR 文案（拉取仓库 GitHub 协作者，下拉选成员；本阶段仅展示） ---------------- */
+function PrMembersModal({ open, repo, onClose }) {
+  const { message } = App.useApp()
+  const [members, setMembers] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [selected, setSelected] = useState() // 本阶段只存不处理
+  // token：未配置时弹窗就近显示输入框；needToken 标记当前是否缺 token
+  const [token, setToken] = useState('')
+  const [needToken, setNeedToken] = useState(false)
+  const [savingToken, setSavingToken] = useState(false)
+
+  const fetchMembers = useCallback(async () => {
+    if (!repo?.path) return
+    let cancelled = false
+    setLoading(true)
+    setMembers([])
+    const res = await window.api.repos.collaborators(repo.path)
+    if (cancelled) return
+    setLoading(false)
+    if (res.ok) {
+      setNeedToken(false)
+      setMembers(res.data || [])
+    } else {
+      // NO_TOKEN：core 的特殊标识，表示未配置 token → 显示输入框而非报错
+      const noToken = res.error === 'NO_TOKEN'
+      setNeedToken(noToken)
+      if (!noToken) message.error(res.error || '拉取仓库成员失败')
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [repo, message])
+
+  useEffect(() => {
+    if (!open) return
+    setSelected()
+    setToken('')
+    fetchMembers()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, repo])
+
+  // 保存 token 到 settings.githubToken，成功后立即重拉成员
+  const saveToken = async () => {
+    const t = token.trim()
+    if (!t) {
+      message.warning('请先粘贴 token')
+      return
+    }
+    setSavingToken(true)
+    const res = await window.api.settings.set({ githubToken: t })
+    setSavingToken(false)
+    if (res?.ok) {
+      message.success('Token 已保存，正在拉取成员…')
+      setNeedToken(false)
+      fetchMembers()
+    } else {
+      message.error(res?.error || '保存失败')
+    }
+  }
+
+  return (
+    <Modal title={`PR 文案 - ${repo?.name || ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose>
+      {needToken ? (
+        <Form layout="vertical">
+          <Text style={{ display: 'block', marginBottom: 8 }}>
+            拉取仓库成员需要一个 <Text strong>GitHub Token</Text>（仅本机自用，明文存于本地配置）。
+          </Text>
+          <Form.Item label="GitHub Token">
+            <Input.Password
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="ghp_... / github_pat_..."
+            />
+          </Form.Item>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+            <Button type="primary" loading={savingToken} onClick={saveToken}>
+              保存并拉取
+            </Button>
+          </div>
+          <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+            <Text strong>怎么获取：</Text>
+            <br />
+            1. 打开{' '}
+            <ALink
+              onClick={async () => {
+                const r = await window.api.shell.openExternal(
+                  'https://github.com/settings/tokens/new?scopes=repo,read:org&description=Shopify%20Toolbox',
+                )
+                if (!r?.ok) message.error('打开链接失败')
+              }}
+            >
+              GitHub 新建 Token 页 ↗
+            </ALink>
+            <br />
+            2. Note 随便填（如「Shopify Toolbox」）；<Text strong>勾选 <Text code>repo</Text></Text>（私有仓读权限）；<br />
+            3. 拉到底点 <Text code>Generate token</Text>，复制 <Text code>ghp_...</Text> 粘贴到上方。
+            <br />
+            <br />
+            <Text type="warning">⚠️ Token 等同于账号密码，请勿分享/提交到仓库。</Text>
+          </Text>
+        </Form>
+      ) : (
+        <Form layout="vertical">
+          <Form.Item label="仓库成员（GitHub 协作者）">
+            <Spin spinning={loading}>
+              <Select
+                showSearch
+                allowClear
+                placeholder={loading ? '加载中…' : members.length ? '选择成员' : '未拉取到成员（仓库需为 GitHub）'}
+                value={selected}
+                onChange={setSelected}
+                optionFilterProp="login" // 按登录名过滤（取 Option 的 login 属性）
+                notFoundContent={loading ? '加载中…' : '无成员'}
+              >
+                {members.map((m) => (
+                  // children 既用于下拉项渲染、也用于选中态（默认 optionLabelProp='children'），
+                  // 故选中后单行同样显示「头像 + 登录名」。搜索走 login 属性，不受 children 是 JSX 影响。
+                  <Select.Option key={m.login} value={m.login} login={m.login}>
+                    <Space size={8} align="center">
+                      <Avatar size={20} src={m.avatar} />
+                      <span>{m.login}</span>
+                    </Space>
+                  </Select.Option>
+                ))}
+              </Select>
+            </Spin>
+          </Form.Item>
+          {members.length > 0 && (
+            <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+              共 {members.length} 位协作者。选中后暂不触发动作（后续接「生成 PR 文案/跳转 GitHub」）。
+            </Text>
+          )}
+          {loading && members.length === 0 && (
+            <ALink
+              style={{ fontSize: 12 }}
+              onClick={() => {
+                setNeedToken(true)
+                setToken('')
+              }}
+            >
+              拉不到？换/填 GitHub Token
+            </ALink>
+          )}
+        </Form>
+      )}
+    </Modal>
+  )
+}
+
 /* ---------------- 拉取分支（新功能/紧急热修复/缺陷修复） ---------------- */
 const BRANCH_TYPES = [
   { value: 'feature', label: '新功能' },
@@ -2221,7 +2371,7 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
   const noTapd = tapdProjects.length === 0
 
   return (
-    <div style={{ display: 'flex', alignItems: 'stretch', gap: 6 }}>
+    <div style={{ display: 'flex', alignItems: 'stretch', gap: 6, position: 'relative' }}>
       <StageCard
         index={1}
         color="#1677ff"
@@ -2257,6 +2407,33 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
         tooltip={noTapd ? '当前分支下没有含工单链接的本地项目' : '汇总多个项目的标题/工单，按模板生成合并通知'}
         onClick={() => onAction('mergeInfo', repo)}
       />
+      {/* PR 角标：贴流程行右上角的四分一圆扇形（方块只切左下大圆角 → 右上角留扇形），点击弹成员下拉 */}
+      <div
+        role="button"
+        title="PR 文案"
+        onClick={() => onAction('pr', repo)}
+        style={{
+          position: 'absolute',
+          top: 0,
+          right: 0,
+          width: 36,
+          height: 36,
+          borderTopRightRadius: 10,
+          borderBottomLeftRadius: 36,
+          background: 'linear-gradient(135deg, #722ed1, #1677ff)',
+          color: '#fff',
+          fontSize: 12,
+          fontWeight: 700,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          userSelect: 'none',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+        }}
+      >
+        PR
+      </div>
     </div>
   )
 }
@@ -2431,7 +2608,6 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
         <Tooltip title={repo.path}>
           <div
             style={{
-              flex: 1,
               minWidth: 0,
               fontSize: 12,
               color: 'rgba(255,255,255,0.45)',
@@ -2933,6 +3109,7 @@ export default function Repos() {
   const [templatesOpen, setTemplatesOpen] = useState(false)
   const [gotestFor, setGotestFor] = useState(null) // 提测目标 project
   const [mergeInfoFor, setMergeInfoFor] = useState(null) // 第④步「获取合并提交信息」目标 repo
+  const [prFor, setPrFor] = useState(null) // 右上角「PR」角标：目标 repo
 
   const [tplModal, setTplModal] = useState(null) // { title, files }
   const [editRepo, setEditRepo] = useState(null) // { mode:'init'|'save', repo }
@@ -3068,6 +3245,7 @@ export default function Repos() {
     else if (type === 'branch' || type === 'release') setGitModal({ mode: type, repo: payload })
     else if (type === 'gotest') setGotestFor(payload)
     else if (type === 'mergeInfo') setMergeInfoFor(payload)
+    else if (type === 'pr') setPrFor(payload)
   }
 
   // 项目卡片动作分发
@@ -3411,6 +3589,9 @@ export default function Repos() {
         contacts={contacts}
         onClose={() => setMergeInfoFor(null)}
       />
+
+      {/* PR 角标弹窗：拉 GitHub 协作者，下拉选成员（本阶段仅展示） */}
+      <PrMembersModal open={!!prFor} repo={prFor} onClose={() => setPrFor(null)} />
 
       {/* 编辑本地项目（仅 非 _ 开头字段） */}
       <EditProjectModal
