@@ -10,6 +10,8 @@
     "dev:cli": "node scripts/dev-cli.mjs",
     "dev:desktop": "node scripts/dev-desktop.mjs",
     "release:npm": "node scripts/release-npm.mjs",
+    "release:core": "node scripts/release-npm.mjs core",
+    "release:cli": "node scripts/release-npm.mjs cli",
     "release:desktop": "node scripts/release-desktop.mjs"
   },
   "engines": {

@@ -5,7 +5,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { getRecordedBase, recordBase } from './bases.js'
 
 /**
  * 在 cwd 跑一次 git 子进程，捕获 stdout/stderr。
@@ -43,31 +42,39 @@ function uniqLines(s) {
 }
 
 /**
- * 探测基准分支：用于 getChangedFiles 取「本分支自 fork-point 以来的改动」。
+ * 解析当前分支的改动范围（<fork-point>..HEAD），供 getChangedFiles 取「本分支自创建以来的改动」。
  *
- * 不能只用本地 main/master——团队协作里本地主干常因没 fetch 而过期（落后远端几十条提交），
- * 用它当基准会让 merge-base 落在很老的 fork-point，changedFiles 多出一堆别分支并入的文件。
- * 故候选**远端优先**（origin/main、origin/master 比本地新鲜），且只取「是 HEAD 祖先」者
- * （HEAD 包含它的提交，才谈得上「从它拉出来」），并在其中取**HEAD 领先数最小**的一条——
- * 领先数 = 本分支独有提交数，越小越接近真正的 fork-point，changedFiles 越准。
+ * 不再依赖持久化的基准文件——改用 reflog 直接还原「分支创建点」：`git log -g --format=%H <branch>`
+ * 列出该分支 ref 的全部历史值，最末一条即分支创建时指向的 commit（基准分支当时的 tip），
+ * `<创建点>..HEAD` 即本分支自创建以来新加的全部提交，精确贴合「创建到现在」语义。
+ * 纯本地查询、不写文件、不联网，且对 GitHub 网页拉的分支同样有效（本地 checkout 即写 reflog）。
  *
- * 但纯拓扑在「已合并回 release」的分支上仍会失效（release 翻成下游、与兄弟分支难分），
- * 故**优先用 createBranch 时记录的基准**（getRecordedBase，工作流已知、最准），记录不存在或
- * 其引用已失效时才回退到下面的拓扑推断。
+ * reflog 会过期/gc（默认 90 天）或因 rename 取不到——此时回退拓扑推断：在 origin/main 等候选里
+ * 取「是 HEAD 祖先且 HEAD 领先数最小」者，用其 merge-base 作 fork-point。拓扑仍不可用返回 null，
+ * 由调用方按「最近 N 条提交」兜底。
+ *
  * @param {string} repoPath
- * @returns {Promise<string | null>} 基准分支全名（含 origin/ 前缀）；无合适候选返回 null
+ * @returns {Promise<string | null>} 形如 '<sha>..HEAD' 的范围；无合适范围返回 null
  */
-async function detectBaseBranch(repoPath) {
-  // 1. 优先用创建分支时记录的基准（最准）；校验其引用仍在，否则回退
+async function resolveRange(repoPath) {
+  // 1. 优先：reflog 还原分支创建点（最准、贴合「创建到现在」）
   const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
-  if (head.code === 0) {
-    const recorded = getRecordedBase(repoPath, head.stdout.trim())
-    if (recorded) {
-      const ex = await runGit(['rev-parse', '--verify', '--quiet', recorded], repoPath)
-      if (ex.code === 0 && ex.stdout.trim()) return recorded
+  const branch = head.code === 0 ? head.stdout.trim() : ''
+  if (branch && branch !== 'HEAD') {
+    const rl = await runGit(['log', '-g', '--format=%H', branch], repoPath)
+    if (rl.code === 0) {
+      const shas = rl.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+      // reflog 按时间倒序，最末一条 = 最早的 ref 值 = 分支创建时的 commit（基准当时的 tip）
+      const start = shas.length ? shas[shas.length - 1] : ''
+      if (start) {
+        // 创建点必然是 HEAD 的祖先；防御性校验，不通过则弃用 reflog 结果走拓扑
+        const anc = await runGit(['merge-base', '--is-ancestor', start, 'HEAD'], repoPath)
+        if (anc.code === 0) return `${start}..HEAD`
+      }
     }
   }
-  // 2. 回退：远端优先 + 取是祖先且领先数最小的候选
+
+  // 2. 回退：远端优先 + 取是祖先且领先数最小的候选，用 merge-base 作 fork-point
   const candidates = ['origin/main', 'main', 'origin/master', 'master', 'origin/develop', 'develop']
   let best = null
   let bestAhead = Infinity
@@ -84,7 +91,11 @@ async function detectBaseBranch(repoPath) {
       best = c
     }
   }
-  return best
+  if (best) {
+    const mb = await runGit(['merge-base', best, 'HEAD'], repoPath)
+    if (mb.code === 0 && mb.stdout.trim()) return `${mb.stdout.trim()}..HEAD`
+  }
+  return null
 }
 
 /**
@@ -165,28 +176,15 @@ export async function listAllBranches(repoPath, { fetch = true } = {}) {
 
 /**
  * 当前分支最终的改动文件清单（去重、排序）= 已提交改动 ∪ 工作区未提交改动，即「最终的 template 变动」。
- * 已提交部分：相对基准分支（main/master）的 fork-point（merge-base）以来、HEAD 之间各提交改动过的文件并集；
- * 当前分支即基准、或找不到基准时，回退为「最近 maxCount 个提交改动过的文件」。
+ * 已提交部分：自分支创建点（reflog 还原，回退拓扑推断）以来、HEAD 之间各提交改动过的文件并集；
+ * 取不到范围（detached HEAD 且无候选基准等）时，回退为「最近 maxCount 个提交改动过的文件」。
  * 用 `git log --name-only`（而非 diff）以覆盖「改了又改回」的文件；未提交部分用 `git status --porcelain`。
  * @param {string} repoPath
  * @param {{ maxCount?: number }} [opts]
  * @returns {Promise<string[]>}
  */
 export async function getChangedFiles(repoPath, { maxCount = 20 } = {}) {
-  const base = await detectBaseBranch(repoPath)
-
-  let range = null
-  if (base) {
-    const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
-    const cur = head.code === 0 ? head.stdout.trim() : ''
-    // 基准可能是 origin/master 这类远端名：正本地在 master 上时也算「在基准上」，
-    // 此时无 fork-point，走下面 maxCount 回退（与原 main/master 行为一致）
-    const onBase = cur === base || `origin/${cur}` === base
-    if (!onBase) {
-      const mb = await runGit(['merge-base', base, 'HEAD'], repoPath)
-      if (mb.code === 0 && mb.stdout.trim()) range = `${mb.stdout.trim()}..HEAD`
-    }
-  }
+  const range = await resolveRange(repoPath)
 
   const args = ['log', '--name-only', '--no-merges', '--pretty=format:']
   if (range) args.push(range)
@@ -368,8 +366,6 @@ export async function createBranch(repoPath, { base, name, fetch = true, push = 
   let r = await runGit(['checkout', '-b', name, `origin/${base}`], repoPath)
   if (r.code !== 0) r = await runGit(['checkout', '-b', name, base], repoPath)
   if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout || '创建分支失败').trim() }
-  // 记录基准：getChangedFiles 据此取准 fork-point（纯拓扑推断在已合并分支上不可靠）
-  recordBase(repoPath, name, base)
   if (push) {
     const pushed = await pushBranch(repoPath, name)
     if (!pushed.ok) return pushed

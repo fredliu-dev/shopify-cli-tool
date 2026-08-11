@@ -1,6 +1,6 @@
 {
   "name": "@shopify-cli-tool/desktop",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "description": "Shopify CLI 工具的 Electron 桌面应用",
   "main": "./out/main/index.js",

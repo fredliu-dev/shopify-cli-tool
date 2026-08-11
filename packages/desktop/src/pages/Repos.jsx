@@ -18,7 +18,6 @@ import {
   TeamOutlined,
 } from '@ant-design/icons'
 import {
-  Alert,
   App,
   AutoComplete,
   Badge,
@@ -586,15 +585,6 @@ function ChangedTemplatesModal({ open, title, files, onClose }) {
           ))}
         </div>
       )}
-      {/* 准确性提示：GitHub 网页拉的分支无记录基准，工具只能按主干推断，改动列表可能偏差。
-          用界面「拉取分支」会在创建时记录真实基准，Template 变动才准。 */}
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginTop: 12 }}
-        message="为使 Template 变动准确，建议通过本工具「Git 流程 → 拉取分支」创建分支"
-        description="在 GitHub 网页拉取的分支，工具无法识别其真实基准，改动可能按主干计算而出现偏差。"
-      />
     </Modal>
   )
 }
@@ -2164,7 +2154,7 @@ function StageCard({ index, color, stageName, title, disabled, tooltip, onClick,
       onMouseLeave={() => setHover(false)}
       onClick={interactive ? onClick : undefined}
     >
-      {/* 阶段名做成钢印水印：右上角大圆章，文字镂空描边、整体很淡，叠在卡上作水印不占布局 */}
+      {/* 阶段名做成水印：右上角圆章，虚线描边、整体极淡并斜置，作水印叠在卡上不占布局 */}
       <span
         aria-hidden
         style={{
@@ -2174,17 +2164,17 @@ function StageCard({ index, color, stageName, title, disabled, tooltip, onClick,
           width: 48,
           height: 48,
           borderRadius: '50%',
-          border: `1.5px solid ${disabled ? 'rgba(255,255,255,0.18)' : color}`,
-          color: disabled ? 'rgba(255,255,255,0.3)' : color,
-          fontSize: 14,
-          fontWeight: 700,
-          letterSpacing: 1,
+          border: `1px dashed ${disabled ? 'rgba(255,255,255,0.22)' : `${color}99`}`,
+          color: disabled ? 'rgba(255,255,255,0.4)' : color,
+          fontSize: 13,
+          fontWeight: 600,
+          letterSpacing: 2,
           writingMode: 'vertical-rl',
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
-          opacity: 0.4,
-          transform: 'rotate(-12deg)',
+          opacity: 0.28,
+          transform: 'rotate(-14deg)',
           background: 'transparent',
           pointerEvents: 'none',
         }}

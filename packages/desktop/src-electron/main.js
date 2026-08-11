@@ -13,6 +13,11 @@ import { registerContactsIpc } from './ipc/contacts.js'
 import { registerDingtalkIpc } from './ipc/dingtalk.js'
 import { registerSystemIpc } from './ipc/system.js'
 
+// macOS Dock 标签、菜单栏应用名都取自 app.getName()：dev 下裸 electron 进程默认名是 "Electron"，
+// 打包后由 Info.plist 的 productName 改回 "Shopify Toolbox"。dev 下显式 setName 让两者一致；
+// 副作用：userData 目录从 Application Support/Electron 变为 Shopify Toolbox（与打包态一致）。
+app.setName('Shopify Toolbox')
+
 let mainWindow
 
 function createWindow() {
