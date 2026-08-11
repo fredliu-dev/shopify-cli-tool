@@ -2,7 +2,7 @@
  * 首批命令的纯逻辑（headless）：供 CLI 与 Electron 桌面应用共用。
  * 这些函数只读写数据/解析配置，不打印、不提问；展示与交互由各自的壳负责。
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadProjects, saveProjects } from './projects.js'
 import { buildThemeConfig, listTemplates, loadTemplateEnv, resolveEnvironment, loadThemeConfig, setEnvField, storeToTemplate } from './config.js'
@@ -230,16 +230,12 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
 }
 
 /**
- * 切换分支后同步 shopify.theme.toml 的 [environments.dev]：按目标分支对应的「最近一个本地项目」
- * 重建配置；该分支无项目则清空运行字段（theme/port/preview_key/project_desc），保留 store/domain
- * （仓库身份）。
+ * 切换分支后同步 shopify.theme.toml：按目标分支对应的「最近一个本地项目」重建配置；
+ * 该分支无项目则删除整个 toml，让仓库回到未初始化状态（切到有项目分支时自会按 store 重建）。
  *
- * ⚠️ 不能删整个 toml：仓库↔项目的关联桥梁就是 dev.store（前端按它把 projects.json 的项目挂到
- * 仓库卡上）。删了 toml → 该仓库下所有项目卡片失联——故「无项目」只清运行字段、保留身份。
- *
- * 仓库身份(store)的双重来源：优先读 toml 的 dev.store；toml 缺失/无 store 时，按仓库远程地址
- * 反查模板（storeFromRemote：remote → 模板 _github → 该模板 store）。后者让「toml 被删/尚未初始化」
- * 的仓库仍能按 store 命中本地项目、自愈重建——不再死锁于「读不到 store 就无法重建」。
+ * 删 toml 不影响仓库↔项目关联：身份桥梁 dev.store 在 toml 缺失时由仓库远程地址反查模板得到
+ * （storeFromRemote：remote → 模板 _github → 该模板 store），getRepoStatus 据此维持项目卡片不消失。
+ * 故「无项目」直接删文件，逼用户在新分支重新初始化/保存，避免上分支配置残留被误用启动。
  *
  * 项目缺 templateName 时按 store 反查模板兜底（storeToTemplate），避免历史未记 templateName 的项目
  * 重建失败。toml 被 git 跟踪时整体跳过（git checkout 已切换它，再改会让工作区变脏、阻塞合并）。
@@ -290,16 +286,11 @@ export async function syncConfigForBranch(repoPath, branch) {
     return { applied: true, project: withLinks(project), hadToml }
   }
 
-  // 无项目：有 toml 则清空运行字段、保留身份；无 toml 则不创建（切到有项目分支时自会按 store 重建）
-  if (!hadToml) {
-    return { applied: false, hadToml: false, reason: 'no-project' }
+  // 无项目：删除整个 toml（若存在），让仓库回到未初始化状态。toml 缺失不影响关联——
+  // getRepoStatus 会按远程地址反查 store 维持项目卡片，切到有项目分支时自会按 store 重建。
+  if (hadToml) {
+    unlinkSync(tomlPath)
   }
-  let content = readFileSync(tomlPath, 'utf8')
-  for (const k of ['theme', 'port', 'preview_key', 'project_desc']) {
-    content = setEnvField(content, 'dev', k, '')
-  }
-  content = setEnvField(content, 'dev', '_branch', branch)
-  writeFileSync(tomlPath, content, 'utf8')
   return { applied: false, hadToml, reason: 'no-project' }
 }
 

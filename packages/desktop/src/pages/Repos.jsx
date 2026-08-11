@@ -1631,6 +1631,7 @@ function githubTreeUrl(remoteUrl, branch) {
 // 把「切换分支 / 创建分支」后后端同步 toml 的结果转成反馈消息（applied / 无项目 / 模板缺失）。
 // prefix 为「已切换到 X」/「已创建并切换到分支 X（已推送远程）」等前置文案。返回 null 表示无需额外提示：
 // toml 被 git 跟踪（skipped:'tracked'）、或原本就没 toml（hadToml=false 的 no-project）。
+// no-project 且 hadToml：原本有 toml、该分支无项目，已删除 toml → 提示用户在新分支重新初始化/保存。
 function syncMessage(sync, prefix) {
   if (!sync) return null
   if (sync.applied) {
@@ -1641,7 +1642,7 @@ function syncMessage(sync, prefix) {
     return { type: 'warning', text: `${prefix}，项目引用的模板「${sync.templateName}」已删除，配置未切换` }
   }
   if (sync.reason === 'no-project' && sync.hadToml) {
-    return { type: 'info', text: `${prefix}，该分支无本地项目，运行配置已清空` }
+    return { type: 'info', text: `${prefix}，该分支无本地项目，已删除 shopify.theme.toml` }
   }
   return null
 }

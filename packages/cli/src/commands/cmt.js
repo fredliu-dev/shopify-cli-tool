@@ -27,8 +27,8 @@ function runGitLive(args) {
 }
 
 /**
- * `shop cmt` —— 按规范生成并提交 git commit。
- * 流程：选 Commit 类型 → 输入描述 → 拼成「[类型]: 描述」→ git add -A 后提交。
+ * `shop cmt` —— 按规范生成并提交 git commit，随后推送到远程分支。
+ * 流程：选 Commit 类型 → 输入描述 → 拼成「[类型]: 描述」→ git add -A 后提交 → git push。
  * 类型不符规范时直接退出（Ctrl+C）按取消处理，不抛错。
  */
 export default {
@@ -93,11 +93,20 @@ export default {
     }
 
     const code = await runGitLive(['commit', '-m', commitMsg])
-    if (code === 0) {
-      log.success('提交成功 ✅')
-    } else {
+    if (code !== 0) {
       log.error(`提交失败，退出码 ${code}`)
+      return code
     }
-    return code
+    log.success('提交成功 ✅')
+
+    // ④ 推送到远程分支：HEAD 自动解析为当前分支；-u 首次推送时设置上游跟踪，已设则无害
+    log.step('推送到远程分支...')
+    const pushCode = await runGitLive(['push', '-u', 'origin', 'HEAD'])
+    if (pushCode === 0) {
+      log.success('推送成功 🚀')
+    } else {
+      log.error(`推送失败，退出码 ${pushCode}（可稍后手动执行 git push）`)
+    }
+    return pushCode
   },
 }
