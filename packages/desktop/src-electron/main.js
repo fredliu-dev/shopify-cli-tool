@@ -1,5 +1,4 @@
 import { app, BrowserWindow } from 'electron'
-import { autoUpdater } from 'electron-updater'
 import { join } from 'node:path'
 import { registerShopsIpc } from './ipc/shops.js'
 import { registerLinksIpc } from './ipc/links.js'
@@ -12,6 +11,7 @@ import { registerShellIpc } from './ipc/shell.js'
 import { registerContactsIpc } from './ipc/contacts.js'
 import { registerDingtalkIpc } from './ipc/dingtalk.js'
 import { registerSystemIpc } from './ipc/system.js'
+import { registerUpdaterIpc, checkForUpdates } from './ipc/updater.js'
 
 // macOS Dock 标签、菜单栏应用名都取自 app.getName()：dev 下裸 electron 进程默认名是 "Electron"，
 // 打包后由 Info.plist 的 productName 改回 "Shopify Toolbox"。dev 下显式 setName 让两者一致；
@@ -55,6 +55,7 @@ app.whenReady().then(() => {
   registerContactsIpc()
   registerDingtalkIpc()
   registerSystemIpc()
+  registerUpdaterIpc()
   createWindow()
 
   // dev 模式下设置 Dock 图标：macOS 会忽略 BrowserWindow 的 icon 选项，
@@ -68,9 +69,10 @@ app.whenReady().then(() => {
     }
   }
 
-  // 自动更新：仅打包后检查（dev 下无 app-update.yml 会报错）
+  // 自动更新：仅打包后检查（dev 下无 app-update.yml 会报错）。结果由 updater:* 事件推给渲染层弹窗，
+  // 不再用 checkForUpdatesAndNotify 的静默系统通知（那个用户看不见、也无法主动更新）。
   if (app.isPackaged) {
-    autoUpdater.checkForUpdatesAndNotify()
+    checkForUpdates()
   }
 
   app.on('activate', () => {

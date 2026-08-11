@@ -31,6 +31,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Progress,
   Radio,
   Select,
   Space,
@@ -2784,7 +2785,7 @@ function ProjectPanel({ project, onAction, active, embedded }) {
 }
 
 /* ---------------- 关于：客户端 / shopify CLI / git 等版本 ---------------- */
-function AboutModal({ open, onClose }) {
+function AboutModal({ open, onClose, onCheckUpdate }) {
   const [info, setInfo] = useState(null)
   useEffect(() => {
     if (open) window.api.system.versions().then(setInfo)
@@ -2805,9 +2806,101 @@ function AboutModal({ open, onClose }) {
           </Descriptions.Item>
         ))}
       </Descriptions>
-      <Text type="secondary" style={{ display: 'block', marginTop: 12, fontSize: 12 }}>
-        shopify CLI 即客户端实际调用的 @shopify/cli；git 为本机系统版本。
-      </Text>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          shopify CLI 即客户端实际调用的 @shopify/cli；git 为本机系统版本。
+        </Text>
+        <Button size="small" onClick={onCheckUpdate}>检查更新</Button>
+      </div>
+    </Modal>
+  )
+}
+
+/* ---------------- 自动更新：发现新版本弹窗，下载并重启安装 ---------------- */
+// 监听主进程 updater 事件驱动 Modal：available(展示 release notes) → downloading(进度) → downloaded(重启)。
+// manualCheckRef 由父层传入：手动检查时置 true，使「无更新/出错」给 message 反馈；启动自动检查静默不打扰。
+function UpdateChecker({ manualCheckRef }) {
+  const { message } = App.useApp()
+  const [step, setStep] = useState('idle') // idle | available | downloading | downloaded
+  const [info, setInfo] = useState({}) // { version, releaseNotes }
+  const [percent, setPercent] = useState(0)
+
+  useEffect(() => {
+    const offs = [
+      window.api.updater.onUpdateAvailable((p) => {
+        manualCheckRef.current = false // 检查已有结果，复位（避免残留影响后续启动检查的静默语义）
+        setInfo({ version: p?.version, releaseNotes: p?.releaseNotes || '' })
+        setPercent(0)
+        setStep('available')
+      }),
+      window.api.updater.onUpdateNotAvailable((p) => {
+        if (manualCheckRef.current) message.success(`已是最新版本${p?.version ? ' v' + p.version : ''}`)
+        manualCheckRef.current = false
+      }),
+      window.api.updater.onProgress((p) => setPercent(Math.round(p?.percent ?? 0))),
+      window.api.updater.onDownloaded(() => {
+        setPercent(100)
+        setStep('downloaded')
+      }),
+      window.api.updater.onError((p) => {
+        // 仅手动检查的出错提示用户；下载失败另有 download() 的 !ok 兜底，不在此提示
+        if (manualCheckRef.current) message.error(`更新检查失败：${p?.message || ''}`)
+        manualCheckRef.current = false
+      }),
+    ]
+    return () => offs.forEach((off) => off?.())
+    // message 为 antd 稳态实例、manualCheckRef 是 ref，闭包按引用读取，无需进依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const download = async () => {
+    setStep('downloading')
+    setPercent(0)
+    const r = await window.api.updater.download()
+    if (!r?.ok) {
+      message.error(`下载失败：${r?.error || ''}`)
+      setStep('available') // 退回让用户可重试
+    }
+  }
+  const install = () => window.api.updater.install()
+  const close = () => setStep('idle')
+
+  return (
+    <Modal
+      title={step === 'downloaded' ? '更新已就绪' : `发现新版本${info.version ? ' v' + info.version : ''}`}
+      open={step !== 'idle'}
+      // 下载中禁止关闭，避免半途中断造成状态错乱
+      closable={step !== 'downloading'}
+      maskClosable={step !== 'downloading'}
+      keyboard={step !== 'downloading'}
+      onCancel={close}
+      footer={
+        step === 'downloading' ? null : (
+          <Space>
+            <Button onClick={close}>稍后</Button>
+            <Button type="primary" onClick={step === 'downloaded' ? install : download}>
+              {step === 'downloaded' ? '立即重启' : '立即更新'}
+            </Button>
+          </Space>
+        )
+      }
+    >
+      {step === 'available' && (
+        <Text style={{ whiteSpace: 'pre-wrap', display: 'block' }}>
+          {info.releaseNotes || '已发布新版本，建议更新。'}
+        </Text>
+      )}
+      {step === 'downloading' && (
+        <div style={{ textAlign: 'center' }}>
+          <Progress percent={percent} status="active" />
+          <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+            正在下载更新… {percent}%
+          </Text>
+        </div>
+      )}
+      {step === 'downloaded' && (
+        <Text>新版本已下载完成，点击「立即重启」立即安装；或点「稍后」，下次退出应用时自动安装。</Text>
+      )}
     </Modal>
   )
 }
@@ -2824,6 +2917,16 @@ export default function Repos() {
   const [defaultEditor, setDefaultEditor] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
+  const manualCheckRef = useRef(false) // 区分「启动自动检查」(静默) 与「关于里手动检查」(给反馈)
+  // 手动检查更新：置 manual 标记后触发主进程检查；dev 下提示；有无更新/出错都由 updater:* 事件驱动弹窗
+  const checkUpdates = async () => {
+    manualCheckRef.current = true
+    const r = await window.api.updater.check()
+    if (r?.reason === 'dev') {
+      message.warning('开发模式下无法检查更新')
+      manualCheckRef.current = false
+    }
+  }
   const [contacts, setContacts] = useState([])
   const [contactsOpen, setContactsOpen] = useState(false)
   const [groupsOpen, setGroupsOpen] = useState(false)
@@ -3321,7 +3424,10 @@ export default function Repos() {
       />
 
       {/* 关于：版本信息 */}
-      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} onCheckUpdate={checkUpdates} />
+
+      {/* 自动更新：监听主进程 updater 事件，弹窗驱动下载/重启安装 */}
+      <UpdateChecker manualCheckRef={manualCheckRef} />
 
       {/* 拉取分支 / 创建 release */}
       {gitModal?.mode === 'branch' && (
