@@ -89,7 +89,30 @@ export default {
     }
     log.success('提交成功 ✅')
 
-    // ④ 推送到远程分支：HEAD 自动解析为当前分支；-u 首次推送时设置上游跟踪，已设则无害
+    // ④ 推送前二次确认：选择框（非输入框），默认「否」，避免误推送远程分支
+    let shouldPush
+    try {
+      shouldPush = await select({
+        message: '是否推送到远程分支？',
+        default: false,
+        choices: [
+          { name: '否，暂不推送', value: false },
+          { name: '是，立即推送', value: true },
+        ],
+      })
+    } catch (err) {
+      if (err?.name === 'ExitPromptError') {
+        log.info('已取消')
+        return
+      }
+      throw err
+    }
+    if (!shouldPush) {
+      log.info('已跳过推送（可稍后手动执行 git push）')
+      return 0
+    }
+
+    // 推送到远程分支：HEAD 自动解析为当前分支；-u 首次推送时设置上游跟踪，已设则无害
     log.step('推送到远程分支...')
     const pushCode = await runGitLive(['push', '-u', 'origin', 'HEAD'])
     if (pushCode === 0) {

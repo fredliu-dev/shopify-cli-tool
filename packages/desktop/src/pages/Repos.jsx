@@ -3368,93 +3368,72 @@ function AboutModal({ open, onClose, onCheckUpdate }) {
   )
 }
 
-/* ---------------- 自动更新：发现新版本弹窗，下载并重启安装 ---------------- */
-// 监听主进程 updater 事件驱动 Modal：available(展示 release notes) → downloading(进度) → downloaded(重启)。
-// manualCheckRef 由父层传入：手动检查时置 true，使「无更新/出错」给 message 反馈；启动自动检查静默不打扰。
-function UpdateChecker({ manualCheckRef }) {
-  const { message } = App.useApp()
-  const [step, setStep] = useState('idle') // idle | available | downloading | downloaded
-  const [info, setInfo] = useState({}) // { version, releaseNotes }
-  const [percent, setPercent] = useState(0)
-
-  useEffect(() => {
-    const offs = [
-      window.api.updater.onUpdateAvailable((p) => {
-        manualCheckRef.current = false // 检查已有结果，复位（避免残留影响后续启动检查的静默语义）
-        setInfo({ version: p?.version, releaseNotes: p?.releaseNotes || '' })
-        setPercent(0)
-        setStep('available')
-      }),
-      window.api.updater.onUpdateNotAvailable((p) => {
-        if (manualCheckRef.current) message.success(`已是最新版本${p?.version ? ' v' + p.version : ''}`)
-        manualCheckRef.current = false
-      }),
-      window.api.updater.onProgress((p) => setPercent(Math.round(p?.percent ?? 0))),
-      window.api.updater.onDownloaded(() => {
-        setPercent(100)
-        setStep('downloaded')
-      }),
-      window.api.updater.onError((p) => {
-        // 仅手动检查的出错提示用户；下载失败另有 download() 的 !ok 兜底，不在此提示
-        if (manualCheckRef.current) message.error(`更新检查失败：${p?.message || ''}`)
-        manualCheckRef.current = false
-      }),
-    ]
-    return () => offs.forEach((off) => off?.())
-    // message 为 antd 稳态实例、manualCheckRef 是 ref，闭包按引用读取，无需进依赖
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const download = async () => {
-    setStep('downloading')
-    setPercent(0)
-    const r = await window.api.updater.download()
-    if (!r?.ok) {
-      message.error(`下载失败：${r?.error || ''}`)
-      setStep('available') // 退回让用户可重试
-    }
-  }
-  const install = () => window.api.updater.install()
-  const close = () => setStep('idle')
-
+/* ---------------- 自动更新：发现新版本弹窗，下载并重启安装（受控组件） ---------------- */
+// 状态（status/info/percent/可见性）由父层 Repos 持有，顶栏据此亮「有新版本」红点入口；
+// 本组件只按状态渲染弹窗与「立即更新 / 立即重启」动作，下载/安装调父层传入的回调。
+function UpdateChecker({ open, status, info, percent, onClose, onDownload, onInstall }) {
   return (
     <Modal
-      title={step === 'downloaded' ? '更新已就绪' : `发现新版本${info.version ? ' v' + info.version : ''}`}
-      open={step !== 'idle'}
+      title={
+        status === "downloaded"
+          ? "更新已就绪"
+          : `发现新版本${info?.version ? " v" + info.version : ""}`
+      }
+      open={open}
       // 下载中禁止关闭，避免半途中断造成状态错乱
-      closable={step !== 'downloading'}
-      maskClosable={step !== 'downloading'}
-      keyboard={step !== 'downloading'}
-      onCancel={close}
+      closable={status !== "downloading"}
+      maskClosable={status !== "downloading"}
+      keyboard={status !== "downloading"}
+      onCancel={onClose}
       footer={
-        step === 'downloading' ? null : (
+        status === "downloading" ? null : (
           <Space>
-            <Button onClick={close}>稍后</Button>
-            <Button type="primary" onClick={step === 'downloaded' ? install : download}>
-              {step === 'downloaded' ? '立即重启' : '立即更新'}
+            <Button onClick={onClose}>稍后</Button>
+            <Button
+              type='primary'
+              onClick={status === "downloaded" ? onInstall : onDownload}
+            >
+              {status === "downloaded" ? "立即重启" : "立即更新"}
             </Button>
           </Space>
         )
       }
     >
-      {step === 'available' && (
-        <Text style={{ whiteSpace: 'pre-wrap', display: 'block' }}>
-          {info.releaseNotes || '已发布新版本，建议更新。'}
-        </Text>
+      {status === "available" && (
+        <div>
+          <Text strong style={{ fontSize: 15 }}>
+            🎉 🎉 🎉 发现新版本啦，赶快更新体验新功能！
+          </Text>
+          {info?.releaseNotes ? (
+            <Text
+              type='secondary'
+              style={{
+                whiteSpace: "pre-wrap",
+                display: "block",
+                marginTop: 8,
+                fontSize: 13,
+              }}
+            >
+              {info.releaseNotes}
+            </Text>
+          ) : null}
+        </div>
       )}
-      {step === 'downloading' && (
-        <div style={{ textAlign: 'center' }}>
-          <Progress percent={percent} status="active" />
-          <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+      {status === "downloading" && (
+        <div style={{ textAlign: "center" }}>
+          <Progress percent={percent} status='active' />
+          <Text type='secondary' style={{ display: "block", marginTop: 8 }}>
             正在下载更新… {percent}%
           </Text>
         </div>
       )}
-      {step === 'downloaded' && (
-        <Text>新版本已下载完成，点击「立即重启」立即安装；或点「稍后」，下次退出应用时自动安装。</Text>
+      {status === "downloaded" && (
+        <Text>
+          新版本已下载完成，点击「立即重启」立即安装；或点「稍后」，下次退出应用时自动安装。
+        </Text>
       )}
     </Modal>
-  )
+  );
 }
 
 /* ---------------- 页面主体 ---------------- */
@@ -3479,6 +3458,61 @@ export default function Repos() {
       manualCheckRef.current = false
     }
   }
+  // 自动更新状态提升到父层：顶栏「更新」红点入口与 UpdateChecker 弹窗共用。
+  // updateOpen 与 updateStatus 分离——点「稍后」关弹窗后 status 仍是 available，红点常驻、可再点开。
+  const [updateStatus, setUpdateStatus] = useState('idle') // idle | available | downloading | downloaded
+  const [updateInfo, setUpdateInfo] = useState({}) // { version, releaseNotes }
+  const [updatePercent, setUpdatePercent] = useState(0)
+  const [updateOpen, setUpdateOpen] = useState(false)
+  const hasUpdate = updateStatus === 'available' || updateStatus === 'downloaded'
+
+  // 顶栏「更新」入口：已知有新版本则直接弹窗，否则手动触发一次检查（给反馈）
+  const openUpdate = () => {
+    if (hasUpdate) setUpdateOpen(true)
+    else checkUpdates()
+  }
+  const downloadUpdate = async () => {
+    setUpdateStatus('downloading')
+    setUpdatePercent(0)
+    const r = await window.api.updater.download()
+    if (!r?.ok) {
+      message.error(`下载失败：${r?.error || ''}`)
+      setUpdateStatus('available') // 退回让用户可重试
+    }
+  }
+  const installUpdate = () => window.api.updater.install()
+
+  // 挂载即注册 updater:* 监听，并「由渲染层」主动触发检查：监听必先于 update-available 事件就位，
+  // 事件不会被丢（原先主进程启动时检查太早、渲染层尚未注册监听 → 检测到新版本却不弹窗）。
+  // 启动检查静默（不置 manual）；dev 下后端返回 reason:'dev'、事件不触发，自然无打扰。
+  useEffect(() => {
+    const offs = [
+      window.api.updater.onUpdateAvailable((p) => {
+        manualCheckRef.current = false
+        setUpdateInfo({ version: p?.version, releaseNotes: p?.releaseNotes || '' })
+        setUpdatePercent(0)
+        setUpdateStatus('available')
+        setUpdateOpen(true)
+      }),
+      window.api.updater.onUpdateNotAvailable((p) => {
+        if (manualCheckRef.current) message.success(`已是最新版本${p?.version ? ' v' + p.version : ''}`)
+        manualCheckRef.current = false
+      }),
+      window.api.updater.onProgress((p) => setUpdatePercent(Math.round(p?.percent ?? 0))),
+      window.api.updater.onDownloaded(() => {
+        setUpdatePercent(100)
+        setUpdateStatus('downloaded')
+        setUpdateOpen(true)
+      }),
+      window.api.updater.onError((p) => {
+        if (manualCheckRef.current) message.error(`更新检查失败：${p?.message || ''}`)
+        manualCheckRef.current = false
+      }),
+    ]
+    window.api.updater.check() // 监听就位后再查（dev 下静默忽略 reason:'dev'）
+    return () => offs.forEach((off) => off?.())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const [contacts, setContacts] = useState([])
   const [contactsOpen, setContactsOpen] = useState(false)
   const [groupsOpen, setGroupsOpen] = useState(false)
@@ -3811,6 +3845,13 @@ export default function Repos() {
               </Button>
             </span>
           </Tooltip>
+          <Tooltip title={hasUpdate ? `发现新版本${updateInfo?.version ? ' v' + updateInfo.version : ''}，点击立即更新` : '检查更新'}>
+            <Badge dot={hasUpdate} offset={[-4, 2]}>
+              <Button variant="outlined" icon={<DownloadOutlined />} onClick={openUpdate}>
+                更新
+              </Button>
+            </Badge>
+          </Tooltip>
           <Dropdown
             placement="bottomRight"
             menu={{
@@ -3984,7 +4025,15 @@ export default function Repos() {
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} onCheckUpdate={checkUpdates} />
 
       {/* 自动更新：监听主进程 updater 事件，弹窗驱动下载/重启安装 */}
-      <UpdateChecker manualCheckRef={manualCheckRef} />
+      <UpdateChecker
+        open={updateOpen}
+        status={updateStatus}
+        info={updateInfo}
+        percent={updatePercent}
+        onClose={() => setUpdateOpen(false)}
+        onDownload={downloadUpdate}
+        onInstall={installUpdate}
+      />
 
       {/* 拉取分支 / 创建 release */}
       {gitModal?.mode === 'branch' && (
