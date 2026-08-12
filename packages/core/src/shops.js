@@ -71,6 +71,104 @@ export function updateProject(id, fields) {
 }
 
 /**
+ * 项目字段名 → toml [environments.dev] 键名映射。
+ * 仅可编辑且需回写 toml 的字段；store/domain 是项目身份只读字段（改了即新项目，不入 toml）。
+ */
+const PROJECT_FIELD_TO_TOML = {
+  theme: 'theme',
+  previewKey: 'preview_key',
+  port: 'port',
+  description: 'project_desc',
+}
+
+/**
+ * 编辑本地项目；若该项目是某仓库「当前生效」的项目，同步把改动回写该仓库的 shopify.theme.toml。
+ *
+ * 为何需要同步：项目与 toml 靠六要素（store/domain/theme/preview_key/project_desc/_branch）判同一性。
+ * 编辑 theme/preview_key/port/description 后 projects.json 已是新值、toml 仍是旧值 →
+ * 既导致配置不一致（跑 dev 仍用旧 theme/port），又令六要素失配、「当前生效」标识消失。
+ * 故仅在「编辑前该项目就是当前生效（命中 toml dev 环境）」时回写新值，保持一致与命中；
+ * 非当前生效项目不动 toml（toml 反映的是当前生效项，否则会静默切换生效配置）。
+ *
+ * 「当前生效」判定必须用编辑前的旧项目和 toml 比——toml 此刻仍是旧值，旧项目命中才说明它原本是生效项。
+ * 回写用 setEnvField 逐字段改值（保留 toml 原格式，与 upsertProjectFromConfig 一致），
+ * 不重建整份 toml（避免 switchConfigToProject 的杀端口副作用）。toml 被 git 跟踪时跳过回写
+ * （与 syncConfigForBranch / switchConfigToProject 一致，避免污染工作区、阻塞合并）。
+ *
+ * @param {string|number} id
+ * @param {object} fields 项目字段（previewKey/description/port/theme…，项目字段名）
+ * @param {string} [repoPath] 关联仓库目录；不传则只更 projects.json、不回写 toml（无仓库上下文场景）
+ * @returns {Promise<{ project: object|null, synced: boolean, skipped?: 'tracked'|'not-active'|'no-toml' }>}
+ */
+export async function updateProjectSynced(id, fields, repoPath) {
+  // 用「旧项目」判定是否当前生效：toml 仍是旧值，旧项目命中 toml 才说明它原本就是生效项
+  const old = loadProjects().find((p) => p.id === id) || null
+  const wasActive = (() => {
+    if (!old || !repoPath) return false
+    const devEnv = loadThemeConfig(repoPath)?.environments?.dev
+    if (!devEnv) return false
+    return isSameProject(old, devEnv, devEnv._branch ?? null)
+  })()
+
+  // 更新 projects.json（复用既有 updateProject 的写盘逻辑）
+  const updated = updateProject(id, fields)
+
+  if (!wasActive) return { project: updated, synced: false, skipped: repoPath ? 'not-active' : undefined }
+
+  // 当前生效 → 回写 toml。被 git 跟踪则跳过（保持工作区干净）
+  if (await isTomlTracked(repoPath)) return { project: updated, synced: false, skipped: 'tracked' }
+
+  const cfg = loadThemeConfig(repoPath)
+  if (!cfg) return { project: updated, synced: false, skipped: 'no-toml' }
+  let content = readFileSync(cfg.path, 'utf8')
+  for (const [k, v] of Object.entries(fields)) {
+    const tomlKey = PROJECT_FIELD_TO_TOML[k]
+    if (tomlKey && v !== undefined && v !== null) content = setEnvField(content, 'dev', tomlKey, v)
+  }
+  writeFileSync(cfg.path, content, 'utf8')
+  return { project: withLinks(updated), synced: true }
+}
+
+/**
+ * 删除本地项目；若该项目是某仓库「当前生效」的项目，同步删除该仓库的 shopify.theme.toml。
+ *
+ * 与 updateProjectSynced 对称：编辑时当前生效项把新值回写 toml，删除时当前生效项把 toml 一并清掉，
+ * 让仓库回到未初始化状态（与 syncConfigForBranch「该分支无项目则删 toml」一致）。非当前生效项目只删
+ * projects.json——toml 反映的是当前生效项，删一条未生效项目不该牵连改动生效配置。
+ *
+ * 「当前生效」判定与 updateProjectSynced 同源：用删除前的旧项目和 toml dev 环境比，旧项目命中才说明
+ * 它原本就是生效项（删 projects.json 不影响 toml，故在删前后判定等价；这里在删前判，与 update 一致）。
+ * toml 被 git 跟踪时跳过删除（与全链路一致，避免污染工作区、阻塞合并）。
+ *
+ * @param {string|number} id
+ * @param {string} [repoPath] 关联仓库目录；不传则只删 projects.json、不删 toml（无仓库上下文场景）
+ * @returns {Promise<{ deleted: number, synced: boolean, skipped?: 'tracked'|'not-active'|'no-toml' }>}
+ */
+export async function deleteProjectSynced(id, repoPath) {
+  // 用「旧项目」判定是否当前生效（与 updateProjectSynced 同源）
+  const old = loadProjects().find((p) => p.id === id) || null
+  const wasActive = (() => {
+    if (!old || !repoPath) return false
+    const devEnv = loadThemeConfig(repoPath)?.environments?.dev
+    if (!devEnv) return false
+    return isSameProject(old, devEnv, devEnv._branch ?? null)
+  })()
+
+  // 删除 projects.json（复用既有 deleteProjects 的写盘逻辑）
+  const deleted = deleteProjects([id])
+
+  if (!wasActive) return { deleted, synced: false, skipped: repoPath ? 'not-active' : undefined }
+
+  // 当前生效 → 删除 toml。被 git 跟踪则跳过（保持工作区干净）
+  if (await isTomlTracked(repoPath)) return { deleted, synced: false, skipped: 'tracked' }
+
+  const tomlPath = join(repoPath, 'shopify.theme.toml')
+  if (!existsSync(tomlPath)) return { deleted, synced: false, skipped: 'no-toml' }
+  unlinkSync(tomlPath)
+  return { deleted, synced: true }
+}
+
+/**
  * 取某环境的提测链接 —— `pre` 的纯逻辑。
  * @param {{ startDir?: string, envName?: string, args?: string[] }} [opts]
  *   - startDir: 项目目录（GUI 传入；CLI 默认 cwd）
@@ -164,6 +262,24 @@ function storeFromRemote(remoteUrl) {
     if (env?._github && repoNameFromUrl(env._github) === target && env.store) {
       return env.store
     }
+  }
+  return null
+}
+
+/**
+ * 由仓库远程地址反查模板名：把 remote 与各模板 [environments.dev]._github 比对（按仓库名归一化，
+ * 兼容 SSH/HTTPS），命中返回模板名。与 storeFromRemote 同源匹配，但不要求模板含 store、返回的是
+ * 模板名。用于初始化弹窗按仓库地址自动选中模板（匹配到直接填充，省去用户手选）。
+ * @param {string} remoteUrl 仓库的 origin 地址
+ * @returns {string | null} 命中模板的 name；无 _github 或未命中返回 null
+ */
+export function templateFromRemote(remoteUrl) {
+  if (!remoteUrl) return null
+  const target = repoNameFromUrl(remoteUrl)
+  if (!target) return null
+  for (const t of listTemplates()) {
+    const env = loadTemplateEnv(t.name)
+    if (env?._github && repoNameFromUrl(env._github) === target) return t.name
   }
   return null
 }

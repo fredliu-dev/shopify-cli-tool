@@ -1,17 +1,7 @@
 import { spawn } from 'node:child_process'
 import { select, input } from '@inquirer/prompts'
 import pc from 'picocolors'
-import { isGitRepo, workingTreeFiles } from '@shopify-cli-tool/core'
-
-// Commit 类型标准：[类型]: 简要描述
-const TYPES = [
-  { value: 'feat', desc: '新功能开发' },
-  { value: 'fix', desc: '缺陷修复' },
-  { value: 'refactor', desc: '代码重构（不影响功能）' },
-  { value: 'style', desc: '样式或前端视觉修改' },
-  { value: 'perf', desc: '性能优化' },
-  { value: 'merge', desc: '分支合并' },
-]
+import { isGitRepo, workingTreeFiles, COMMIT_TYPES, formatCommitTitle } from '@shopify-cli-tool/core'
 
 /**
  * 以 inherit stdio 跑 git 子进程，让 commit 输出实时透传给用户（不被捕获）。
@@ -57,7 +47,7 @@ export default {
     try {
       type = await select({
         message: '选择 Commit 类型：',
-        choices: TYPES.map((t) => ({ name: `${pc.bold(t.value)}  -  ${t.desc}`, value: t.value })),
+        choices: COMMIT_TYPES.map((t) => ({ name: `${pc.bold(t.value)}  -  ${t.desc}`, value: t.value })),
       })
     } catch (err) {
       if (err?.name === 'ExitPromptError') {
@@ -83,7 +73,7 @@ export default {
     }
 
     // ③ 拼接规范信息：[类型]: 描述，然后 git add -A + commit
-    const commitMsg = `${type}: ${message.trim()}`
+    const commitMsg = formatCommitTitle(type, message)
     log.step(`提交信息：${pc.cyan(commitMsg)}`)
 
     const addCode = await runGitLive(['add', '-A'])

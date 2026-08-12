@@ -12,8 +12,8 @@ const subscribe = (channel, cb) => {
 contextBridge.exposeInMainWorld('api', {
   shops: {
     ls: () => ipcRenderer.invoke('shops:ls'),
-    delete: (ids) => ipcRenderer.invoke('shops:delete', ids),
-    update: (id, fields) => ipcRenderer.invoke('shops:update', { id, fields }),
+    delete: (ids, repoPath) => ipcRenderer.invoke('shops:delete', repoPath ? { ids, repoPath } : ids),
+    update: (id, fields, repoPath) => ipcRenderer.invoke('shops:update', { id, fields, repoPath }),
     storeToTemplate: (store) => ipcRenderer.invoke('shops:storeToTemplate', store),
   },
   links: {
@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld('api', {
     branches: (dir) => ipcRenderer.invoke('repos:branches', dir),
     remoteBranches: (dir) => ipcRenderer.invoke('repos:remoteBranches', dir),
     collaborators: (dir) => ipcRenderer.invoke('repos:collaborators', dir),
+    createPull: (opts) => ipcRenderer.invoke('repos:createPull', opts),
     checkout: (opts) => ipcRenderer.invoke('repos:checkout', opts),
     createBranch: (opts) => ipcRenderer.invoke('repos:createBranch', opts),
     workingTree: (opts) => ipcRenderer.invoke('repos:workingTree', opts),
@@ -57,6 +58,7 @@ contextBridge.exposeInMainWorld('api', {
     clone: (opts) => ipcRenderer.invoke('repos:clone', opts),
     templates: () => ipcRenderer.invoke('repos:templates'),
     resolveTemplate: (store) => ipcRenderer.invoke('repos:resolveTemplate', store),
+    resolveTemplateByRemote: (remoteUrl) => ipcRenderer.invoke('repos:resolveTemplateByRemote', remoteUrl),
     // 仓库文件（配置/templates）变动后，主进程推送的最新仓库数据
     // 返回真正的注销函数（ipcRenderer.on 返回的是 ipcRenderer 对象本身，非函数；
     // 渲染层清理时直接调用返回值会抛 "off is not a function"，故包成 removeListener）

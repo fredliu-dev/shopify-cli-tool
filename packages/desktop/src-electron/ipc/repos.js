@@ -191,6 +191,17 @@ export function registerReposIpc() {
     }
   })
 
+  // 按仓库远程地址（origin）反查模板名：把 remote 与各模板 _github 比对，命中返回模板名；
+  // 未命中返回 null（前端据此保留模板下拉让用户手选）。用于初始化弹窗按仓库地址自动选中模板。
+  ipcMain.handle('repos:resolveTemplateByRemote', async (_evt, remoteUrl) => {
+    const { templateFromRemote } = await load()
+    try {
+      return { ok: true, data: templateFromRemote(remoteUrl) ?? null }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
   // 复制线上 live 主题（headless）：返回新 theme id + 链接；namePrefix 覆盖主题名前缀（如 'release'）
   ipcMain.handle('repos:copyLive', async (_evt, { dir, envName, envConfig, activity, owner, namePrefix }) => {
     const { duplicateLiveTheme } = await load()
@@ -258,6 +269,18 @@ export function registerReposIpc() {
     }
   })
 
+  // 创建 Pull Request 并请求 reviewer：opts={ dir, title, head, base, body, reviewers }
+  ipcMain.handle('repos:createPull', async (_evt, { dir, title, head, base, body, reviewers }) => {
+    const { createPullRequest, loadSettings } = await load()
+    try {
+      const token = loadSettings()?.githubToken
+      const data = await createPullRequest(dir, { title, head, base, body, reviewers }, token)
+      return { ok: true, data }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
   // 切换本地分支（git checkout）：成功后同步 shopify.theme.toml 到目标分支对应的项目配置
   // （该分支无项目则删 toml；toml 被 git 跟踪则跳过，由 git 自行切换）。createBranch 不走这里——
   // 新建分支必然无项目，同步会删掉正在用的配置，故 createBranch 豁免。
@@ -273,16 +296,18 @@ export function registerReposIpc() {
     }
   })
 
-  // 基于基准分支创建并切到新分支（先 fetch origin/<base>，回退本地 <base>）；
-  // push=true 时先校验远程同名分支再推到 origin（「拉取分支」用，远程已存在则拒绝创建）。
-  // 与 checkout 一致：切到新分支后同步 toml——新分支名是全新的，几乎不会有对应本地项目，
-  // 故通常结果是「无项目 → 删除上分支残留的 toml」，逼用户在新分支重新初始化/保存。
-  ipcMain.handle('repos:createBranch', async (_evt, { dir, base, name, push }) => {
+  // 基于基准分支创建（默认并切到）新分支（先 fetch origin/<base>，回退本地 <base>）；
+  // push=true 时先校验远程同名分支再推到 origin（远程已存在则拒绝创建）。
+  // switch=false（「创建 release」用）：仅建分支不切换，此时仍停留在原分支，不做 toml 同步。
+  // 默认（switch 不传/为 true，「拉取分支」用）：切到新分支后同步 toml——新分支名是全新的，
+  // 几乎不会有对应本地项目，故通常结果是「无项目 → 删除上分支残留的 toml」，逼用户在新分支重新初始化/保存。
+  ipcMain.handle('repos:createBranch', async (_evt, { dir, base, name, push, switch: doSwitch }) => {
     const { createBranch, syncConfigForBranch } = await load()
     try {
-      const res = await createBranch(dir, { base, name, fetch: true, push })
+      const res = await createBranch(dir, { base, name, fetch: true, push, switch: doSwitch })
       if (!res.ok) return { ok: false, error: res.error }
-      const sync = await syncConfigForBranch(dir, name)
+      // 仅在切到新分支时才同步 toml；不切换时仍停留在原分支，配置保持原样
+      const sync = doSwitch === false ? undefined : await syncConfigForBranch(dir, name)
       return { ok: true, data: { sync } }
     } catch (err) {
       return { ok: false, error: err.message }

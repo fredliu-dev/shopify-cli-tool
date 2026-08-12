@@ -113,6 +113,10 @@ function askValue(it) {
   if (it.type === 'url') {
     return input({ message: `${it.label} 的链接：`, validate: VALIDATE.http }).then((v) => v.trim())
   }
+  if (it.type === 'content') {
+    // 备注为可选：允许留空（直接回车跳过）
+    return input({ message: `${it.label}（可选，回车跳过）：` }).then((v) => v.trim())
+  }
   return input({ message: `${it.label} 内容：`, validate: VALIDATE.nonempty }).then((v) => v.trim())
 }
 
@@ -340,7 +344,13 @@ export default {
     const { values, inputValues } = resolved
 
     // ③ bis 手动输入的值 → 询问是否存为默认（合并进 tpl.defaults）
-    const inputEntries = Object.entries(inputValues)
+    // 与现有默认值（按手机号比对）相同的不再提示——存了也是重复
+    const defaults = tpl.defaults ?? {}
+    const inputEntries = Object.entries(inputValues).filter(([tok, v]) => {
+      const cur = defaults[tok]
+      if (cur == null) return true // 无默认值 → 视为新默认，保留
+      return splitPhoneDefault(v).phone !== splitPhoneDefault(cur).phone
+    })
     if (inputEntries.length) {
       const allItems = [...ph.persons, ...ph.urls, ...ph.titles]
       const isPerson = (tok) => ph.persons.some((x) => x.token === tok)
@@ -354,7 +364,7 @@ export default {
       const save = await yesNo(log, `是否将以下保存为默认值？\n${preview}`, false)
       if (save === null) return
       if (save) {
-        tpl.defaults = { ...(tpl.defaults ?? {}), ...inputValues }
+        tpl.defaults = { ...(tpl.defaults ?? {}), ...Object.fromEntries(inputEntries) }
         saveDingtalkConfig(cfg)
         log.success('已保存为默认值')
       }

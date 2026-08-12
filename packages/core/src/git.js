@@ -342,10 +342,130 @@ export async function getCollaborators(repoPath, token) {
     } catch {
       /* 非 JSON 响应 */
     }
-    throw new Error(`HTTP ${res.status}${body?.message ? `：${body.message}` : ''}`)
+    const msg = body?.message ? `：${body.message}` : ''
+    if (res.status === 404) {
+      throw new Error(
+        `HTTP 404${msg}。常见原因：① Token 未勾选 repo 权限；② Token 所属账号不是该仓库协作者（无访问权限）；③ 仓库不存在或远程地址解析错误。`,
+      )
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`HTTP ${res.status}${msg}。请检查 GitHub Token 是否有效、是否过期、是否勾选了 repo 权限。`)
+    }
+    throw new Error(`HTTP ${res.status}${msg}`)
   }
   const list = await res.json()
   return list.map((c) => ({ login: c.login, avatar: c.avatar_url, url: c.html_url }))
+}
+
+/**
+ * 请求 PR reviewer：先一次性请求全部，422/失败则逐个重试过滤掉被拒的 login，最大限度把能加的都加上。
+ * 被拒常见原因：该 login 非仓库直接协作者、或为 PR 作者本人、或组织仓库且非组织成员；
+ * requested_reviewers 只要有一个无效就整组失败，故失败时降级逐个重试以找出被拒者。
+ * @param {{ owner: string, repo: string }} or
+ * @param {string} tok
+ * @param {number} number PR 编号
+ * @param {string[]} reviewers login 数组
+ * @returns {Promise<{ failed: string[], error: string }>} failed=未能添加的 login；error=首次失败的 GitHub message
+ */
+async function addReviewers(or, tok, number, reviewers) {
+  const endpoint = `https://api.github.com/repos/${or.owner}/${or.repo}/pulls/${number}/requested_reviewers`
+  const headers = {
+    Authorization: `Bearer ${tok}`,
+    Accept: 'application/vnd.github+json',
+    'Content-Type': 'application/json',
+  }
+  const tryOnce = async (list) => {
+    const r = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ reviewers: list }) })
+    if (r.ok) return { ok: true, msg: '' }
+    let msg = ''
+    try {
+      msg = (await r.json())?.message || ''
+    } catch {
+      /* 非 JSON 响应 */
+    }
+    return { ok: false, msg }
+  }
+  const all = await tryOnce(reviewers)
+  if (all.ok) return { failed: [], error: '' }
+  // 一次性失败：多个 reviewer 时逐个重试找出被拒者；单个直接判失败
+  if (reviewers.length <= 1) return { failed: [...reviewers], error: all.msg }
+  const failed = []
+  for (const login of reviewers) {
+    const one = await tryOnce([login])
+    if (!one.ok) failed.push(login)
+  }
+  return { failed, error: all.msg }
+}
+
+/**
+ * 在 GitHub 上创建 Pull Request，并可选地请求 reviewer 审核。
+ * head=源分支、base=目标分支；reviewers 为 GitHub login 数组（来自 getCollaborators，已是协作者）。
+ * token 来源优先级同 getCollaborators。返回 PR 编号与页面链接；reviewer 请求失败不致命（PR 已建好）。
+ * 错误分层：无 origin/非 github 抛错；无 token 抛 'NO_TOKEN'；422 给出可读校验详情
+ * （常见：已有打开的 PR / head 与 base 相同 / head 未推到远程）。
+ * @param {string} repoPath
+ * @param {{ title: string, head: string, base: string, body?: string, reviewers?: string[] }} opts
+ * @param {string} [token] 显式传入的 GitHub token（来自 settings.githubToken）
+ * @returns {Promise<{ number: number, url: string, reviewerWarning?: boolean }>}
+ */
+export async function createPullRequest(repoPath, opts, token) {
+  const url = await getRemoteUrl(repoPath)
+  if (!url) throw new Error('未找到 git 远程地址（origin）')
+  const or = parseOwnerRepoFromUrl(url)
+  if (!or) throw new Error('远程地址不是 GitHub 仓库，无法创建 PR')
+  const tok = token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+  if (!tok) throw new Error('NO_TOKEN')
+  const { title, head, base, body, reviewers } = opts || {}
+  const res = await fetch(`https://api.github.com/repos/${or.owner}/${or.repo}/pulls`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tok}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ title, head, base, body }),
+  })
+  if (!res.ok) {
+    let b = null
+    try {
+      b = await res.json()
+    } catch {
+      /* 非 JSON 响应 */
+    }
+    const msg = b?.message ? `：${b.message}` : ''
+    if (res.status === 422) {
+      const errs = Array.isArray(b?.errors) && b.errors.length
+        ? `（${b.errors.map((e) => e.message).filter(Boolean).join('；')}）`
+        : ''
+      throw new Error(
+        `创建 PR 失败：HTTP 422${msg}${errs}。常见：该分支已有打开的 PR；或 head 与 base 相同；或 head 分支尚未推到远程。`,
+      )
+    }
+    if (res.status === 404) {
+      throw new Error(
+        `HTTP 404${msg}。常见原因：① Token 未勾选 repo 权限；② Token 所属账号不是该仓库协作者（无访问权限）；③ 仓库不存在或远程地址解析错误。`,
+      )
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`HTTP ${res.status}${msg}。请检查 GitHub Token 是否有效、是否过期、是否勾选了 repo 权限。`)
+    }
+    throw new Error(`创建 PR 失败：HTTP ${res.status}${msg}`)
+  }
+  const pr = await res.json()
+  // 请求 reviewer：PR 已建好。先一次性请求，失败则逐个重试过滤被拒者，返回被拒名单/原因给前端。
+  if (Array.isArray(reviewers) && reviewers.length) {
+    const added = await addReviewers(or, tok, pr.number, reviewers)
+    if (added.failed.length) {
+      return {
+        number: pr.number,
+        url: pr.html_url,
+        reviewerWarning: true,
+        reviewerFailed: added.failed,
+        reviewerError: added.error,
+      }
+    }
+  }
+  return { number: pr.number, url: pr.html_url }
 }
 
 /**
@@ -390,15 +510,17 @@ async function pushBranch(repoPath, name) {
 }
 
 /**
- * 基于基准分支创建并切到新分支。默认先 fetch origin/<base>，确保基于远程最新代码；
+ * 基于基准分支创建（默认并切到）新分支。默认先 fetch origin/<base>，确保基于远程最新代码；
  * 远程无该分支时回退本地 <base>。
- * push=true（「拉取分支」用）：先校验 origin 是否已存在同名分支——存在则拒绝创建并提示；
+ * push=true（「拉取分支」/「创建 release」用）：先校验 origin 是否已存在同名分支——存在则拒绝创建并提示；
  * 否则创建本地分支后用 `git push -u origin <name>` 推到远程并设上游，实现「远程创建 + 拉到本地」。
+ * switch=false（「创建 release」用）：用 `git branch` 代替 `git checkout -b`，仅建分支指针、不切换，
+ * 当前工作分支与 shopify.theme.toml 保持不动。
  * @param {string} repoPath
- * @param {{ base: string, name: string, fetch?: boolean, push?: boolean }} opts
+ * @param {{ base: string, name: string, fetch?: boolean, push?: boolean, switch?: boolean }} opts
  * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
  */
-export async function createBranch(repoPath, { base, name, fetch = true, push = false } = {}) {
+export async function createBranch(repoPath, { base, name, fetch = true, push = false, switch: doSwitch = true } = {}) {
   if (!base || !name) return { ok: false, error: '缺少基准分支或新分支名' }
   // 远程已存在同名分支时不允许创建（仅 push 模式校验，避免建了本地分支才发现远程已被占用）
   if (push && (await remoteBranchExists(repoPath, name))) {
@@ -407,9 +529,11 @@ export async function createBranch(repoPath, { base, name, fetch = true, push = 
   if (fetch) {
     await runGit(['fetch', 'origin', base], repoPath, { timeout: 60000 }) // 失败忽略，下面回退本地
   }
-  // 优先基于 origin/<base> 最新代码创建；远程无该分支则回退本地 <base>
-  let r = await runGit(['checkout', '-b', name, `origin/${base}`], repoPath)
-  if (r.code !== 0) r = await runGit(['checkout', '-b', name, base], repoPath)
+  // 优先基于 origin/<base> 最新代码创建；远程无该分支则回退本地 <base>。
+  // switch=true（默认）checkout -b 创建并切到新分支；switch=false 用 git branch 仅建指针、不切换。
+  const make = (start) => (doSwitch ? ['checkout', '-b', name, start] : ['branch', name, start])
+  let r = await runGit(make(`origin/${base}`), repoPath)
+  if (r.code !== 0) r = await runGit(make(base), repoPath)
   if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout || '创建分支失败').trim() }
   if (push) {
     const pushed = await pushBranch(repoPath, name)

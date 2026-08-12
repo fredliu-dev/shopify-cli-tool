@@ -1,22 +1,3 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import {
-  AppstoreOutlined,
-  ArrowRightOutlined,
-  CodeOutlined,
-  DashboardOutlined,
-  DownloadOutlined,
-  EyeOutlined,
-  FileTextOutlined,
-  FolderOpenOutlined,
-  FormatPainterOutlined,
-  InfoCircleOutlined,
-  MessageOutlined,
-  MoreOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-  SettingOutlined,
-  TeamOutlined,
-} from '@ant-design/icons'
 import {
   App,
   AutoComplete,
@@ -37,11 +18,34 @@ import {
   Select,
   Space,
   Spin,
+  Steps,
   Table,
   Tag,
   Tooltip,
   Typography,
 } from 'antd'
+import {
+  AppstoreOutlined,
+  ArrowRightOutlined,
+  CodeOutlined,
+  DashboardOutlined,
+  DownloadOutlined,
+  EyeOutlined,
+  FileTextOutlined,
+  FolderOpenOutlined,
+  FormatPainterOutlined,
+  GithubOutlined,
+  InfoCircleOutlined,
+  MessageOutlined,
+  MoreOutlined,
+  PlusOutlined,
+  QuestionCircleOutlined,
+  ReloadOutlined,
+  SettingOutlined,
+  TeamOutlined,
+} from '@ant-design/icons'
+import { COMMIT_TYPES, formatCommitTitle } from '@shopify-cli-tool/core/commit'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 const { Title, Text, Link: ALink } = Typography
 const { TextArea } = Input
@@ -335,7 +339,15 @@ function InitRepoModal({ open, repo, onClose, onDone }) {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    if (open) window.api.config.templates().then(setTemplates)
+    if (!open) return
+    // 拉模板列表；同时按仓库远程地址反查模板，命中则直接回填，省去用户手选
+    window.api.config.templates().then(setTemplates)
+    if (repo?.remoteUrl) {
+      window.api.repos.resolveTemplateByRemote(repo.remoteUrl).then((res) => {
+        if (res.ok && res.data) form.setFieldValue('template', res.data)
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
   const submit = async (vals) => {
@@ -1269,7 +1281,7 @@ function TemplateEditModal({ open, template, onClose, onDone }) {
           rules={[{ required: true, message: '请输入消息内容' }]}
           extra={
             <Text type="secondary" style={{ fontSize: 12 }}>
-              占位符：<Text code>{'{{@person as 姓名}}'}</Text> <Text code>{'{{@url}}'}</Text> <Text code>{'{{@title}}'}</Text> <Text code>{'{{@content as 备注}}'}</Text> <Text code>{'{{@all}}'}</Text>；多行直接换行。
+              占位符：<Text code>{'{{@person as 姓名}}'}</Text> <Text code>{'{{@url}}'}</Text> <Text code>{'{{@title}}'}</Text> <Text code>{'{{@content as 备注}}'}</Text> <Text code>{'{{@tapd as 工单}}'}</Text><Text code>{'{{@all}}'}</Text>；多行直接换行。
             </Text>
           }
         >
@@ -1423,12 +1435,13 @@ function GotestModal({ open, project, projects, contacts, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, project])
 
-  // 按占位符类型，用项目信息预填 url（提测链接）/ title（描述）；person/content 不在此处理
+  // 按占位符类型，用项目信息预填 url（提测链接）/ title（描述）/ tapd（工单链接）；person/content 不在此处理
   const applyProject = (p, fs) => {
     const next = {}
     ;(fs || []).forEach((f) => {
       if (f.kind === 'url') next[f.token] = p?.links?.previewLink || ''
       else if (f.kind === 'title') next[f.token] = p?.description || ''
+      else if (f.kind === 'tapd') next[f.token] = p?._tapd || ''
     })
     return next
   }
@@ -1507,9 +1520,17 @@ function GotestModal({ open, project, projects, contacts, onClose }) {
     if (res.ok) {
       const g = groups.find((x) => x.id === groupId)
       message.success(`已发送到「${g?.name || '群'}」`)
-      // 发送成功后询问是否把本次 person 存为默认值（与 CLI gotest 一致）
+      // 发送成功后询问是否把本次 person 存为默认值（与 CLI gotest 一致）。
+      // 与现有默认值（按手机号比对）相同的不再提示——存了也是重复。
+      const defaults = templates.find((t) => t.id === templateId)?.defaults || {}
       const picked = {}
-      fields.filter((f) => f.kind === 'person' && values[f.token]).forEach((f) => (picked[f.token] = values[f.token]))
+      fields
+        .filter((f) => f.kind === 'person' && values[f.token])
+        .forEach((f) => {
+          const cur = defaults[f.token]
+          const sameAsDefault = cur != null && splitPhone(cur).phone === values[f.token]
+          if (!sameAsDefault) picked[f.token] = values[f.token]
+        })
       if (Object.keys(picked).length) {
         const preview = Object.entries(picked)
           .map(([tok, ph]) => `${fields.find((f) => f.token === tok)?.label || tok}：${phoneDisplay(ph)}`)
@@ -1534,15 +1555,44 @@ function GotestModal({ open, project, projects, contacts, onClose }) {
 
   const noGroups = groups.length === 0
   const noTemplates = templates.length === 0
+  const tpl = templates.find((t) => t.id === templateId)
+  // 提测为单项目：用当前选中项目 + 用户填的值实时渲染预览（与后端 gotest→fillTemplate 同源；
+  // values 里已含 url/title（applyProject 预填）、person（手机号）、content（手输））。
+  const PLACEHOLDER_RE = /\{\{\s*@(person|url|title|content|tapd|all)(\d*)\s*(?:as\s+(.+?))?\s*\}\}/g
+  const rendered = (() => {
+    if (!tpl || !selProject) return { text: '', atMobiles: [], isAtAll: false }
+    const atMobiles = []
+    let isAtAll = false
+    const text = tpl.content.replace(PLACEHOLDER_RE, (_full, type, num) => {
+      const token = `@${type}${num ?? ''}`
+      if (type === 'person') {
+        const phone = (values?.[token] ?? '').trim()
+        if (phone) atMobiles.push(phone)
+        return phone ? `@${phone}` : ''
+      }
+      if (type === 'all') {
+        isAtAll = true
+        return ''
+      }
+      return (values?.[token] ?? '').trim()
+    })
+    return { text, atMobiles, isAtAll }
+  })()
+  const preview = rendered.text
+
+  const doCopy = async () => {
+    if (!preview) return
+    const res = await window.api.shell.copy(preview)
+    if (res.ok) message.success('已复制到剪贴板')
+    else message.error('复制失败')
+  }
 
   return (
     <Modal
       title={`提测通知 - ${selProject?.description || selProject?.store || ''}`}
       open={open}
       onCancel={onClose}
-      onOk={submit}
-      okText="发送"
-      okButtonProps={{ loading, disabled: !groupId || !templateId }}
+      footer={null}
       destroyOnClose
       width={560}
     >
@@ -1614,6 +1664,17 @@ function GotestModal({ open, project, projects, contacts, onClose }) {
             {noTemplates ? '信息模板' : ''}。
           </Text>
         )}
+        <Form.Item label="通知内容预览（按所选项目填充）">
+          <TextArea value={preview} readOnly autoSize={{ minRows: 4, maxRows: 12 }} placeholder="选择项目和模板后在此预览" />
+        </Form.Item>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <Button onClick={doCopy} disabled={!preview}>
+            复制
+          </Button>
+          <Button type="primary" loading={loading} disabled={!groupId || !templateId} onClick={submit}>
+            发送
+          </Button>
+        </div>
       </Form>
     </Modal>
   )
@@ -1651,7 +1712,7 @@ function syncMessage(sync, prefix) {
 
 /* ---------------- 获取合并提交信息（第④步：多选当前分支项目，标题/工单去重，按模板生成合并通知） ---------------- */
 function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const [groups, setGroups] = useState([])
   const [templates, setTemplates] = useState([])
   const [selectedIds, setSelectedIds] = useState([])
@@ -1661,12 +1722,32 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
   const [values, setValues] = useState({}) // person/content 的 token -> 值
   const [parsing, setParsing] = useState(false)
   const [loading, setLoading] = useState(false)
+  // 两步式：0=合成信息（复制/推送群/下一步），1=提交 Pull Request（选分支、reviewer）
+  const [step, setStep] = useState(0)
 
-  // 打开时加载群+模板，重置选择
+  // PR Reviewers：GitHub 协作者选择 + Token 管理
+  const [members, setMembers] = useState([])
+  const [loadingMembers, setLoadingMembers] = useState(false)
+  const [selectedMembers, setSelectedMembers] = useState([])
+  const [token, setToken] = useState('')
+  const [needToken, setNeedToken] = useState(false)
+  const [savingToken, setSavingToken] = useState(false)
+  const [showTokenHelp, setShowTokenHelp] = useState(false)
+  // 提交 Pull Request：类型/标题/base；reviewer 复用 selectedMembers（必填）
+  const [prType, setPrType] = useState('feat')
+  const [prTitle, setPrTitle] = useState('')
+  const [prBase, setPrBase] = useState('')
+  const [prLoading, setPrLoading] = useState(false)
+  // 分支下拉（base 实时获取）：复用仓库卡片的分支懒加载逻辑
+  const { local: branchesLocal, remote: branchesRemote, loading: branchLoading, reload: reloadBranches } = useRepoBranches(repo)
+
+  // 打开时加载群+模板，重置选择；同时加载 GitHub 协作者
   useEffect(() => {
     if (!open) return
+    let mounted = true
     ;(async () => {
       const res = await window.api.dingtalk.load()
+      if (!mounted) return
       if (res.ok) {
         setGroups(res.data?.groups || [])
         setTemplates(res.data?.templates || [])
@@ -1676,9 +1757,69 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
       setFields([])
       setValues({})
       setSelectedIds([])
+      setSelectedMembers([])
+      setToken('')
+      setNeedToken(false)
+      setShowTokenHelp(false)
+      setPrType('feat')
+      setPrTitle('')
+      setPrBase('')
+      setStep(0)
     })()
+
+    const loadMembers = async () => {
+      if (!repo?.path) return
+      setLoadingMembers(true)
+      setMembers([])
+      const res = await window.api.repos.collaborators(repo.path)
+      if (!mounted) return
+      setLoadingMembers(false)
+      if (res.ok) {
+        setNeedToken(false)
+        setMembers(res.data || [])
+      } else {
+        const noToken = res.error === 'NO_TOKEN'
+        setNeedToken(noToken)
+        if (!noToken) message.error(res.error || '拉取仓库成员失败')
+      }
+    }
+    loadMembers()
+
+    // 分支列表供第二步选 base（展开下拉时也会刷新）；base 不预设默认值，需用户显式选择
+    reloadBranches()
+
+    return () => {
+      mounted = false
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repo])
+
+  // 保存 token 到 settings.githubToken，成功后立即重拉成员
+  const saveToken = async () => {
+    const t = token.trim()
+    if (!t) {
+      message.warning('请先粘贴 token')
+      return
+    }
+    setSavingToken(true)
+    const res = await window.api.settings.set({ githubToken: t })
+    setSavingToken(false)
+    if (res?.ok) {
+      message.success('Token 已保存，正在拉取成员…')
+      setNeedToken(false)
+      setShowTokenHelp(false)
+      setLoadingMembers(true)
+      const r2 = await window.api.repos.collaborators(repo.path)
+      setLoadingMembers(false)
+      if (r2.ok) {
+        setMembers(r2.data || [])
+      } else {
+        message.error(r2.error || '拉取成员失败')
+      }
+    } else {
+      message.error(res?.error || '保存失败')
+    }
+  }
 
   const selected = (projects || []).filter((p) => selectedIds.includes(p.id))
   const tpl = templates.find((t) => t.id === templateId)
@@ -1735,6 +1876,8 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
     }
   })()
   const preview = rendered.text
+  // 第一步信息是否就绪：至少选一个项目 + 选了模板 + 必填人员都填了（与「发送到群」校验一致，但不要求选群）
+  const step1Ready = selectedIds.length > 0 && !!templateId && !fields.some((f) => f.kind === 'person' && !values[f.token])
   // 当前分支的 GitHub 页链接（repo.remoteUrl 由 getRepoInfo 取 origin；点省略号在新标签打开）
   const branchUrl = githubTreeUrl(repo?.remoteUrl, repo?.currentBranch)
 
@@ -1763,6 +1906,70 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
     }
   }
 
+  // 创建 Pull Request：body 复用上方预览文本；reviewer 选填；成功后弹窗给 PR 跳转地址并复制审核话术
+  const doCreatePr = async () => {
+    if (!repo?.currentBranch) return message.warning('当前仓库未检测到分支（PR head）')
+    if (!prTitle.trim()) return message.warning('请填写 PR 标题')
+    if (!prBase.trim()) return message.warning('请填写目标分支（base）')
+    setPrLoading(true)
+    const res = await window.api.repos.createPull({
+      dir: repo.path,
+      title: formatCommitTitle(prType, prTitle),
+      head: repo.currentBranch,
+      base: prBase.trim(),
+      body: preview,
+      reviewers: selectedMembers,
+    })
+    setPrLoading(false)
+    if (!res.ok) {
+      const netHint = /fetch|ENETUNREACH|ETIMEDOUT|ECONNRESET|getaddrinfo|network|网络/i.test(res.error || '') ? '（请确认已开启 VPN）' : ''
+      message.error({ content: `创建 PR 失败：${res.error}${netHint}`, duration: 8 })
+      return
+    }
+    const { url, reviewerWarning, reviewerFailed, reviewerError } = res.data || {}
+    const cr = await window.api.shell.copy(`您好，${url}，需要您这边审核下`)
+    const copied = !!cr?.ok
+    modal.success({
+      title: 'Pull Request 已创建',
+      width: 520,
+      content: (
+        <div>
+          {reviewerWarning && (
+            <div style={{ marginBottom: 8 }}>
+              <Text type="warning">
+                部分 Reviewer 请求失败{Array.isArray(reviewerFailed) && reviewerFailed.length ? `（未能添加：${reviewerFailed.join('、')}）` : ''}
+                {reviewerError ? `，原因：${reviewerError}` : ''}，请到 GitHub 手动补加。
+              </Text>
+            </div>
+          )}
+          <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+            PR 跳转地址：
+          </Text>
+          <ALink
+            style={{ wordBreak: 'break-all' }}
+            onClick={async () => {
+              const r = await window.api.shell.openExternal(url)
+              if (!r?.ok) message.error('打开链接失败')
+            }}
+          >
+            {url}
+          </ALink>
+          <div style={{ marginTop: 12 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {copied ? '审核话术已复制到剪贴板' : '审核话术复制失败，可点上方链接手动复制'}
+            </Text>
+          </div>
+        </div>
+      ),
+      okText: '前往 PR',
+      onOk: async () => {
+        const r = await window.api.shell.openExternal(url)
+        if (!r?.ok) message.error('打开链接失败')
+      },
+    })
+    onClose?.()
+  }
+
   const noGroups = groups.length === 0
   const noTemplates = templates.length === 0
   const inputFields = fields.filter((f) => f.kind === 'person' || f.kind === 'content')
@@ -1770,7 +1977,15 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
   return (
     <Modal title={`获取合并提交信息 - ${repo?.name || ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose width={620}>
       <Form layout="vertical">
-        <Form.Item label="本地项目（多选，仅含工单链接）" required>
+        <Steps
+          size="small"
+          current={step}
+          style={{ marginBottom: 20 }}
+          items={[{ title: '合成信息' }, { title: '提交 Pull Request' }]}
+        />
+        {step === 0 && (
+          <>
+            <Form.Item label="本地项目（多选，仅含工单链接）" required>
           <Select
             mode="multiple"
             showSearch
@@ -1813,7 +2028,135 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
             )}
           </Form.Item>
         ))}
-        <Form.Item label="通知群（发送用，不选则只复制）">
+          </>
+        )}
+        {step === 1 && (
+          <>
+            {/* Reviewer 与分支选择放在第二步（提交 PR）；reviewer 选填，但拉取成员需 VPN */}
+            <Form.Item
+              label="PR Reviewers（GitHub 协作者，选填）"
+              extra={
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  <Text type="warning">⚠️ 需开启 VPN</Text> 才能访问 GitHub 拉取仓库成员，否则会拉取失败；成员可留空（非必填）。
+                </Text>
+              }
+            >
+          {needToken ? (
+            <div>
+              <Text style={{ display: 'block', marginBottom: 8 }}>
+                拉取仓库成员需要一个 <Text strong>GitHub Token</Text>（仅本机自用，明文存于本地配置）。
+              </Text>
+              <Input.Password
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="ghp_... / github_pat_..."
+                style={{ marginBottom: 12 }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                <Button type="primary" loading={savingToken} onClick={saveToken}>
+                  保存并拉取
+                </Button>
+              </div>
+              <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+                <Text strong>怎么获取：</Text>
+                <br />
+                1. 打开{' '}
+                <ALink
+                  onClick={async () => {
+                    const r = await window.api.shell.openExternal(
+                      'https://github.com/settings/tokens/new?scopes=repo,read:org&description=Shopify%20Toolbox',
+                    )
+                    if (!r?.ok) message.error('打开链接失败')
+                  }}
+                >
+                  GitHub 新建 Token 页 ↗
+                </ALink>
+                <br />
+                2. Note 随便填（如「Shopify Toolbox」）；<Text strong>勾选 <Text code>repo</Text></Text>（私有仓读权限）；
+                <br />
+                3. 拉到底点 <Text code>Generate token</Text>，复制 <Text code>ghp_...</Text> 粘贴到上方。
+                <br />
+                4. 若保存后仍报 404，说明该 Token 账号不是仓库协作者，或 Token 未勾选 repo 权限。
+                <br />
+                <br />
+                <Text type="warning">⚠️ Token 等同于账号密码，请勿分享/提交到仓库。若保存后仍提示 404，请确认该 Token 对应账号已是仓库协作者。</Text>
+              </Text>
+            </div>
+          ) : (
+            <div>
+              <Spin spinning={loadingMembers}>
+                <Select
+                  mode="multiple"
+                  showSearch
+                  maxTagCount="responsive"
+                  allowClear
+                  placeholder={loadingMembers ? '加载中…' : members.length ? '选择 PR Reviewers（多选）' : '未拉取到成员（仓库需为 GitHub）'}
+                  value={selectedMembers}
+                  onChange={setSelectedMembers}
+                  options={members.map((m) => ({ value: m.login, label: m.login }))}
+                  optionFilterProp="label"
+                  notFoundContent={loadingMembers ? '加载中…' : '无成员'}
+                  optionRender={(option) => {
+                    const m = members.find((x) => x.login === option.data.value)
+                    return (
+                      <Space size={8} align="center">
+                        <Avatar size={20} src={m?.avatar} />
+                        <span>{option.data.label}</span>
+                      </Space>
+                    )
+                  }}
+                />
+              </Spin>
+              <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+                <ALink
+                  style={{ fontSize: 12 }}
+                  onClick={() => {
+                    setNeedToken(true)
+                    setToken('')
+                    setShowTokenHelp(false)
+                  }}
+                >
+                  换/填 GitHub Token
+                </ALink>
+                <ALink style={{ fontSize: 12 }} onClick={() => setShowTokenHelp((s) => !s)}>
+                  <QuestionCircleOutlined style={{ marginRight: 4 }} />
+                  如何获取 GitHub Token？
+                </ALink>
+              </div>
+              {showTokenHelp && (
+                <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 12 }}>
+                  <Text strong>怎么获取：</Text>
+                  <br />
+                  1. 打开{' '}
+                  <ALink
+                    onClick={async () => {
+                      const r = await window.api.shell.openExternal(
+                        'https://github.com/settings/tokens/new?scopes=repo,read:org&description=Shopify%20Toolbox',
+                      )
+                      if (!r?.ok) message.error('打开链接失败')
+                    }}
+                  >
+                    GitHub 新建 Token 页 ↗
+                  </ALink>
+                  <br />
+                  2. Note 随便填（如「Shopify Toolbox」）；<Text strong>勾选 <Text code>repo</Text></Text>（私有仓读权限）；
+                  <br />
+                  3. 拉到底点 <Text code>Generate token</Text>，复制 <Text code>ghp_...</Text> 粘贴到上方。
+                <br />
+                4. 若保存后仍报 404，说明该 Token 账号不是仓库协作者，或 Token 未勾选 repo 权限。
+                  <br />
+                  <br />
+                  <Text type="warning">⚠️ Token 等同于账号密码，请勿分享/提交到仓库。若保存后仍提示 404，请确认该 Token 对应账号已是仓库协作者。</Text>
+                </Text>
+              )}
+            </div>
+          )}
+        </Form.Item>
+          </>
+        )}
+        {step === 0 && (
+          <>
+            <Form.Item label="通知群（发送用，不选则只复制）">
           <Select
             allowClear
             placeholder={noGroups ? '请先在「通知群管理」添加群' : '选择要发送的群（可留空仅复制）'}
@@ -1847,6 +2190,13 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
           <Button type="primary" loading={loading} disabled={!preview || !groupId} onClick={doSend}>
             发送到群
           </Button>
+          <Tooltip title={step1Ready ? '' : '请先选择项目、模板并填写人员，再进入下一步'}>
+            <span>
+              <Button type="primary" ghost disabled={!step1Ready} onClick={() => setStep(1)}>
+                下一步
+              </Button>
+            </span>
+          </Tooltip>
         </div>
         {(noGroups || noTemplates) && (
           <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 8 }}>
@@ -1855,156 +2205,103 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
             {noTemplates ? '信息模板' : ''}。
           </Text>
         )}
-      </Form>
-    </Modal>
-  )
-}
-
-/* ---------------- PR 文案（拉取仓库 GitHub 协作者，下拉选成员；本阶段仅展示） ---------------- */
-function PrMembersModal({ open, repo, onClose }) {
-  const { message } = App.useApp()
-  const [members, setMembers] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [selected, setSelected] = useState() // 本阶段只存不处理
-  // token：未配置时弹窗就近显示输入框；needToken 标记当前是否缺 token
-  const [token, setToken] = useState('')
-  const [needToken, setNeedToken] = useState(false)
-  const [savingToken, setSavingToken] = useState(false)
-
-  const fetchMembers = useCallback(async () => {
-    if (!repo?.path) return
-    let cancelled = false
-    setLoading(true)
-    setMembers([])
-    const res = await window.api.repos.collaborators(repo.path)
-    if (cancelled) return
-    setLoading(false)
-    if (res.ok) {
-      setNeedToken(false)
-      setMembers(res.data || [])
-    } else {
-      // NO_TOKEN：core 的特殊标识，表示未配置 token → 显示输入框而非报错
-      const noToken = res.error === 'NO_TOKEN'
-      setNeedToken(noToken)
-      if (!noToken) message.error(res.error || '拉取仓库成员失败')
-    }
-    return () => {
-      cancelled = true
-    }
-  }, [repo, message])
-
-  useEffect(() => {
-    if (!open) return
-    setSelected()
-    setToken('')
-    fetchMembers()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, repo])
-
-  // 保存 token 到 settings.githubToken，成功后立即重拉成员
-  const saveToken = async () => {
-    const t = token.trim()
-    if (!t) {
-      message.warning('请先粘贴 token')
-      return
-    }
-    setSavingToken(true)
-    const res = await window.api.settings.set({ githubToken: t })
-    setSavingToken(false)
-    if (res?.ok) {
-      message.success('Token 已保存，正在拉取成员…')
-      setNeedToken(false)
-      fetchMembers()
-    } else {
-      message.error(res?.error || '保存失败')
-    }
-  }
-
-  return (
-    <Modal title={`PR 文案 - ${repo?.name || ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose>
-      {needToken ? (
-        <Form layout="vertical">
-          <Text style={{ display: 'block', marginBottom: 8 }}>
-            拉取仓库成员需要一个 <Text strong>GitHub Token</Text>（仅本机自用，明文存于本地配置）。
+          </>
+        )}
+        {step === 1 && (
+          <>
+        {/* 提交 Pull Request：类型+标题（项目下拉填充）+base（选分支，无默认值）+reviewer（必选）→ 创建 PR 并复制审核话术 */}
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px dashed rgba(255,255,255,0.12)' }}>
+          <Text strong style={{ display: 'block', marginBottom: 12 }}>
+            提交 Pull Request
           </Text>
-          <Form.Item label="GitHub Token">
-            <Input.Password
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="ghp_... / github_pat_..."
+          <Form.Item label="Commit 类型">
+            <Select
+              value={prType}
+              onChange={setPrType}
+              options={COMMIT_TYPES.map((t) => ({ value: t.value, label: `${t.value}（${t.desc}）` }))}
             />
           </Form.Item>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-            <Button type="primary" loading={savingToken} onClick={saveToken}>
-              保存并拉取
-            </Button>
-          </div>
-          <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
-            <Text strong>怎么获取：</Text>
-            <br />
-            1. 打开{' '}
-            <ALink
-              onClick={async () => {
-                const r = await window.api.shell.openExternal(
-                  'https://github.com/settings/tokens/new?scopes=repo,read:org&description=Shopify%20Toolbox',
-                )
-                if (!r?.ok) message.error('打开链接失败')
-              }}
-            >
-              GitHub 新建 Token 页 ↗
-            </ALink>
-            <br />
-            2. Note 随便填（如「Shopify Toolbox」）；<Text strong>勾选 <Text code>repo</Text></Text>（私有仓读权限）；<br />
-            3. 拉到底点 <Text code>Generate token</Text>，复制 <Text code>ghp_...</Text> 粘贴到上方。
-            <br />
-            <br />
-            <Text type="warning">⚠️ Token 等同于账号密码，请勿分享/提交到仓库。</Text>
-          </Text>
-        </Form>
-      ) : (
-        <Form layout="vertical">
-          <Form.Item label="仓库成员（GitHub 协作者）">
-            <Spin spinning={loading}>
+          <Form.Item label="PR 标题（左：选项目自动填充；右：可手改）" required>
+            <Space.Compact style={{ width: '100%' }}>
               <Select
-                showSearch
+                style={{ width: '42%' }}
                 allowClear
-                placeholder={loading ? '加载中…' : members.length ? '选择成员' : '未拉取到成员（仓库需为 GitHub）'}
-                value={selected}
-                onChange={setSelected}
-                optionFilterProp="login" // 按登录名过滤（取 Option 的 login 属性）
-                notFoundContent={loading ? '加载中…' : '无成员'}
-              >
-                {members.map((m) => (
-                  // children 既用于下拉项渲染、也用于选中态（默认 optionLabelProp='children'），
-                  // 故选中后单行同样显示「头像 + 登录名」。搜索走 login 属性，不受 children 是 JSX 影响。
-                  <Select.Option key={m.login} value={m.login} login={m.login}>
-                    <Space size={8} align="center">
-                      <Avatar size={20} src={m.avatar} />
-                      <span>{m.login}</span>
-                    </Space>
-                  </Select.Option>
-                ))}
-              </Select>
-            </Spin>
+                showSearch
+                placeholder="选项目填充标题"
+                optionFilterProp="label"
+                options={(projects || []).map((p) => ({ value: p.id, label: p.description || p.store }))}
+                onChange={(id) => {
+                  if (!id) return
+                  const p = (projects || []).find((x) => x.id === id)
+                  setPrTitle(p?.description || '')
+                }}
+              />
+              <Input
+                style={{ width: '58%' }}
+                value={prTitle}
+                onChange={(e) => setPrTitle(e.target.value)}
+                placeholder="如：新增秒杀模块"
+              />
+            </Space.Compact>
           </Form.Item>
-          {members.length > 0 && (
-            <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
-              共 {members.length} 位协作者。选中后暂不触发动作（后续接「生成 PR 文案/跳转 GitHub」）。
-            </Text>
-          )}
-          {loading && members.length === 0 && (
-            <ALink
-              style={{ fontSize: 12 }}
-              onClick={() => {
-                setNeedToken(true)
-                setToken('')
-              }}
+          <Form.Item label="目标分支（base）" required>
+            <Select
+              showSearch
+              loading={branchLoading}
+              placeholder="选择目标分支（展开自动 fetch origin）"
+              popupMatchSelectWidth={false}
+              value={prBase || undefined}
+              onChange={setPrBase}
+              onDropdownVisibleChange={(o) => o && reloadBranches()}
+              notFoundContent={branchLoading ? '加载中…' : '无分支'}
             >
-              拉不到？换/填 GitHub Token
-            </ALink>
-          )}
-        </Form>
-      )}
+              {branchesLocal.length > 0 && (
+                <Select.OptGroup label="本地分支">
+                  {branchesLocal.map((b) => (
+                    <Select.Option key={`l/${b}`} value={b}>
+                      {b}
+                    </Select.Option>
+                  ))}
+                </Select.OptGroup>
+              )}
+              {branchesRemote.length > 0 && (
+                <Select.OptGroup label="远程分支">
+                  {branchesRemote.map((b) => (
+                    <Select.Option key={`r/${b}`} value={b}>
+                      {b}
+                    </Select.Option>
+                  ))}
+                </Select.OptGroup>
+              )}
+            </Select>
+          </Form.Item>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              PR 合并方向：
+            </Text>
+            <Tag color="orange">{repo?.currentBranch || '当前分支'}</Tag>
+            <ArrowRightOutlined style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12 }} />
+            <Tag color="purple">{prBase || '目标分支'}</Tag>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              最终标题：<Text code>{prTitle.trim() ? formatCommitTitle(prType, prTitle) : `${prType}: ...`}</Text>
+            </Text>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <Button onClick={() => setStep(0)}>上一步</Button>
+            <Tooltip title={needToken ? '创建 PR 需先配置 GitHub Token' : ''}>
+              <span>
+                <Button type="primary" loading={prLoading} disabled={needToken} onClick={doCreatePr}>
+                  提交 Pull Request
+                </Button>
+              </span>
+            </Tooltip>
+          </div>
+        </div>
+          </>
+        )}
+      </Form>
     </Modal>
   )
 }
@@ -2057,8 +2354,8 @@ function CreateBranchModal({ open, repo, onClose, onDone, contacts }) {
   useEffect(() => {
     if (!open) return
     form.setFieldsValue({ type: 'feature', person: '', reqno: '' })
-    // 首次加载把基准分支默认填为当前分支；下拉展开刷新时不改已选值
-    reload().then((snap) => snap?.current && form.setFieldValue('base', snap.current))
+    // 加载分支列表供下拉选择；基准分支不预设默认值，需用户显式选择
+    reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repo])
 
@@ -2144,6 +2441,23 @@ function CreateBranchModal({ open, repo, onClose, onDone, contacts }) {
   )
 }
 
+// 创建 release 弹窗用：把「同类输入 + 拼出的名字」圈成一组的描边色框（按 accent 染色，两类一眼可分）。
+const releaseGroupBox = (accent) => ({
+  border: `1px solid ${accent}66`,
+  borderRadius: 10,
+  padding: '4px 14px 14px',
+  marginBottom: 16,
+  background: `${accent}12`,
+})
+// 圈内拼出的名字预览：浅色底突出，与上方输入形成「输入 → 拼接结果」的视觉对应。
+const releasePreviewBox = (accent) => ({
+  marginTop: 4,
+  padding: '8px 12px',
+  borderRadius: 6,
+  background: `${accent}1f`,
+  border: `1px solid ${accent}55`,
+})
+
 /* ---------------- 创建 release（release/version-{英文版本名}；复制主题名称供后台手动建主题） ---------------- */
 function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
   const { message } = App.useApp()
@@ -2187,88 +2501,108 @@ function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
   const submit = async (vals) => {
     setLoading(true)
     // 主题不再由本工具复制：用户点「复制主题名称」后到 Shopify 后台手动新建。
-    // 这里只创建 release 分支（推送到远程）。创建后同样按新分支同步 toml（一般无项目→清配置）。
-    const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName, push: true })
+    // 这里只创建 release 分支（推送到远程），switch:false 不切换——仍停留在当前开发分支，不打断开发。
+    const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName, push: true, switch: false })
     setLoading(false)
     if (!res.ok) {
       message.error(res.error || '创建分支失败')
       return
     }
-    const prefix = `已创建并切换到分支 ${branchName}（已推送远程）`
-    const m = syncMessage(res.data?.sync, prefix)
-    if (m) message[m.type](m.text)
-    else message.success(prefix)
+    message.success(`已创建 release 分支 ${branchName}（已推送远程），未切换、仍停留在 ${repo?.currentBranch || '当前分支'}`)
     onDone?.()
   }
 
   return (
     <Modal title={`创建 release - ${repo?.name ?? ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose>
       <Form form={form} layout="vertical" onFinish={submit}>
-        <Form.Item name="base" label="基准分支" rules={[{ required: true, message: '请选择基准分支' }]}>
-          <Select
-            showSearch
-            loading={branchLoading}
-            placeholder="选择基准分支（展开自动 fetch origin）"
-            popupMatchSelectWidth={false}
-            onDropdownVisibleChange={(o) => o && reload()}
+        {/* ① 分支名称：基准分支 + 版本名 → 拼出的分支名，圈在一块更醒目 */}
+        <div style={releaseGroupBox('#1677ff')}>
+          <SectionLabel color="#1677ff">分支名称</SectionLabel>
+          <Form.Item name="base" label="基准分支" rules={[{ required: true, message: '请选择基准分支' }]} style={{ marginBottom: 12 }}>
+            <Select
+              showSearch
+              loading={branchLoading}
+              placeholder="选择基准分支（展开自动 fetch origin）"
+              popupMatchSelectWidth={false}
+              onDropdownVisibleChange={(o) => o && reload()}
+            >
+              {local.length > 0 && (
+                <Select.OptGroup label="本地分支">
+                  {local.map((b) => (
+                    <Select.Option key={`l/${b}`} value={b}>
+                      {b}
+                    </Select.Option>
+                  ))}
+                </Select.OptGroup>
+              )}
+              {remote.length > 0 && (
+                <Select.OptGroup label="远程分支">
+                  {remote.map((b) => (
+                    <Select.Option key={`r/${b}`} value={b}>
+                      {b}
+                    </Select.Option>
+                  ))}
+                </Select.OptGroup>
+              )}
+            </Select>
+          </Form.Item>
+          <Form.Item
+            name="version"
+            label="版本名（英文）"
+            rules={[
+              { required: true, message: '请输入版本名' },
+              { pattern: /^[A-Za-z0-9._-]+$/, message: '仅限英文 / 数字 / . _ -' },
+            ]}
+            style={{ marginBottom: 12 }}
           >
-            {local.length > 0 && (
-              <Select.OptGroup label="本地分支">
-                {local.map((b) => (
-                  <Select.Option key={`l/${b}`} value={b}>
-                    {b}
-                  </Select.Option>
-                ))}
-              </Select.OptGroup>
-            )}
-            {remote.length > 0 && (
-              <Select.OptGroup label="远程分支">
-                {remote.map((b) => (
-                  <Select.Option key={`r/${b}`} value={b}>
-                    {b}
-                  </Select.Option>
-                ))}
-              </Select.OptGroup>
-            )}
-          </Select>
-        </Form.Item>
-        <Form.Item
-          name="version"
-          label="版本名（英文）"
-          rules={[
-            { required: true, message: '请输入版本名' },
-            { pattern: /^[A-Za-z0-9._-]+$/, message: '仅限英文 / 数字 / . _ -' },
-          ]}
-        >
-          <Input placeholder="如 2024spring" />
-        </Form.Item>
-        <Form.Item name="activity" label="活动名称">
-          <Input placeholder="用于生成主题名称" />
-        </Form.Item>
-        <Form.Item name="owner" label="负责人">
-          <AutoComplete
-            options={(contacts || []).map((c) => ({ value: c.name }))}
-            filterOption={(v, o) => String(o.value).toLowerCase().includes(String(v).toLowerCase())}
-            style={{ width: '100%' }}
-          >
-            <Input placeholder="负责人（可从已录入人员选择或手输）" />
-          </AutoComplete>
-        </Form.Item>
-        <Form.Item label="主题名称">
-          <Space.Compact style={{ width: '100%' }}>
-            <Input value={themeName} readOnly placeholder="填写活动名称与负责人后生成主题名" />
-            <Button onClick={copyThemeName} disabled={!themeName}>
-              复制主题名称
-            </Button>
-          </Space.Compact>
-        </Form.Item>
-        <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-          命名格式：[release] 活动 | 负责人 | 日期。复制名称后，请到 Shopify 后台手动新建主题（不再自动复制 live 主题）。
-        </Text>
-        <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-          分支名预览：<Text code>{branchName || 'release/version-{版本名}'}</Text>
-        </Text>
-        <Button type="primary" htmlType="submit" loading={loading}>
+            <Input placeholder="如 2024spring" />
+          </Form.Item>
+          <div style={releasePreviewBox('#1677ff')}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              拼出的分支名
+            </Text>
+            <div style={{ marginTop: 4, fontFamily: 'monospace', fontSize: 13 }}>
+              <Text strong copyable={!!branchName}>
+                {branchName || 'release/version-{版本名}'}
+              </Text>
+            </div>
+          </div>
+        </div>
+
+        {/* ② 主题名称：活动名称 + 负责人 → 拼出的主题名，圈在一块更醒目 */}
+        <div style={releaseGroupBox('#52c41a')}>
+          <SectionLabel color="#52c41a">主题名称</SectionLabel>
+          <Form.Item name="activity" label="活动名称" style={{ marginBottom: 12 }}>
+            <Input placeholder="用于生成主题名称" />
+          </Form.Item>
+          <Form.Item name="owner" label="负责人" style={{ marginBottom: 12 }}>
+            <AutoComplete
+              options={(contacts || []).map((c) => ({ value: c.name }))}
+              filterOption={(v, o) => String(o.value).toLowerCase().includes(String(v).toLowerCase())}
+              style={{ width: '100%' }}
+            >
+              <Input placeholder="负责人（可从已录入人员选择或手输）" />
+            </AutoComplete>
+          </Form.Item>
+          <div style={releasePreviewBox('#52c41a')}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                拼出的主题名
+              </Text>
+              <Button size="small" onClick={copyThemeName} disabled={!themeName}>
+                复制主题名称
+              </Button>
+            </div>
+            <Text strong style={{ display: 'block', marginTop: 6, wordBreak: 'break-all' }}>
+              {themeName || '填写活动名称与负责人后生成'}
+            </Text>
+            <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+              格式：[release] 活动 | 负责人 | 日期。复制后到 Shopify 后台手动新建主题。
+            </Text>
+          </div>
+        </div>
+
+        <Button type="primary" htmlType="submit" loading={loading} block>
           创建 release
         </Button>
       </Form>
@@ -2407,33 +2741,6 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
         tooltip={noTapd ? '当前分支下没有含工单链接的本地项目' : '汇总多个项目的标题/工单，按模板生成合并通知'}
         onClick={() => onAction('mergeInfo', repo)}
       />
-      {/* PR 角标：贴流程行右上角的四分一圆扇形（方块只切左下大圆角 → 右上角留扇形），点击弹成员下拉 */}
-      <div
-        role="button"
-        title="PR 文案"
-        onClick={() => onAction('pr', repo)}
-        style={{
-          position: 'absolute',
-          top: 0,
-          right: 0,
-          width: 36,
-          height: 36,
-          borderTopRightRadius: 10,
-          borderBottomLeftRadius: 36,
-          background: 'linear-gradient(135deg, #722ed1, #1677ff)',
-          color: '#fff',
-          fontSize: 12,
-          fontWeight: 700,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          cursor: 'pointer',
-          userSelect: 'none',
-          boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
-        }}
-      >
-        PR
-      </div>
     </div>
   )
 }
@@ -2500,7 +2807,21 @@ function OpenEditorButton({ dir, defaultEditor }) {
 
 function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, defaultEditor }) {
   const matched = !!repo.matched
+  const { message } = App.useApp()
   const [hovered, setHovered] = useState(false) // 玻璃亮光 hover 态（仅本卡重渲，不影响其它卡片）
+
+  // 后台链接：同一 store 下所有项目共享，提升到仓库卡片，避免每个项目面板重复显示。
+  const storeName = repo.devEnv?.store?.split('.')[0]
+  const adminLink = storeName ? `https://admin.shopify.com/store/${storeName}/themes` : null
+  // GitHub 当前分支链接。
+  const githubUrl = githubTreeUrl(repo.remoteUrl, repo.currentBranch)
+
+  const openLink = async (url, label) => {
+    if (!url) return
+    const res = await window.api.shell.copy(url)
+    await window.api.shell.openExternal(url)
+    if (res?.ok) message.success(`已复制${label}并在默认浏览器打开`)
+  }
 
   // 下拉展开时实时获取分支（不缓存）：每次 reload 直连 listAllBranches，其 local/remote 均已
   // 去重；不再用仓库列表里那份可能过时/带重复的 repo.branches 缓存来渲染下拉。
@@ -2604,57 +2925,111 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
         />
       }
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 12 }}>
-        <Tooltip title={repo.path}>
-          <div
-            style={{
-              minWidth: 0,
-              fontSize: 12,
-              color: 'rgba(255,255,255,0.45)',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {repo.path}
-          </div>
-        </Tooltip>
-        <OpenEditorButton dir={repo.path} defaultEditor={defaultEditor} />
-      </div>
+      <div style={{ position: 'relative' }}>
+        {/* GitHub 彩带：右上角斜向入口，跳转到当前分支的 GitHub 页面 */}
+        {githubUrl && (
+          <Tooltip title="在 GitHub 查看当前分支">
+            <div
+              onClick={() => openLink(githubUrl, 'GitHub 链接')}
+              style={{
+                position: 'absolute',
+                top: -10,
+                right: -10,
+                width: 70,
+                height: 70,
+                overflow: 'hidden',
+                zIndex: 1,
+                cursor: 'pointer',
+                userSelect: 'none',
+              }}
+            >
+              <span
+                style={{
+                  display: 'block',
+                  position: 'absolute',
+                  top: 12,
+                  right: -20,
+                  width: 96,
+                  textAlign: 'center',
+                  transform: 'rotate(45deg)',
+                  background: 'linear-gradient(135deg, #1677ff 0%, #0958d9 100%)',
+                  color: '#fff',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  lineHeight: '22px',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+                }}
+              >
+                <GithubOutlined style={{ marginRight: 2 }} />
+                GitHub
+              </span>
+            </div>
+          </Tooltip>
+        )}
 
-      {/* 配置操作 */}
-      <div style={{ marginBottom: 14 }}>
-        <SectionLabel color="#1677ff">配置操作</SectionLabel>
-        <Space wrap size={[6, 6]}>
-          {!repo.hasToml ? (
-            <Button size="small" type="primary" onClick={() => onAction('init', repo)}>
-              初始化
-            </Button>
-          ) : (
-            <>
-              {saveBtn}
-              <Tooltip title="已有配置文件，无需初始化">
-                <span>
-                  <Button size="small" disabled>
-                    初始化
-                  </Button>
-                </span>
-              </Tooltip>
-            </>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 12, paddingRight: githubUrl ? 44 : 0 }}>
+          <Tooltip title={repo.path}>
+            <div
+              style={{
+                minWidth: 0,
+                fontSize: 12,
+                color: 'rgba(255,255,255,0.45)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {repo.path}
+            </div>
+          </Tooltip>
+          <OpenEditorButton dir={repo.path} defaultEditor={defaultEditor} />
+          {adminLink && (
+            <Tooltip title="打开 Shopify 后台">
+              <Button
+                type="text"
+                size="small"
+                icon={<DashboardOutlined />}
+                onClick={() => openLink(adminLink, '后台链接')}
+                style={{ color: '#faad14', flexShrink: 0 }}
+              />
+            </Tooltip>
           )}
-        </Space>
-      </div>
+        </div>
 
-      {/* Git 流程：开发→拉分支 / 开发完→提测 / 提测完→release 创建 */}
-      <div>
-        <SectionLabel color="#52c41a">Git 流程</SectionLabel>
-        <GitFlowSteps repo={repo} project={repo.matched} projects={projects} onAction={onAction} />
-      </div>
+        {/* 配置操作 */}
+        <div style={{ marginBottom: 14 }}>
+          <SectionLabel color="#1677ff">配置操作</SectionLabel>
+          <Space wrap size={[6, 6]}>
+            {!repo.hasToml ? (
+              <Button size="small" type="primary" onClick={() => onAction('init', repo)}>
+                初始化
+              </Button>
+            ) : (
+              <>
+                {saveBtn}
+                <Tooltip title="已有配置文件，无需初始化">
+                  <span>
+                    <Button size="small" disabled>
+                      初始化
+                    </Button>
+                  </span>
+                </Tooltip>
+              </>
+            )}
+          </Space>
+        </div>
 
-      {/* 关联的本地项目：同 store 的多条都内嵌展示，保持原顺序不置顶 */}
-      {projects.map((p) => (
-        <ProjectPanel key={p.id} project={p} onAction={onProjectAction} active={p.id === matchedId} embedded />
-      ))}
+        {/* Git 流程：开发→拉分支 / 开发完→提测 / 提测完→release 创建 */}
+        <div>
+          <SectionLabel color="#52c41a">Git 流程</SectionLabel>
+          <GitFlowSteps repo={repo} project={repo.matched} projects={projects} onAction={onAction} />
+        </div>
+
+        {/* 关联的本地项目：同 store 的多条都内嵌展示，保持原顺序不置顶 */}
+        {projects.map((p) => (
+          <ProjectPanel key={p.id} project={p} onAction={onProjectAction} active={p.id === matchedId} embedded />
+        ))}
+      </div>
     </Card>
   )
 }
@@ -2705,7 +3080,8 @@ function EditProjectModal({ open, project, onClose, onDone }) {
 
   const submit = async (vals) => {
     setLoading(true)
-    const res = await window.api.shops.update(project.id, vals)
+    // 传 repoPath：后端据此在「当前生效」时回写该仓库 shopify.theme.toml（保持配置与项目一致）
+    const res = await window.api.shops.update(project.id, vals, project.repoPath)
     setLoading(false)
     if (res.ok) {
       message.success('已更新')
@@ -2808,12 +3184,12 @@ function InfoField({ label, value, copyable }) {
 }
 
 /* ---------------- 本地项目面板（仓库卡内嵌=圈起来；独立分区=无外框卡） ---------------- */
-// 项目面板的四个快捷链接：彩色 chip，各自配色在深色 glass 卡片上清晰可辨。
+// 项目面板的三个快捷链接（开发 / 提测 / 编辑器）：彩色 chip，各自配色在深色 glass 卡片上清晰可辨。
 // urlKey 对应 project.links 的字段；缺链接时渲染为禁用态（不可点、灰显）。
+// 注：「后台」链接不在此列——同一 store 下所有项目共享同一后台地址，已提升到仓库卡片统一展示（见 RepoCard 的 adminLink）。
 const QUICK_LINKS = [
   { key: 'dev', label: '开发', Icon: CodeOutlined, urlKey: 'devLink', color: '#52c41a', copyLabel: '开发链接' },
   { key: 'preview', label: '提测', Icon: EyeOutlined, urlKey: 'previewLink', color: '#36cfc9', copyLabel: '提测链接' },
-  { key: 'admin', label: '后台', Icon: DashboardOutlined, urlKey: 'adminLink', color: '#faad14', copyLabel: '后台链接' },
   { key: 'editor', label: '编辑器', Icon: FormatPainterOutlined, urlKey: 'editorLink', color: '#9254de', copyLabel: '编辑器链接' },
 ]
 
@@ -3109,7 +3485,6 @@ export default function Repos() {
   const [templatesOpen, setTemplatesOpen] = useState(false)
   const [gotestFor, setGotestFor] = useState(null) // 提测目标 project
   const [mergeInfoFor, setMergeInfoFor] = useState(null) // 第④步「获取合并提交信息」目标 repo
-  const [prFor, setPrFor] = useState(null) // 右上角「PR」角标：目标 repo
 
   const [tplModal, setTplModal] = useState(null) // { title, files }
   const [editRepo, setEditRepo] = useState(null) // { mode:'init'|'save', repo }
@@ -3245,7 +3620,6 @@ export default function Repos() {
     else if (type === 'branch' || type === 'release') setGitModal({ mode: type, repo: payload })
     else if (type === 'gotest') setGotestFor(payload)
     else if (type === 'mergeInfo') setMergeInfoFor(payload)
-    else if (type === 'pr') setPrFor(payload)
   }
 
   // 项目卡片动作分发
@@ -3257,14 +3631,15 @@ export default function Repos() {
     else if (type === 'gotest') setGotestFor(payload)
   }
 
-  // 删除本地缓存项目
+  // 删除本地缓存项目；若为该仓库「当前生效」项，后端会一并清掉其 shopify.theme.toml
   const handleDeleteProject = async (project) => {
-    const res = await window.api.shops.delete([project.id])
+    const res = await window.api.shops.delete([project.id], project.repoPath)
     if (!res.ok) {
       message.error(res.error || '删除失败')
       return
     }
-    message.success('已删除')
+    // synced=true 表示该仓库当前生效配置已被清除，单独提示；其余情况（非生效/tracked/无 toml）普通提示
+    message.success(res.synced ? '已删除项目，并清除该仓库当前生效配置' : '已删除')
     // 删除后须刷新关联仓库的 matched 状态：否则仓库卡「本地保存」仍因旧 matched 被禁用，
     // 要点「重新扫描」才恢复。refreshRepo 内部已含 refreshProjects。
     if (project.repoPath) {
@@ -3590,17 +3965,18 @@ export default function Repos() {
         onClose={() => setMergeInfoFor(null)}
       />
 
-      {/* PR 角标弹窗：拉 GitHub 协作者，下拉选成员（本阶段仅展示） */}
-      <PrMembersModal open={!!prFor} repo={prFor} onClose={() => setPrFor(null)} />
-
       {/* 编辑本地项目（仅 非 _ 开头字段） */}
       <EditProjectModal
         open={!!editProject}
         project={editProject}
         onClose={() => setEditProject(null)}
         onDone={() => {
+          // 编辑可能回写了 toml：刷新关联仓库（已含 refreshProjects）立即重算 matched，
+          // 不依赖文件监听；无仓库关联时退回只刷项目列表
+          const rp = editProject?.repoPath
           setEditProject(null)
-          refreshProjects()
+          if (rp) refreshRepo(rp)
+          else refreshProjects()
         }}
       />
 

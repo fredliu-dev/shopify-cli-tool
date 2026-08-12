@@ -79,11 +79,12 @@ export function registerDingtalkIpc() {
       const cfg = loadDingtalkConfig()
       const tpl = cfg.templates.find((t) => t.id === templateId)
       if (!tpl) return { ok: false, error: '未找到该消息模板' }
-      const { persons, urls, titles, contents, hasAll } = parsePlaceholders(tpl.content)
+      const { persons, urls, titles, contents, tapds, hasAll } = parsePlaceholders(tpl.content)
       const fields = [
         ...persons.map((p) => ({ kind: 'person', ...p })),
         ...urls.map((u) => ({ kind: 'url', ...u })),
         ...titles.map((t) => ({ kind: 'title', ...t })),
+        ...tapds.map((d) => ({ kind: 'tapd', ...d })),
         ...contents.map((c) => ({ kind: 'content', ...c })),
       ]
       return { ok: true, data: { fields, hasAll } }
