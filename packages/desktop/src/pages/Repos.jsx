@@ -50,8 +50,8 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 const { Title, Text, Link: ALink } = Typography
 const { TextArea } = Input
 
-const isTemplateJson = (p) => /(^|\/)templates?\//i.test(p) && /\.json$/i.test(p)
-const templatesOf = (repo) => (repo?.changedFiles || []).filter(isTemplateJson)
+const isJsonFile = (p) => /\.json$/i.test(p)
+const changedJsonOf = (repo) => (repo?.changedFiles || []).filter(isJsonFile)
 
 // 按自定义顺序（path 数组）重排仓库列表：order 里出现的按其顺序优先，未出现的保持原相对顺序追加在后。
 // sort 稳定（ES2019+），故两个都不在 order 中的项维持原序。
@@ -584,12 +584,12 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
   )
 }
 
-/* ---------------- 查看改动模板 Modal（git 改动过的 templates/*.json 文件名） ---------------- */
-function ChangedTemplatesModal({ open, title, files, onClose }) {
+/* ---------------- 查看 JSON 改动 Modal（git 改动过的 *.json 文件名） ---------------- */
+function ChangedJsonModal({ open, title, files, onClose }) {
   return (
-    <Modal title={title ? `Template变动 - ${title}` : 'Template变动'} open={open} onCancel={onClose} footer={null} destroyOnClose>
+    <Modal title={title ? `JSON改动 - ${title}` : 'JSON改动'} open={open} onCancel={onClose} footer={null} destroyOnClose>
       {!files || files.length === 0 ? (
-        <Text type="secondary">当前分支无改动的 templates json</Text>
+        <Text type="secondary">当前分支无改动的 json 文件</Text>
       ) : (
         <div style={{ maxHeight: 320, overflow: 'auto', fontFamily: 'monospace', fontSize: 12 }}>
           {files.map((f) => (
@@ -3045,7 +3045,7 @@ const EDIT_LABELS = {
 }
 const EDIT_ORDER = ['description', 'store', 'domain', 'theme', 'previewKey', 'port']
 // 排除：以 _ 开头的只读字段（如 _branch）、id（主键）、派生/注入字段
-const EDIT_SKIP = new Set(['id', 'envName', 'templateName', 'links', 'repoPath', 'changedTemplates'])
+const EDIT_SKIP = new Set(['id', 'envName', 'templateName', 'links', 'repoPath', 'changedJson'])
 // 纯展示字段：store/domain 为项目身份标识，不可编辑（不绑定 name，提交时不传）
 const EDIT_READONLY = new Set(['store', 'domain'])
 
@@ -3305,12 +3305,12 @@ function ProjectPanel({ project, onAction, active, embedded }) {
         <InfoField label="preview_key" value={project.previewKey} copyable />
       </div>
 
-      {/* 操作：改动模板 / 提测 / 编辑 / 删除（整行 stopPropagation，避免点按钮误触发卡片切换） */}
+      {/* 操作：JSON 改动 / 提测 / 编辑 / 删除（整行 stopPropagation，避免点按钮误触发卡片切换） */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }} onClick={(e) => e.stopPropagation()}>
         <Space size={6}>
-          <Badge count={project.changedTemplates?.length || 0} size="small" offset={[-2, 0]} color={project.changedTemplates?.length ? '#faad14' : undefined}>
-            <Button size="small" onClick={() => onAction('templates', { title, files: project.changedTemplates || [] })}>
-              Template变动
+          <Badge count={project.changedJson?.length || 0} size="small" offset={[-2, 0]} color={project.changedJson?.length ? '#faad14' : undefined}>
+            <Button size="small" onClick={() => onAction('json', { title, files: project.changedJson || [] })}>
+              JSON改动
             </Button>
           </Badge>
           {!embedded && (
@@ -3520,7 +3520,7 @@ export default function Repos() {
   const [gotestFor, setGotestFor] = useState(null) // 提测目标 project
   const [mergeInfoFor, setMergeInfoFor] = useState(null) // 第④步「获取合并提交信息」目标 repo
 
-  const [tplModal, setTplModal] = useState(null) // { title, files }
+  const [jsonModal, setJsonModal] = useState(null) // { title, files }
   const [editRepo, setEditRepo] = useState(null) // { mode:'init'|'save', repo }
   const [cloneable, setCloneable] = useState([]) // 模板 _github 项目 + 是否已存在（供「创建项目」查重）
   const [createProjectOpen, setCreateProjectOpen] = useState(false)
@@ -3649,7 +3649,7 @@ export default function Repos() {
   const repoAction = (type, payload) => {
     if (type === 'init') setEditRepo({ mode: 'init', repo: payload })
     else if (type === 'save') setEditRepo({ mode: 'save', repo: payload })
-    else if (type === 'templates') setTplModal(payload)
+    else if (type === 'json') setJsonModal(payload)
     else if (type === 'checkout') checkoutBranch(payload.repo.path, payload.branch)
     else if (type === 'branch' || type === 'release') setGitModal({ mode: type, repo: payload })
     else if (type === 'gotest') setGotestFor(payload)
@@ -3659,7 +3659,7 @@ export default function Repos() {
   // 项目卡片动作分发
   const projectAction = (type, payload) => {
     if (type === 'switch') handleSwitch(payload)
-    else if (type === 'templates') setTplModal(payload)
+    else if (type === 'json') setJsonModal(payload)
     else if (type === 'edit') setEditProject(payload)
     else if (type === 'delete') handleDeleteProject(payload)
     else if (type === 'gotest') setGotestFor(payload)
@@ -3737,12 +3737,12 @@ export default function Repos() {
     return m
   }, [repos])
 
-  // 每个 project 注入关联仓库路径 + 改动模板（按 store 关联）
+  // 每个 project 注入关联仓库路径 + JSON 改动（按 store 关联）
   const enrichedProjects = useMemo(
     () =>
       projects.map((p) => {
         const r = repoByStore.get(p.store)
-        return { ...p, repoPath: r?.path, changedTemplates: templatesOf(r) }
+        return { ...p, repoPath: r?.path, changedJson: changedJsonOf(r) }
       }),
     [projects, repoByStore],
   )
@@ -3944,8 +3944,8 @@ export default function Repos() {
         />
       )}
 
-      {/* 查看改动模板 */}
-      <ChangedTemplatesModal open={!!tplModal} title={tplModal?.title} files={tplModal?.files || []} onClose={() => setTplModal(null)} />
+      {/* 查看 JSON 改动 */}
+      <ChangedJsonModal open={!!jsonModal} title={jsonModal?.title} files={jsonModal?.files || []} onClose={() => setJsonModal(null)} />
 
       {/* 设置默认编辑器 */}
       <SettingsModal

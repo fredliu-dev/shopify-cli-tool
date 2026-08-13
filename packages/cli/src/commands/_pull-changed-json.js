@@ -4,9 +4,9 @@ import { loadThemeConfig, extractEnvironmentArg, getChangedFiles } from '@shopif
 // 多选项里的「全选」哨兵值
 const ALL = '__all__'
 
-/** 路径是否位于 templates/（兼容 template/）下的 json 文件 */
-function isTemplateJson(p) {
-  return /(^|\/)templates?\//i.test(p) && /\.json$/i.test(p)
+/** 路径是否为 json 文件（整个项目范围内，不限 templates/） */
+function isJsonFile(p) {
+  return /\.json$/i.test(p)
 }
 
 /**
@@ -26,16 +26,16 @@ async function resolveEnv(argv) {
 }
 
 /**
- * 拉取当前分支改动过的 templates json：读改动文件 → 筛 json → 多选（首项「全选」）
+ * 拉取当前分支改动过的 json 文件：读改动文件 → 筛 json → 多选（首项「全选」）
  * → shopify theme pull -e <env> --only <file> --only <file> …
  * @returns {Promise<boolean>} true=可继续后续逻辑（成功/跳过）；false=pull 失败应中止
  */
-async function pullChangedJson(ctx, env) {
+async function doPullChangedJson(ctx, env) {
   const { log, runShopify } = ctx
   const changed = await getChangedFiles(process.cwd())
-  const jsonFiles = changed.filter(isTemplateJson)
+  const jsonFiles = changed.filter(isJsonFile)
   if (!jsonFiles.length) {
-    log.info('当前分支没有改动 templates 下的 json 文件，跳过 pull')
+    log.info('当前分支没有改动的 json 文件，跳过 pull')
     return true
   }
 
@@ -66,21 +66,21 @@ async function pullChangedJson(ctx, env) {
 }
 
 /**
- * `shop dev` / `shop async` 共用的前置：解析环境并拉取当前分支改动过的 templates json。
+ * `shop dev` / `shop async` 共用的前置：解析环境并拉取当前分支改动过的 json 文件。
  * - 用户取消（Ctrl+C）或 pull 失败时返回 false，调用方应中止，不再进入 theme dev。
  * - 成功/跳过返回 true；并把解析或选出的环境注入 argv（用户没显式传 -e 时），
  *   供后续 runThemeDev 复用同一个环境。
  * @param {object} ctx 命令上下文（argv / log / runShopify）
  * @returns {Promise<boolean>} 是否可继续后续 theme dev
  */
-export async function pullChangedTemplatesJson(ctx) {
+export async function pullChangedJson(ctx) {
   const { log, argv } = ctx
 
   let env
   let pullOk = true
   try {
     env = await resolveEnv(argv)
-    if (env) pullOk = await pullChangedJson(ctx, env)
+    if (env) pullOk = await doPullChangedJson(ctx, env)
   } catch (err) {
     if (err?.name === 'ExitPromptError') {
       log.info('已取消')

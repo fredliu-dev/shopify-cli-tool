@@ -3,7 +3,7 @@ import { select, input } from '@inquirer/prompts'
 import initCmd from './init.js'
 import { loadThemeConfig, setEnvField, getPortPids, killPort, loadProjects } from '@shopify-cli-tool/core'
 import { runThemeDev } from './_theme-dev.js'
-import { pullChangedTemplatesJson } from './_pull-changed-json.js'
+import { pullChangedJson } from './_pull-changed-json.js'
 
 /**
  * `shop use` —— 使用与当前配置匹配的项目并执行命令。
@@ -138,8 +138,8 @@ export default {
       throw err
     }
 
-    // 与 shop dev / shop async 对齐：先拉取当前分支改动过的 templates json，再起 dev
-    if (!(await pullChangedTemplatesJson(ctx))) return // 取消 / pull 失败，不继续
+    // 与 shop dev / shop async 对齐：先拉取当前分支改动过的 json 文件，再起 dev
+    if (!(await pullChangedJson(ctx))) return // 取消 / pull 失败，不继续
 
     // 端口若被占用（通常是上一次未关闭的 dev server），先释放
     const port = Number(selectedProject.port)
