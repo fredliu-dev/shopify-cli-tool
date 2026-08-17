@@ -60,7 +60,7 @@ export default {
       return
     }
 
-    let tpl, theme, port, previewKey, projectDesc
+    let tpl, theme, port, previewKey, previewPath, projectDesc
     try {
       tpl = await select({
         message: '选择模板：',
@@ -73,6 +73,7 @@ export default {
         validate: (v) => (/^\d+$/.test(v.trim()) ? true : '需为数字'),
       })
       previewKey = await input({ message: '请输入 preview_key（新页面需填）：' })
+      previewPath = await input({ message: '请输入网页路径（选填，如 /pages/back-to-school-sale）：' })
       projectDesc = await input({ message: '请输入 project_desc（选填）：' })
     } catch (err) {
       if (err?.name === 'ExitPromptError') {
@@ -88,6 +89,7 @@ export default {
         theme,
         port,
         previewKey,
+        previewPath,
         projectDesc,
       })
       writeFileSync(target, content, 'utf8')

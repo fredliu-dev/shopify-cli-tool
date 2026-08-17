@@ -176,6 +176,7 @@ export default {
         domain: sel.env.domain,
         theme: String(sel.env.theme),
         previewKey: String(sel.env.preview_key ?? ''),
+        previewPath: String(sel.env.preview_path ?? ''),
         port: String(sel.env.port),
         description: sel.env.project_desc,
         _branch: currentBranch || null,

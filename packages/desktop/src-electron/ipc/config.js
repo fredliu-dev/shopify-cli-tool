@@ -174,10 +174,10 @@ export function registerConfigIpc() {
   // 新建 shopify.theme.toml（文件不存在分支）
   ipcMain.handle(
     'config:initCreate',
-    async (_evt, { dir, templateName, theme, port, previewKey, projectDesc }) => {
+    async (_evt, { dir, templateName, theme, port, previewKey, previewPath, projectDesc }) => {
       const { buildThemeConfig } = await import('@shopify-cli-tool/core')
       try {
-        const content = buildThemeConfig({ templateName, theme, port, previewKey, projectDesc })
+        const content = buildThemeConfig({ templateName, theme, port, previewKey, previewPath, projectDesc })
         writeFileSync(join(dir, THEME_FILE), content, 'utf8')
         return { ok: true }
       } catch (err) {

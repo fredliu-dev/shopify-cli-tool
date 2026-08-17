@@ -23,6 +23,7 @@ function withLinks(p) {
     store: p.store ?? tplEnv.store,
     theme: p.theme,
     preview_key: p.previewKey,
+    preview_path: p.previewPath,
     port: p.port,
   })
   return { ...p, links }
@@ -94,6 +95,7 @@ export function updateProject(id, fields) {
 const PROJECT_FIELD_TO_TOML = {
   theme: 'theme',
   previewKey: 'preview_key',
+  previewPath: 'preview_path',
   port: 'port',
   description: 'project_desc',
 }
@@ -339,6 +341,7 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
     domain: resolved.domain,
     theme: String(resolved.theme),
     previewKey: String(resolved.preview_key ?? ''),
+    previewPath: String(resolved.preview_path ?? ''),
     port: String(resolved.port),
     description: resolved.project_desc,
     _branch: branch || null,
@@ -348,11 +351,23 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
   const projects = loadProjects()
   const dup = projects.find((p) => isSameProject(p, resolved, branch))
   if (dup) {
-    // 命中已有项目：_tapd 是衍生数据（不在六要素里），单独更新即可，不算"新建"
+    // 命中已有项目：不在六要素里的字段（_tapd 衍生数据、preview_path/port 等非身份字段）
+    // 单独回填为本次保存的值，不算"新建"——否则已存项目永远带不上后来才填的网页路径
+    let dirty = false
     if (tapd && dup._tapd !== tapd) {
       dup._tapd = tapd
-      saveProjects(projects)
+      dirty = true
     }
+    const nextPath = String(resolved.preview_path ?? '')
+    if (String(dup.previewPath ?? '') !== nextPath) {
+      dup.previewPath = nextPath
+      dirty = true
+    }
+    if (String(dup.port ?? '') !== String(resolved.port ?? '')) {
+      dup.port = String(resolved.port)
+      dirty = true
+    }
+    if (dirty) saveProjects(projects)
     return { project: withLinks(dup), created: false }
   }
 
@@ -409,6 +424,7 @@ export async function syncConfigForBranch(repoPath, branch) {
         theme: project.theme,
         port: project.port,
         previewKey: project.previewKey,
+        previewPath: project.previewPath,
         projectDesc: project.description,
       })
     } catch {
@@ -465,6 +481,7 @@ export async function switchConfigToProject(repoPath, projectId) {
       theme: project.theme,
       port: project.port,
       previewKey: project.previewKey,
+      previewPath: project.previewPath,
       projectDesc: project.description,
     })
   } catch {

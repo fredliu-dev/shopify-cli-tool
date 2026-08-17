@@ -41,6 +41,7 @@ export default {
         store: p.store ?? tplEnv.store,
         theme: p.theme,
         preview_key: p.previewKey,
+        preview_path: p.previewPath,
         port: p.port,
       })
       const linksCell = [

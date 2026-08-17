@@ -7,3 +7,4 @@ theme = ""
 store = "aftershokz-canada.myshopify.com"
 port = 9292
 preview_key=""
+preview_path=""

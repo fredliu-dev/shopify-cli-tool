@@ -109,6 +109,7 @@ export default {
       ['domain', selectedProject.domain],
       ['project_desc', selectedProject.description],
       ['preview_key', selectedProject.previewKey],
+      ['preview_path', selectedProject.previewPath],
       ['port', selectedProject.port],
       ['theme', selectedProject.theme],
       ['store', selectedProject.store],

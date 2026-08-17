@@ -6,3 +6,4 @@ theme = ""
 store = ""
 port = 9292
 preview_key=""
+preview_path=""

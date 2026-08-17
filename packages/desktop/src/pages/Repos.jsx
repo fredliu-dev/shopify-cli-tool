@@ -360,6 +360,7 @@ function InitRepoModal({ open, repo, onClose, onDone }) {
           theme: vals.theme,
           port: vals.port,
           previewKey: vals.previewKey,
+          previewPath: vals.previewPath,
           projectDesc: vals.projectDesc,
         })
     setLoading(false)
@@ -387,6 +388,17 @@ function InitRepoModal({ open, repo, onClose, onDone }) {
             </Form.Item>
             <Form.Item name="previewKey" label="preview_key（新页面需填）">
               <Input />
+            </Form.Item>
+            <Form.Item
+              name="previewPath"
+              label="网页路径（选填）"
+              extra={
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  如 /pages/back-to-school-sale；无 preview_key 时拼到预览/开发链接，编辑器链接挂 previewPath 参数
+                </Text>
+              }
+            >
+              <Input placeholder="/pages/xxx" />
             </Form.Item>
             <Form.Item name="projectDesc" label="project_desc（选填）">
               <Input />
@@ -1993,7 +2005,7 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
         />
         {step === 0 && (
           <>
-            <Form.Item label="本地项目（多选，仅含工单链接）" required>
+            <Form.Item label="本地项目（多选）" required>
           <Select
             mode="multiple"
             showSearch
@@ -2729,9 +2741,9 @@ function StageCard({ index, color, stageName, title, disabled, tooltip, onClick,
 
 function GitFlowSteps({ repo, project, projects, onAction }) {
   const hasProject = !!project
-  // 当前分支下含工单链接（_tapd）的项目：第④步「合并信息」的候选来源；无则置灰
-  const tapdProjects = (projects || []).filter((p) => p.description && p._tapd)
-  const noTapd = tapdProjects.length === 0
+  // 当前分支下的本地项目：第④步「合并信息」的候选来源（不要求含工单链接）；无则置灰
+  const branchProjects = (projects || []).filter((p) => p.description)
+  const noProjects = branchProjects.length === 0
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 6, position: 'relative' }}>
@@ -2766,8 +2778,8 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
         color="#722ed1"
         title="合并信息"
         stageName="上线前"
-        disabled={noTapd}
-        tooltip={noTapd ? '当前分支下没有含工单链接的本地项目' : '汇总多个项目的标题/工单，按模板生成合并通知'}
+        disabled={noProjects}
+        tooltip={noProjects ? '当前分支下没有本地项目' : '汇总多个项目的标题/工单，按模板生成合并通知'}
         onClick={() => onAction('mergeInfo', repo)}
       />
     </div>
@@ -3094,7 +3106,9 @@ function EditProjectModal({ open, project, onClose, onDone }) {
   const [loading, setLoading] = useState(false)
 
   const editableKeys = (Object.keys(project || {}) || [])
-    .filter((k) => !k.startsWith('_') && !EDIT_SKIP.has(k))
+    // previewPath 单独固定渲染（下方专属 Form.Item）：老项目记录里没有这个 key，
+    // 走自动生成会漏掉字段，导致已存项目无法补填网页路径
+    .filter((k) => !k.startsWith('_') && !EDIT_SKIP.has(k) && k !== 'previewPath')
     .sort((a, b) => {
       const ia = EDIT_ORDER.indexOf(a)
       const ib = EDIT_ORDER.indexOf(b)
@@ -3110,8 +3124,9 @@ function EditProjectModal({ open, project, onClose, onDone }) {
       editableKeys.forEach((k) => {
         vals[k] = project[k] != null ? String(project[k]) : ''
       })
-      // 工单链接（_ 开头字段被 editableKeys 过滤掉）单独回填，允许编辑
+      // 工单链接（_ 开头字段被 editableKeys 过滤掉）与网页路径（老项目无此 key）单独回填，允许编辑
       vals._tapd = project._tapd ?? ''
+      vals.previewPath = project.previewPath ?? ''
       form.setFieldsValue(vals)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3155,6 +3170,17 @@ function EditProjectModal({ open, project, onClose, onDone }) {
             </Form.Item>
           ),
         )}
+        <Form.Item
+          name="previewPath"
+          label="网页路径（选填）"
+          extra={
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              如 /pages/back-to-school-sale；无 preview_key 时拼到预览/开发链接，编辑器链接挂 previewPath 参数
+            </Text>
+          }
+        >
+          <Input placeholder="/pages/xxx" />
+        </Form.Item>
         <Form.Item name="_tapd" label="工单（tapd 链接）">
           <Input placeholder="工单链接，可留空" />
         </Form.Item>
@@ -3228,7 +3254,7 @@ function InfoField({ label, value, copyable }) {
 // 注：「后台」链接不在此列——同一 store 下所有项目共享同一后台地址，已提升到仓库卡片统一展示（见 RepoCard 的 adminLink）。
 const QUICK_LINKS = [
   { key: 'dev', label: '开发', Icon: CodeOutlined, urlKey: 'devLink', color: '#52c41a', copyLabel: '开发链接' },
-  { key: 'preview', label: '提测', Icon: EyeOutlined, urlKey: 'previewLink', color: '#36cfc9', copyLabel: '提测链接' },
+  { key: 'preview', label: '预览', Icon: EyeOutlined, urlKey: 'previewLink', color: '#36cfc9', copyLabel: '提测链接' },
   { key: 'editor', label: '编辑器', Icon: FormatPainterOutlined, urlKey: 'editorLink', color: '#9254de', copyLabel: '编辑器链接' },
 ]
 
@@ -4025,7 +4051,7 @@ export default function Repos() {
       <MergeInfoModal
         open={!!mergeInfoFor}
         repo={mergeInfoFor}
-        projects={mergeInfoFor ? (projectsByRepoPath.get(mergeInfoFor.path) || []).filter((p) => p.description && p._tapd) : []}
+        projects={mergeInfoFor ? (projectsByRepoPath.get(mergeInfoFor.path) || []).filter((p) => p.description) : []}
         contacts={contacts}
         onClose={() => setMergeInfoFor(null)}
       />

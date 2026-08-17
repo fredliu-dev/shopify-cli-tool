@@ -39,7 +39,7 @@ export default {
       (selectedProject.store ? storeToTemplate(selectedProject.store) : null) ?? selectedProject.templateName
     log.info(`模板（根据 store 判断）：${templateName ?? '未匹配'}`)
 
-    let theme, previewKey, port, description
+    let theme, previewKey, previewPath, port, description
     try {
       theme = await input({
         message: '请输入 theme：',
@@ -50,6 +50,11 @@ export default {
       previewKey = await input({
         message: '请输入 preview_key：',
         default: selectedProject.previewKey,
+      })
+
+      previewPath = await input({
+        message: '请输入网页路径（选填，如 /pages/back-to-school-sale）：',
+        default: selectedProject.previewPath ?? '',
       })
 
       port = await input({
@@ -79,6 +84,7 @@ export default {
           templateName,
           theme: theme.trim(),
           previewKey: previewKey.trim(),
+          previewPath: previewPath.trim(),
           port: port.trim(),
           description: desc,
           _tapd: tapd,

@@ -299,16 +299,20 @@ function stripReadonlyLines(content) {
 /**
  * 用模板生成一份新的 shopify.theme.toml 内容（`shop init` 的「文件不存在」分支纯逻辑）。
  * 注意：模板里以 `_` 开头的只读字段（如 `_github`）不会写入生成结果。
- * @param {{ templateName: string, theme?: string, port?: string, previewKey?: string, projectDesc?: string }} opts
+ * @param {{ templateName: string, theme?: string, port?: string, previewKey?: string, previewPath?: string, projectDesc?: string }} opts
  * @returns {string} 生成的 TOML 文本
  */
-export function buildThemeConfig({ templateName, theme, port, previewKey, projectDesc }) {
+export function buildThemeConfig({ templateName, theme, port, previewKey, previewPath, projectDesc }) {
   const file = findTemplateFile(templateName)
   if (!file) throw new Error(`未找到模板「${templateName}」`)
   let content = readFileSync(file, 'utf8')
   content = fillValue(content, 'theme', String(theme ?? '').trim())
   content = fillValue(content, 'port', String(port ?? '').trim())
   content = fillValue(content, 'preview_key', String(previewKey ?? '').trim())
+  // 网页路径：模板可能没有 preview_path 行（历史自建模板），填了值但模板缺 key 时补写一行，避免被静默丢弃
+  const pathVal = String(previewPath ?? '').trim()
+  content = fillValue(content, 'preview_path', pathVal)
+  if (pathVal && !/^\s*preview_path\s*=/.test(content)) content = setEnvField(content, 'dev', 'preview_path', pathVal)
   content = fillValue(content, 'project_desc', String(projectDesc ?? '').trim())
   return stripReadonlyLines(content)
 }
@@ -329,7 +333,7 @@ function tomlQuote(value) {
  *   - 其余字符串字段做空值兜底（缺省 ''）。
  *
  * @param {{ name: string, fields?: Record<string, any> }} opts
- *   fields 可含 _github / _branch / project_desc / domain / theme / store / port / preview_key
+ *   fields 可含 _github / _branch / project_desc / domain / theme / store / port / preview_key / preview_path
  * @returns {Promise<string>} 写出的文件绝对路径
  * @throws {Error} name 为空/含非法字符、重名、或缺少必填字段（_github/domain/store/port）时抛错
  */
@@ -352,7 +356,7 @@ export async function saveTemplate({ name, fields = {} }) {
  * 模板字段校验 + 序列化为 TOML 文本（单一 [environments.dev] 区段、固定字段顺序）。
  * saveTemplate（新建）与 updateTemplate（改写）共用，保证写入格式一致，便于 setEnvField/fillValue 按行改写。
  * 字段策略：_github/domain/store/port 必填（缺一抛错）；port 按裸数字写入，非数字按裸字符串；其余字符串做空值兜底。
- * @param {Record<string, any>} fields 可含 _github / _branch / project_desc / domain / theme / store / port / preview_key
+ * @param {Record<string, any>} fields 可含 _github / _branch / project_desc / domain / theme / store / port / preview_key / preview_path
  * @returns {string} TOML 文本（以换行结尾）
  * @throws {Error} 缺少必填字段（_github/domain/store/port）时抛错
  */
@@ -377,6 +381,7 @@ function buildTemplateBody(fields = {}) {
   lines.push(`store = ${tomlQuote(get('store', ''))}`)
   lines.push(`port = ${port}`)
   lines.push(`preview_key = ${tomlQuote(get('preview_key', ''))}`)
+  lines.push(`preview_path = ${tomlQuote(get('preview_path', ''))}`)
   return lines.join('\n') + '\n'
 }
 

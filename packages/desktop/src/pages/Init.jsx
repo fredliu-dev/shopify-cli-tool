@@ -39,6 +39,7 @@ export default function Init() {
           theme: vals.theme,
           port: vals.port,
           previewKey: vals.previewKey,
+          previewPath: vals.previewPath,
           projectDesc: vals.projectDesc,
         })
     setLoading(false)
@@ -88,6 +89,9 @@ export default function Init() {
                 </Form.Item>
                 <Form.Item name="previewKey" label="preview_key（新页面需填）">
                   <Input />
+                </Form.Item>
+                <Form.Item name="previewPath" label="网页路径（选填）" extra="如 /pages/back-to-school-sale；无 preview_key 时拼到预览/开发链接，编辑器链接挂 previewPath 参数">
+                  <Input placeholder="/pages/xxx" />
                 </Form.Item>
                 <Form.Item name="projectDesc" label="project_desc（选填）">
                   <Input />

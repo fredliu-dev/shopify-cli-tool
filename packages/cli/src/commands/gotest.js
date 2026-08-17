@@ -335,6 +335,7 @@ export default {
           store: project.store,
           theme: project.theme,
           preview_key: project.previewKey, // camelCase → snake_case（buildLinks 读 snake_case）
+          preview_path: project.previewPath,
           port: project.port,
         }).previewLink
       : null
