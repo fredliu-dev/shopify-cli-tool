@@ -1,5 +1,5 @@
 import { select, input } from '@inquirer/prompts'
-import { storeToTemplate, loadProjects, saveProjects } from '@shopify-cli-tool/core'
+import { storeToTemplate, loadProjects, saveProjects, splitDesc } from '@shopify-cli-tool/core'
 
 /**
  * `shop edit` —— 编辑保存的项目配置。
@@ -59,8 +59,8 @@ export default {
       })
 
       description = await input({
-        message: '请输入描述：',
-        default: selectedProject.description,
+        message: '请输入描述（可含工单链接，自动拆为 _tapd）：',
+        default: [selectedProject.description, selectedProject._tapd].filter(Boolean).join(' '),
       })
     } catch (err) {
       if (err && err.name === 'ExitPromptError') {
@@ -70,7 +70,8 @@ export default {
       throw err
     }
 
-    // 更新项目
+    // 描述可能含工单链接：拆分出 _tapd（参照桌面端 splitDesc）
+    const { desc, tapd } = splitDesc(description)
     const updatedProjects = projects.map((p) => {
       if (p.id === selectedProject.id) {
         return {
@@ -79,7 +80,8 @@ export default {
           theme: theme.trim(),
           previewKey: previewKey.trim(),
           port: port.trim(),
-          description: description.trim(),
+          description: desc,
+          _tapd: tapd,
         }
       }
       return p

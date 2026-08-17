@@ -81,6 +81,36 @@ export async function duplicateLiveTheme({ cwd, envName, envConfig, activity, ow
 }
 
 /**
+ * 查询单个主题的线上信息（theme list -j 后按 id 匹配）。
+ * 本地项目只存 theme id，不存名称；「删除主题」二次确认弹窗要展示主题名/角色，先来这里拉。
+ * 前置：该 store 已 `shopify login`。
+ * @param {{ cwd: string, envName: string, themeId: string|number }} opts
+ * @returns {Promise<{ ok: true, theme: { id: string, name: string, role: string } | null } | { ok: false, code: number, stderr: string }>}
+ *   theme=null 表示该 id 在线上已不存在（可能已被删除）
+ */
+export async function getThemeInfo({ cwd, envName, themeId }) {
+    const res = await captureShopify(['theme', 'list', '-j', '-e', envName], { cwd })
+    if (res.code !== 0) {
+        return { ok: false, code: res.code, stderr: res.stderr }
+    }
+    const list = parseJson(res.stdout)
+    const theme = (Array.isArray(list) ? list : []).find((t) => String(t.id) === String(themeId))
+    return { ok: true, theme: theme ? { id: String(theme.id), name: theme.name, role: theme.role || '' } : null }
+}
+
+/**
+ * 删除线上主题（headless）：`theme delete --theme <id> --force`。
+ * --force 跳过 CLI 的交互确认；live 主题不可删（CLI 会报错，调用方宜先用 getThemeInfo 按 role 拦截）。
+ * 前置：该 store 已 `shopify login`。
+ * @param {{ cwd: string, envName: string, themeId: string|number }} opts
+ * @returns {Promise<{ ok: boolean, code: number, stderr: string }>}
+ */
+export async function deleteTheme({ cwd, envName, themeId }) {
+    const res = await captureShopify(['theme', 'delete', '--theme', String(themeId), '--force', '-e', envName], { cwd })
+    return { ok: res.code === 0, code: res.code, stderr: res.stderr }
+}
+
+/**
  * 拉取指定 templates json 文件（headless，对应 shop async 的 pull 步骤）。
  * `shopify theme pull -e <env> --only <file> --only <file> …`
  * 前置：该 store 已 `shopify login`。

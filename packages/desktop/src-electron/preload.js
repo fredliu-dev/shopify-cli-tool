@@ -1,13 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-// 注册一个 ipcRenderer 事件，返回真正的注销函数（ipcRenderer.on 返回的是它本身而非函数，
-// 见 repos.onUpdated 注释，故包一层返回 removeListener）
-const subscribe = (channel, cb) => {
-  const listener = (_e, p) => cb(p)
-  ipcRenderer.on(channel, listener)
-  return () => ipcRenderer.removeListener(channel, listener)
-}
-
 // contextIsolation 下渲染层无法直接访问 Node/Electron，只暴露最小白名单 API。
 contextBridge.exposeInMainWorld('api', {
   shops: {
@@ -43,6 +35,8 @@ contextBridge.exposeInMainWorld('api', {
     status: (repoPath) => ipcRenderer.invoke('repos:status', repoPath),
     save: (opts) => ipcRenderer.invoke('repos:save', opts),
     copyLive: (opts) => ipcRenderer.invoke('repos:copyLive', opts),
+    themeInfo: (opts) => ipcRenderer.invoke('repos:themeInfo', opts),
+    deleteTheme: (opts) => ipcRenderer.invoke('repos:deleteTheme', opts),
     switchConfig: (opts) => ipcRenderer.invoke('repos:switchConfig', opts),
     editors: () => ipcRenderer.invoke('repos:editors'),
     openInEditor: (opts) => ipcRenderer.invoke('repos:openInEditor', opts),
@@ -82,17 +76,6 @@ contextBridge.exposeInMainWorld('api', {
   },
   system: {
     versions: () => ipcRenderer.invoke('system:versions'),
-  },
-  updater: {
-    check: () => ipcRenderer.invoke('updater:check'),
-    download: () => ipcRenderer.invoke('updater:download'),
-    install: () => ipcRenderer.invoke('updater:install'),
-    // 主进程 autoUpdater 事件转发：发现新版本 / 已是最新 / 下载进度 / 下载完成 / 出错
-    onUpdateAvailable: (cb) => subscribe('updater:updateAvailable', cb),
-    onUpdateNotAvailable: (cb) => subscribe('updater:updateNotAvailable', cb),
-    onProgress: (cb) => subscribe('updater:progress', cb),
-    onDownloaded: (cb) => subscribe('updater:downloaded', cb),
-    onError: (cb) => subscribe('updater:error', cb),
   },
   shell: {
     openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),

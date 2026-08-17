@@ -13,7 +13,6 @@ import {
   Input,
   Modal,
   Popconfirm,
-  Progress,
   Radio,
   Select,
   Space,
@@ -30,6 +29,7 @@ import {
   CodeOutlined,
   DashboardOutlined,
   DownloadOutlined,
+  ExclamationCircleOutlined,
   EyeOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
@@ -1720,6 +1720,7 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
   const [templateId, setTemplateId] = useState()
   const [fields, setFields] = useState([]) // parsePlaceholders 返回的字段（person/content 供用户填）
   const [values, setValues] = useState({}) // person/content 的 token -> 值
+  const [customPreview, setCustomPreview] = useState(null) // 手动修改过的预览文本（null=未改，跟随合成结果）
   const [parsing, setParsing] = useState(false)
   const [loading, setLoading] = useState(false)
   // 两步式：0=合成信息（复制/推送群/下一步），1=提交 Pull Request（选分支、reviewer）
@@ -1756,6 +1757,7 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
       setTemplateId(undefined)
       setFields([])
       setValues({})
+      setCustomPreview(null)
       setSelectedIds([])
       setSelectedMembers([])
       setToken('')
@@ -1875,7 +1877,13 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
       isAtAll: parts.some((x) => x.isAtAll),
     }
   })()
-  const preview = rendered.text
+  // 手动改过预览时以改后文本为准：@ 列表只保留最终文本里仍在的手机号（被删掉的不再 @）
+  const preview = customPreview ?? rendered.text
+  const atMobiles = customPreview == null ? rendered.atMobiles : rendered.atMobiles.filter((p) => preview.includes(`@${p}`))
+  // 合成来源变化（改项目/模板/人员）时丢弃手动修改，预览跟随最新合成内容
+  useEffect(() => {
+    setCustomPreview(null)
+  }, [rendered.text])
   // 第一步信息是否就绪：至少选一个项目 + 选了模板 + 必填人员都填了（与「发送到群」校验一致，但不要求选群）
   const step1Ready = selectedIds.length > 0 && !!templateId && !fields.some((f) => f.kind === 'person' && !values[f.token])
   // 当前分支的 GitHub 页链接（repo.remoteUrl 由 getRepoInfo 取 origin；点省略号在新标签打开）
@@ -1895,7 +1903,7 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
     const missing = fields.find((f) => f.kind === 'person' && !values[f.token])
     if (missing) return message.warning(`请为「${missing.label}」选择人员`)
     setLoading(true)
-    const res = await window.api.dingtalk.notify({ groupId, text: rendered.text, atMobiles: rendered.atMobiles, isAtAll: rendered.isAtAll })
+    const res = await window.api.dingtalk.notify({ groupId, text: preview, atMobiles, isAtAll: rendered.isAtAll })
     setLoading(false)
     if (res.ok) {
       const g = groups.find((x) => x.id === groupId)
@@ -2180,8 +2188,22 @@ function MergeInfoModal({ open, repo, projects, contacts, onClose }) {
             </ALink>
           </div>
         )}
-        <Form.Item label="通知内容预览（每个项目一份，按项目填充）">
-          <TextArea value={preview} readOnly autoSize={{ minRows: 4, maxRows: 12 }} placeholder="选择项目和模板后在此预览" />
+        <Form.Item
+          label="通知内容预览（每个项目一份，按项目填充，可直接修改）"
+          extra={
+            customPreview != null && rendered.text ? (
+              <ALink style={{ fontSize: 12 }} onClick={() => setCustomPreview(null)}>
+                已手动修改，点击恢复合成内容
+              </ALink>
+            ) : null
+          }
+        >
+          <TextArea
+            value={preview}
+            onChange={(e) => setCustomPreview(e.target.value)}
+            autoSize={{ minRows: 4, maxRows: 12 }}
+            placeholder="选择项目和模板后在此预览，可手动修改后再复制/发送"
+          />
         </Form.Item>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button onClick={doCopy} disabled={!preview}>
@@ -2459,7 +2481,7 @@ const releasePreviewBox = (accent) => ({
 })
 
 /* ---------------- 创建 release（release/version-{英文版本名}；复制主题名称供后台手动建主题） ---------------- */
-function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
+function CreateReleaseModal({ open, repo, onClose, onDone, contacts, onSaveThemeName }) {
   const { message } = App.useApp()
   const { local, remote, loading: branchLoading, reload } = useRepoBranches(repo)
   const [loading, setLoading] = useState(false)
@@ -2508,7 +2530,14 @@ function CreateReleaseModal({ open, repo, onClose, onDone, contacts }) {
       message.error(res.error || '创建分支失败')
       return
     }
-    message.success(`已创建 release 分支 ${branchName}（已推送远程），未切换、仍停留在 ${repo?.currentBranch || '当前分支'}`)
+    // 主题名与「当前开发分支」绑定保存（release 分支本身不切换，repo.currentBranch 即开发分支）：
+    // 弹窗关闭后，仓库卡片项目面板上的「复制 release 主题名」按钮据此长期可用
+    const saved = !!(themeName && repo?.currentBranch)
+    if (saved) await onSaveThemeName?.(repo.path, repo.currentBranch, themeName)
+    message.success(
+      `已创建 release 分支 ${branchName}（已推送远程），未切换、仍停留在 ${repo?.currentBranch || '当前分支'}` +
+        (saved ? `；主题名已绑定到 ${repo.currentBranch}，可在仓库卡片复制` : ''),
+    )
     onDone?.()
   }
 
@@ -2805,7 +2834,7 @@ function OpenEditorButton({ dir, defaultEditor }) {
   )
 }
 
-function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, defaultEditor }) {
+function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, defaultEditor, releaseThemes }) {
   const matched = !!repo.matched
   const { message } = App.useApp()
   const [hovered, setHovered] = useState(false) // 玻璃亮光 hover 态（仅本卡重渲，不影响其它卡片）
@@ -2860,6 +2889,9 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
 
   // 当前生效（toml dev 段对应）的项目：仅用于面板「当前生效」标识，不改变展示顺序
   const matchedId = repo.matched?.id
+
+  // 当前分支绑定的 release 主题名（创建 release 弹窗提交成功时保存）：同分支下所有项目面板共用
+  const releaseThemeName = releaseThemes?.[repo.path]?.[repo.currentBranch] || ''
 
   return (
     <Card
@@ -3027,7 +3059,14 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
 
         {/* 关联的本地项目：同 store 的多条都内嵌展示，保持原顺序不置顶 */}
         {projects.map((p) => (
-          <ProjectPanel key={p.id} project={p} onAction={onProjectAction} active={p.id === matchedId} embedded />
+          <ProjectPanel
+            key={p.id}
+            project={p}
+            onAction={onProjectAction}
+            active={p.id === matchedId}
+            embedded
+            releaseThemeName={releaseThemeName}
+          />
         ))}
       </div>
     </Card>
@@ -3193,9 +3232,10 @@ const QUICK_LINKS = [
   { key: 'editor', label: '编辑器', Icon: FormatPainterOutlined, urlKey: 'editorLink', color: '#9254de', copyLabel: '编辑器链接' },
 ]
 
-function ProjectPanel({ project, onAction, active, embedded }) {
-  const { message } = App.useApp()
+function ProjectPanel({ project, onAction, active, embedded, releaseThemeName }) {
+  const { message, modal } = App.useApp()
   const noRepo = !project.repoPath
+  const [themeDelLoading, setThemeDelLoading] = useState(false)
   // 仅「有仓库 且 非当前生效」时点卡片才切换：已是当前配置则点击为空操作（不写 toml、不弹提示）
   const clickable = !noRepo && !active
 
@@ -3205,6 +3245,66 @@ function ProjectPanel({ project, onAction, active, embedded }) {
     const res = await window.api.shell.copy(url)
     await window.api.shell.openExternal(url)
     if (res?.ok) message.success(`已复制${label}并在默认浏览器打开`)
+  }
+
+  // 复制当前分支绑定的 release 主题名（创建 release 弹窗提交成功时保存，见 CreateReleaseModal）
+  const copyReleaseThemeName = async () => {
+    if (!releaseThemeName) return
+    const res = await window.api.shell.copy(releaseThemeName)
+    if (res?.ok) message.success(`已复制 release 主题名：${releaseThemeName}`)
+    else message.error('复制失败')
+  }
+
+  // 删除线上主题：本地只存 theme id，先拉主题名（顺带确认主题还存在），再弹红色二次确认后执行。
+  // 仅删 Shopify 上的主题，本地项目记录保留（要删记录用旁边的「删除」）。
+  const askDeleteTheme = async () => {
+    const id = String(project.theme ?? '').trim()
+    if (!id) return message.warning('该项目缺少 theme 字段')
+    if (!project.repoPath) return message.warning('未找到所属仓库，无法删除主题')
+    setThemeDelLoading(true)
+    const res = await window.api.repos.themeInfo({ dir: project.repoPath, themeId: id })
+    setThemeDelLoading(false)
+    if (!res.ok) return message.error({ content: res.error, duration: 8 })
+    if (!res.data) return message.warning(`主题 ${id} 在该 store 上已不存在（可能已被删除）`)
+    if (res.data.role === 'live') return message.error('live 主题不允许删除')
+    modal.confirm({
+      title: '确认删除线上主题？',
+      icon: <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />,
+      okText: '确认删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      content: (
+        <div>
+          <Text type="danger" strong style={{ display: 'block', marginBottom: 10 }}>
+            即将从 Shopify 删除以下主题，操作不可恢复：
+          </Text>
+          <Descriptions size="small" column={1} style={{ marginBottom: 10 }}>
+            <Descriptions.Item label="主题名称">
+              <Text strong>{res.data.name}</Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="分支">{project._branch || '-'}</Descriptions.Item>
+            <Descriptions.Item label="theme ID">{id}</Descriptions.Item>
+            <Descriptions.Item label="store">{project.store}</Descriptions.Item>
+          </Descriptions>
+          {active && (
+            <Text type="warning" style={{ display: 'block', marginBottom: 6, fontSize: 12 }}>
+              ⚠️ 该主题正在当前生效配置中使用，删除后 theme dev 将无法预览。
+            </Text>
+          )}
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            仅删除线上主题；本地项目记录保留，可另行删除。
+          </Text>
+        </div>
+      ),
+      onOk: async () => {
+        const r = await window.api.repos.deleteTheme({ dir: project.repoPath, themeId: id })
+        if (!r.ok) {
+          message.error({ content: r.error, duration: 8 })
+          return
+        }
+        message.success(`已删除线上主题「${res.data.name}」`)
+      },
+    })
   }
 
   // 当前生效的面板整体提亮：绿色底 + 高亮描边 + 绿色辉光 + 闪光扫光（比仅靠小绿标更显眼）。
@@ -3305,7 +3405,38 @@ function ProjectPanel({ project, onAction, active, embedded }) {
         <InfoField label="preview_key" value={project.previewKey} copyable />
       </div>
 
-      {/* 操作：JSON 改动 / 提测 / 编辑 / 删除（整行 stopPropagation，避免点按钮误触发卡片切换） */}
+      {/* release 主题名：与当前开发分支绑定（创建 release 时保存）；有值才可复制 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }} onClick={(e) => e.stopPropagation()}>
+        <Tooltip
+          title={
+            releaseThemeName
+              ? '复制主题名称，去 Shopify 后台手动新建主题'
+              : '当前分支尚未绑定 release 主题名；在「Git 流程 → 创建 release」填写活动名称与负责人后自动绑定'
+          }
+        >
+          <span>
+            <Button size="small" disabled={!releaseThemeName} onClick={copyReleaseThemeName}>
+              复制 release 主题名
+            </Button>
+          </span>
+        </Tooltip>
+        {releaseThemeName && (
+          <Text
+            style={{
+              fontSize: 12,
+              flex: 1,
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {releaseThemeName}
+          </Text>
+        )}
+      </div>
+
+      {/* 操作：JSON 改动 / 提测 / 删除线上主题 / 编辑 / 删除本地项目（整行 stopPropagation，避免点按钮误触发卡片切换） */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }} onClick={(e) => e.stopPropagation()}>
         <Space size={6}>
           <Badge count={project.changedJson?.length || 0} size="small" offset={[-2, 0]} color={project.changedJson?.length ? '#faad14' : undefined}>
@@ -3322,6 +3453,11 @@ function ProjectPanel({ project, onAction, active, embedded }) {
           )}
         </Space>
         <Space size={6}>
+          <Tooltip title="用 shopify 删除该 theme ID 对应的线上主题（本地项目记录保留）">
+            <Button size="small" danger ghost loading={themeDelLoading} onClick={askDeleteTheme}>
+              删除主题
+            </Button>
+          </Tooltip>
           <Button size="small" onClick={() => onAction('edit', project)}>
             编辑
           </Button>
@@ -3337,7 +3473,7 @@ function ProjectPanel({ project, onAction, active, embedded }) {
 }
 
 /* ---------------- 关于：客户端 / shopify CLI / git 等版本 ---------------- */
-function AboutModal({ open, onClose, onCheckUpdate }) {
+function AboutModal({ open, onClose, onOpenReleases }) {
   const [info, setInfo] = useState(null)
   useEffect(() => {
     if (open) window.api.system.versions().then(setInfo)
@@ -3362,79 +3498,14 @@ function AboutModal({ open, onClose, onCheckUpdate }) {
         <Text type="secondary" style={{ fontSize: 12 }}>
           shopify CLI 即客户端实际调用的 @shopify/cli；git 为本机系统版本。
         </Text>
-        <Button size="small" onClick={onCheckUpdate}>检查更新</Button>
+        <Button size="small" onClick={onOpenReleases}>去 GitHub 下载</Button>
       </div>
     </Modal>
   )
 }
 
-/* ---------------- 自动更新：发现新版本弹窗，下载并重启安装（受控组件） ---------------- */
-// 状态（status/info/percent/可见性）由父层 Repos 持有，顶栏据此亮「有新版本」红点入口；
-// 本组件只按状态渲染弹窗与「立即更新 / 立即重启」动作，下载/安装调父层传入的回调。
-function UpdateChecker({ open, status, info, percent, onClose, onDownload, onInstall }) {
-  return (
-    <Modal
-      title={
-        status === "downloaded"
-          ? "更新已就绪"
-          : `发现新版本${info?.version ? " v" + info.version : ""}`
-      }
-      open={open}
-      // 下载中禁止关闭，避免半途中断造成状态错乱
-      closable={status !== "downloading"}
-      maskClosable={status !== "downloading"}
-      keyboard={status !== "downloading"}
-      onCancel={onClose}
-      footer={
-        status === "downloading" ? null : (
-          <Space>
-            <Button onClick={onClose}>稍后</Button>
-            <Button
-              type='primary'
-              onClick={status === "downloaded" ? onInstall : onDownload}
-            >
-              {status === "downloaded" ? "立即重启" : "立即更新"}
-            </Button>
-          </Space>
-        )
-      }
-    >
-      {status === "available" && (
-        <div>
-          <Text strong style={{ fontSize: 15 }}>
-            🎉 🎉 🎉 发现新版本啦，赶快更新体验新功能！
-          </Text>
-          {info?.releaseNotes ? (
-            <Text
-              type='secondary'
-              style={{
-                whiteSpace: "pre-wrap",
-                display: "block",
-                marginTop: 8,
-                fontSize: 13,
-              }}
-            >
-              {info.releaseNotes}
-            </Text>
-          ) : null}
-        </div>
-      )}
-      {status === "downloading" && (
-        <div style={{ textAlign: "center" }}>
-          <Progress percent={percent} status='active' />
-          <Text type='secondary' style={{ display: "block", marginTop: 8 }}>
-            正在下载更新… {percent}%
-          </Text>
-        </div>
-      )}
-      {status === "downloaded" && (
-        <Text>
-          新版本已下载完成，点击「立即重启」立即安装；或点「稍后」，下次退出应用时自动安装。
-        </Text>
-      )}
-    </Modal>
-  );
-}
+// 客户端更新不再走 electron-updater 自动检测/下载，统一引导到 GitHub Release 页面手动下载。
+const GITHUB_RELEASES_URL = "https://github.com/fredliu-dev/shopify-cli-tool/releases/latest"
 
 /* ---------------- 页面主体 ---------------- */
 export default function Repos() {
@@ -3442,77 +3513,20 @@ export default function Repos() {
   const [workspaceDir, setWorkspaceDir] = useState('')
   const [repos, setRepos] = useState([])
   const [repoOrder, setRepoOrder] = useState([]) // 用户拖拽自定义的仓库顺序（path 数组），持久化于 settings.repoOrder
+  // release 主题名绑定表：repoPath → { 分支名 → 主题名 }，持久化于 settings.releaseThemes。
+  // 创建 release 弹窗提交成功时写入（主题名绑定到当时的开发分支），仓库卡片据此启用「复制 release 主题名」
+  const [releaseThemes, setReleaseThemes] = useState({})
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [defaultEditor, setDefaultEditor] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
-  const manualCheckRef = useRef(false) // 区分「启动自动检查」(静默) 与「关于里手动检查」(给反馈)
-  // 手动检查更新：置 manual 标记后触发主进程检查；dev 下提示；有无更新/出错都由 updater:* 事件驱动弹窗
-  const checkUpdates = async () => {
-    manualCheckRef.current = true
-    const r = await window.api.updater.check()
-    if (r?.reason === 'dev') {
-      message.warning('开发模式下无法检查更新')
-      manualCheckRef.current = false
-    }
+  // 不再自动检测更新：统一引导用户到 GitHub Release 页面下载安装包
+  const openReleasesPage = async () => {
+    const r = await window.api.shell.openExternal(GITHUB_RELEASES_URL)
+    if (!r?.ok) message.error('打开 GitHub Release 页面失败')
   }
-  // 自动更新状态提升到父层：顶栏「更新」红点入口与 UpdateChecker 弹窗共用。
-  // updateOpen 与 updateStatus 分离——点「稍后」关弹窗后 status 仍是 available，红点常驻、可再点开。
-  const [updateStatus, setUpdateStatus] = useState('idle') // idle | available | downloading | downloaded
-  const [updateInfo, setUpdateInfo] = useState({}) // { version, releaseNotes }
-  const [updatePercent, setUpdatePercent] = useState(0)
-  const [updateOpen, setUpdateOpen] = useState(false)
-  const hasUpdate = updateStatus === 'available' || updateStatus === 'downloaded'
-
-  // 顶栏「更新」入口：已知有新版本则直接弹窗，否则手动触发一次检查（给反馈）
-  const openUpdate = () => {
-    if (hasUpdate) setUpdateOpen(true)
-    else checkUpdates()
-  }
-  const downloadUpdate = async () => {
-    setUpdateStatus('downloading')
-    setUpdatePercent(0)
-    const r = await window.api.updater.download()
-    if (!r?.ok) {
-      message.error(`下载失败：${r?.error || ''}`)
-      setUpdateStatus('available') // 退回让用户可重试
-    }
-  }
-  const installUpdate = () => window.api.updater.install()
-
-  // 挂载即注册 updater:* 监听，并「由渲染层」主动触发检查：监听必先于 update-available 事件就位，
-  // 事件不会被丢（原先主进程启动时检查太早、渲染层尚未注册监听 → 检测到新版本却不弹窗）。
-  // 启动检查静默（不置 manual）；dev 下后端返回 reason:'dev'、事件不触发，自然无打扰。
-  useEffect(() => {
-    const offs = [
-      window.api.updater.onUpdateAvailable((p) => {
-        manualCheckRef.current = false
-        setUpdateInfo({ version: p?.version, releaseNotes: p?.releaseNotes || '' })
-        setUpdatePercent(0)
-        setUpdateStatus('available')
-        setUpdateOpen(true)
-      }),
-      window.api.updater.onUpdateNotAvailable((p) => {
-        if (manualCheckRef.current) message.success(`已是最新版本${p?.version ? ' v' + p.version : ''}`)
-        manualCheckRef.current = false
-      }),
-      window.api.updater.onProgress((p) => setUpdatePercent(Math.round(p?.percent ?? 0))),
-      window.api.updater.onDownloaded(() => {
-        setUpdatePercent(100)
-        setUpdateStatus('downloaded')
-        setUpdateOpen(true)
-      }),
-      window.api.updater.onError((p) => {
-        if (manualCheckRef.current) message.error(`更新检查失败：${p?.message || ''}`)
-        manualCheckRef.current = false
-      }),
-    ]
-    window.api.updater.check() // 监听就位后再查（dev 下静默忽略 reason:'dev'）
-    return () => offs.forEach((off) => off?.())
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
   const [contacts, setContacts] = useState([])
   const [contactsOpen, setContactsOpen] = useState(false)
   const [groupsOpen, setGroupsOpen] = useState(false)
@@ -3567,6 +3581,16 @@ export default function Repos() {
     window.api.settings.set({ repoOrder: newPaths })
   }, [])
 
+  // 创建 release 时把主题名绑定到「仓库 + 当前开发分支」（settings:set 是浅合并，
+  // 嵌套的 releaseThemes 需先读最新值再整块写回，避免并发保存互相覆盖）
+  const saveReleaseTheme = useCallback(async (repoPath, branch, themeName) => {
+    const s = await window.api.settings.get()
+    const prev = s?.releaseThemes || {}
+    const next = { ...prev, [repoPath]: { ...(prev[repoPath] || {}), [branch]: themeName } }
+    const res = await window.api.settings.set({ releaseThemes: next })
+    if (res?.ok) setReleaseThemes(next)
+  }, [])
+
   const refreshProjects = useCallback(async () => {
     const res = await window.api.shops.ls()
     if (res.ok) setProjects(res.data || [])
@@ -3582,6 +3606,7 @@ export default function Repos() {
       const s = await window.api.settings.get()
       setWorkspaceDir(s?.workspaceDir || '')
       setDefaultEditor(s?.defaultEditor || '')
+      setReleaseThemes(s?.releaseThemes || {})
       setLoading(false)
       if (s?.workspaceDir) {
         await scan(s.workspaceDir)
@@ -3845,12 +3870,10 @@ export default function Repos() {
               </Button>
             </span>
           </Tooltip>
-          <Tooltip title={hasUpdate ? `发现新版本${updateInfo?.version ? ' v' + updateInfo.version : ''}，点击立即更新` : '检查更新'}>
-            <Badge dot={hasUpdate} offset={[-4, 2]}>
-              <Button variant="outlined" icon={<DownloadOutlined />} onClick={openUpdate}>
-                更新
-              </Button>
-            </Badge>
+          <Tooltip title='前往 GitHub Release 下载最新版本'>
+            <Button variant="outlined" icon={<DownloadOutlined />} onClick={openReleasesPage}>
+              下载最新版
+            </Button>
           </Tooltip>
           <Dropdown
             placement="bottomRight"
@@ -3912,6 +3935,7 @@ export default function Repos() {
               onAction={repoAction}
               onProjectAction={projectAction}
               defaultEditor={defaultEditor}
+              releaseThemes={releaseThemes}
             />
           ))}
         </Masonry>
@@ -4022,18 +4046,8 @@ export default function Repos() {
       />
 
       {/* 关于：版本信息 */}
-      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} onCheckUpdate={checkUpdates} />
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} onOpenReleases={openReleasesPage} />
 
-      {/* 自动更新：监听主进程 updater 事件，弹窗驱动下载/重启安装 */}
-      <UpdateChecker
-        open={updateOpen}
-        status={updateStatus}
-        info={updateInfo}
-        percent={updatePercent}
-        onClose={() => setUpdateOpen(false)}
-        onDownload={downloadUpdate}
-        onInstall={installUpdate}
-      />
 
       {/* 拉取分支 / 创建 release */}
       {gitModal?.mode === 'branch' && (
@@ -4054,6 +4068,7 @@ export default function Repos() {
           open
           repo={gitModal.repo}
           contacts={contacts}
+          onSaveThemeName={saveReleaseTheme}
           onClose={() => setGitModal(null)}
           onDone={() => {
             const path = gitModal.repo.path

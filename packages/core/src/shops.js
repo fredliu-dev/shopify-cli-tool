@@ -29,6 +29,23 @@ function withLinks(p) {
 }
 
 /**
+ * 从 project_desc 复合文本里拆分工单链接：第一个 http(s) 链接 → tapd，剩余去【】括号并 trim → 标题。
+ * 工单链接只进 projects.json 的 _tapd，不进 shopify.theme.toml（与桌面端一致）。
+ * CLI `shop add`/`shop edit` 的描述输入与桌面端表单共用此逻辑，避免正则漂移。
+ * @param {string} raw 用户输入的描述（可能含工单链接）
+ * @returns {{ desc: string, tapd: string|null }}
+ */
+export function splitDesc(raw) {
+  if (!raw) return { desc: '', tapd: null }
+  const m = String(raw).match(/https?:\/\/\S+/i)
+  const tapd = m ? m[0] : null
+  const desc = (tapd ? String(raw).replace(tapd, '') : String(raw))
+    .replace(/[【】]/g, '')
+    .trim()
+  return { desc, tapd }
+}
+
+/**
  * 组装所有项目的展示数据（含预览链接）—— `ls` 的纯逻辑。
  * projects.json 里没存 domain/store，从模板的 [environments.dev] 补齐。
  * @returns {Array<object>} 每项为原 project 字段并附加 `links`

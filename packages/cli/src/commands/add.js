@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { input, checkbox, confirm, select } from '@inquirer/prompts'
 import initCmd from './init.js'
 import { copyLiveTheme } from './copy.js'
-import { loadThemeConfig, setEnvField, storeToTemplate, listTemplates, loadProjects, saveProjects, listBranches } from '@shopify-cli-tool/core'
+import { loadThemeConfig, setEnvField, storeToTemplate, listTemplates, loadProjects, saveProjects, listBranches, splitDesc } from '@shopify-cli-tool/core'
 
 // 需要齐全的字段（store 作为环境身份，是前置门槛；其余缺了就补填）
 const REQUIRED_FIELDS = [
@@ -10,7 +10,7 @@ const REQUIRED_FIELDS = [
   { key: 'port', message: '请输入 port：', default: '9292', validate: (v) => (/^\d+$/.test(v.trim()) ? true : '需为数字') },
   { key: 'theme', message: '请输入 theme：' },
   { key: 'preview_key', message: '请输入 preview_key（选填）：', optional: true },
-  { key: 'project_desc', message: '请输入 project_desc：' },
+  { key: 'project_desc', message: '请输入 project_desc（可含工单链接，自动拆为 _tapd）：' },
 ]
 
 /**
@@ -58,6 +58,7 @@ export default {
     const ready = []
     for (const [name, env] of entries) {
       const filled = {}
+      let envTapd = null // 工单链接：project_desc 被补填时拆出；预存值在构建项目时再拆
       for (const f of REQUIRED_FIELDS) {
         const cur = env[f.key]
         if (cur !== undefined && String(cur).trim() !== '') continue
@@ -101,14 +102,21 @@ export default {
           }
           throw err
         }
-        filled[f.key] = val.trim()
+        let v = val.trim()
+        if (f.key === 'project_desc') {
+          // 描述可能含工单链接：拆分后标题写回 toml（保持六要素一致），工单链接单独存 _tapd（参照桌面端 splitDesc）
+          const sp = splitDesc(v)
+          v = sp.desc
+          envTapd = sp.tapd
+        }
+        filled[f.key] = v
       }
       for (const [k, v] of Object.entries(filled)) {
         content = setEnvField(content, name, k, v)
       }
       // 记录当前分支到 _branch（与桌面端保存一致：项目身份 + 合并源分支）
       if (currentBranch) content = setEnvField(content, name, '_branch', currentBranch)
-      ready.push({ name, env: { ...env, ...filled } })
+      ready.push({ name, env: { ...env, ...filled }, _tapd: envTapd })
     }
     if (content !== original) {
       writeFileSync(cfg.path, content, 'utf8')
@@ -171,6 +179,7 @@ export default {
         port: String(sel.env.port),
         description: sel.env.project_desc,
         _branch: currentBranch || null,
+        _tapd: sel._tapd ?? splitDesc(sel.env.project_desc).tapd ?? null,
       }
       // 六要素全相同视为已存在：store / domain / theme / preview_key / project_desc / _branch
       // （历史项目无 _branch 视为通配，避免升级后已存项目全部失配）

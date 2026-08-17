@@ -5,6 +5,14 @@ import { listEditors, openInEditor } from '../editor.js'
 
 const load = () => import('@shopify-cli-tool/core')
 
+/** shopify 失败输出取最后一条非空行（完整 stderr 常带堆栈/进度条，弹窗放不下）。 */
+const lastLine = (s) =>
+  (s || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .pop() || '未知错误'
+
 /** 把消息推给渲染层（取首个窗口；桌面端只有一个主窗口）。 */
 const send = (channel, payload) => BrowserWindow.getAllWindows()[0]?.webContents.send(channel, payload)
 
@@ -209,6 +217,31 @@ export function registerReposIpc() {
       const res = await duplicateLiveTheme({ cwd: dir, envName, envConfig, activity, owner, namePrefix })
       if (res.ok) return { ok: true, data: { id: res.id, name: res.name, links: res.links } }
       return { ok: false, error: `复制主题失败（${res.stage}，退出码 ${res.code}）`, stderr: res.stderr }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 查询项目 theme id 对应的线上主题信息（theme list -j）：删除主题前二次确认弹窗展示名称/角色用；
+  // data=null 表示该主题在线上已不存在
+  ipcMain.handle('repos:themeInfo', async (_evt, { dir, themeId }) => {
+    const { getThemeInfo } = await load()
+    try {
+      const res = await getThemeInfo({ cwd: dir, envName: 'dev', themeId })
+      if (!res.ok) return { ok: false, error: `查询主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
+      return { ok: true, data: res.theme }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 删除项目 theme id 对应的线上主题（theme delete --force 跳过 CLI 交互确认）
+  ipcMain.handle('repos:deleteTheme', async (_evt, { dir, themeId }) => {
+    const { deleteTheme } = await load()
+    try {
+      const res = await deleteTheme({ cwd: dir, envName: 'dev', themeId })
+      if (!res.ok) return { ok: false, error: `删除主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
+      return { ok: true }
     } catch (err) {
       return { ok: false, error: err.message }
     }

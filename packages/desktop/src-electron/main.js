@@ -11,7 +11,6 @@ import { registerShellIpc } from './ipc/shell.js'
 import { registerContactsIpc } from './ipc/contacts.js'
 import { registerDingtalkIpc } from './ipc/dingtalk.js'
 import { registerSystemIpc } from './ipc/system.js'
-import { registerUpdaterIpc } from './ipc/updater.js'
 
 // macOS Dock 标签、菜单栏应用名都取自 app.getName()：dev 下裸 electron 进程默认名是 "Electron"，
 // 打包后由 Info.plist 的 productName 改回 "Shopify Toolbox"。dev 下显式 setName 让两者一致；
@@ -55,7 +54,6 @@ app.whenReady().then(() => {
   registerContactsIpc()
   registerDingtalkIpc()
   registerSystemIpc()
-  registerUpdaterIpc()
   createWindow()
 
   // dev 模式下设置 Dock 图标：macOS 会忽略 BrowserWindow 的 icon 选项，
@@ -69,9 +67,7 @@ app.whenReady().then(() => {
     }
   }
 
-  // 自动更新检查改由「渲染层」在挂载、注册好 updater:* 监听后主动触发（见 Repos 的 useEffect）。
-  // 主进程不再在此提前检查：曾因这里跑得太早、渲染层监听尚未注册而丢失 update-available 事件，
-  // 表现为「后端检测到新版本、前端却不弹窗」。updater:check IPC 仍走 checkForUpdates（按 isPackaged 拦截 dev）。
+  // 客户端更新统一引导到 GitHub Release 页面手动下载，不再由 electron-updater 自动检测/下载。
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
