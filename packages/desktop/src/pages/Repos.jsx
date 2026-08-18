@@ -2846,7 +2846,7 @@ function OpenEditorButton({ dir, defaultEditor }) {
   )
 }
 
-function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, defaultEditor, releaseThemes }) {
+function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, themeProjectCounts, defaultEditor, releaseThemes }) {
   const matched = !!repo.matched
   const { message } = App.useApp()
   const [hovered, setHovered] = useState(false) // 玻璃亮光 hover 态（仅本卡重渲，不影响其它卡片）
@@ -3078,6 +3078,7 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
             active={p.id === matchedId}
             embedded
             releaseThemeName={releaseThemeName}
+            themeProjectCount={themeProjectCounts?.get(`${p.store}|${String(p.theme ?? '').trim()}`) || 0}
           />
         ))}
       </div>
@@ -3258,7 +3259,7 @@ const QUICK_LINKS = [
   { key: 'editor', label: '编辑器', Icon: FormatPainterOutlined, urlKey: 'editorLink', color: '#9254de', copyLabel: '编辑器链接' },
 ]
 
-function ProjectPanel({ project, onAction, active, embedded, releaseThemeName }) {
+function ProjectPanel({ project, onAction, active, embedded, releaseThemeName, themeProjectCount }) {
   const { message, modal } = App.useApp()
   const noRepo = !project.repoPath
   const [themeDelLoading, setThemeDelLoading] = useState(false)
@@ -3282,7 +3283,7 @@ function ProjectPanel({ project, onAction, active, embedded, releaseThemeName })
   }
 
   // 删除线上主题：本地只存 theme id，先拉主题名（顺带确认主题还存在），再弹红色二次确认后执行。
-  // 仅删 Shopify 上的主题，本地项目记录保留（要删记录用旁边的「删除」）。
+  // 确认后按 store+theme 连带删除引用该主题的全部本地项目（含其他分支），当前生效项的 toml 一并清除。
   const askDeleteTheme = async () => {
     const id = String(project.theme ?? '').trim()
     if (!id) return message.warning('该项目缺少 theme 字段')
@@ -3312,23 +3313,32 @@ function ProjectPanel({ project, onAction, active, embedded, releaseThemeName })
             <Descriptions.Item label="theme ID">{id}</Descriptions.Item>
             <Descriptions.Item label="store">{project.store}</Descriptions.Item>
           </Descriptions>
-          {active && (
+          {themeProjectCount > 0 && (
             <Text type="warning" style={{ display: 'block', marginBottom: 6, fontSize: 12 }}>
-              ⚠️ 该主题正在当前生效配置中使用，删除后 theme dev 将无法预览。
+              ⚠️ 将同时删除引用该主题的 {themeProjectCount} 条本地项目记录（可能含其他分支的项目）。
             </Text>
           )}
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            仅删除线上主题；本地项目记录保留，可另行删除。
-          </Text>
+          {active && (
+            <Text type="warning" style={{ display: 'block', marginBottom: 6, fontSize: 12 }}>
+              ⚠️ 该主题正在当前生效配置中使用，删除后将一并清除该仓库的生效配置。
+            </Text>
+          )}
         </div>
       ),
       onOk: async () => {
-        const r = await window.api.repos.deleteTheme({ dir: project.repoPath, themeId: id })
+        const r = await window.api.repos.deleteTheme({ dir: project.repoPath, themeId: id, store: project.store })
         if (!r.ok) {
           message.error({ content: r.error, duration: 8 })
           return
         }
-        message.success(`已删除线上主题「${res.data.name}」`)
+        let text = `已删除线上主题「${res.data.name}」`
+        if (r.deletedProjects > 0) {
+          text += `，并清理 ${r.deletedProjects} 条本地项目`
+          if (r.tomlDeleted) text += '（含当前生效配置）'
+        }
+        message.success(text)
+        if (r.localError) message.warning({ content: `本地项目清理失败：${r.localError}`, duration: 8 })
+        onAction('themeDeleted', project)
       },
     })
   }
@@ -3479,7 +3489,7 @@ function ProjectPanel({ project, onAction, active, embedded, releaseThemeName })
           )}
         </Space>
         <Space size={6}>
-          <Tooltip title="用 shopify 删除该 theme ID 对应的线上主题（本地项目记录保留）">
+          <Tooltip title="用 shopify 删除该 theme ID 对应的线上主题，并连带清理引用它的本地项目">
             <Button size="small" danger ghost loading={themeDelLoading} onClick={askDeleteTheme}>
               删除主题
             </Button>
@@ -3713,7 +3723,18 @@ export default function Repos() {
     else if (type === 'json') setJsonModal(payload)
     else if (type === 'edit') setEditProject(payload)
     else if (type === 'delete') handleDeleteProject(payload)
+    else if (type === 'themeDeleted') refreshAfterThemeDelete(payload)
     else if (type === 'gotest') setGotestFor(payload)
+  }
+
+  // 删除线上主题（含连带清理本地项目）后的刷新：与 handleDeleteProject 同一套——
+  // 仓库卡 matched 重算（生效配置可能已被清）+ 本地项目列表重载
+  const refreshAfterThemeDelete = (project) => {
+    if (project.repoPath) {
+      refreshRepo(project.repoPath)
+    } else {
+      refreshProjects()
+    }
   }
 
   // 删除本地缓存项目；若为该仓库「当前生效」项，后端会一并清掉其 shopify.theme.toml
@@ -3825,6 +3846,18 @@ export default function Repos() {
       o[p._branch] = (o[p._branch] || 0) + 1
     })
     return byStore
+  }, [projects])
+
+  // 各「store+theme」被多少条本地项目引用（跨分支统计）：删除线上主题会连带清理这些项目，
+  // 确认弹窗据此展示影响面；键与 core deleteProjectsByTheme 的匹配口径一致（store 相等 + theme trim 后比对）
+  const themeProjectCounts = useMemo(() => {
+    const m = new Map()
+    projects.forEach((p) => {
+      if (!p.store || !p.theme) return
+      const key = `${p.store}|${String(p.theme).trim()}`
+      m.set(key, (m.get(key) || 0) + 1)
+    })
+    return m
   }, [projects])
 
   if (loading) {
@@ -3958,6 +3991,7 @@ export default function Repos() {
               repo={r}
               projects={projectsByRepoPath.get(r.path) || []}
               branchProjectCounts={branchProjectCountsByStore.get(r.devEnv?.store) || {}}
+              themeProjectCounts={themeProjectCounts}
               onAction={repoAction}
               onProjectAction={projectAction}
               defaultEditor={defaultEditor}

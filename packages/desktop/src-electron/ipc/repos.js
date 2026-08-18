@@ -235,13 +235,22 @@ export function registerReposIpc() {
     }
   })
 
-  // 删除项目 theme id 对应的线上主题（theme delete --force 跳过 CLI 交互确认）
-  ipcMain.handle('repos:deleteTheme', async (_evt, { dir, themeId }) => {
-    const { deleteTheme } = await load()
+  // 删除项目 theme id 对应的线上主题（theme delete --force 跳过 CLI 交互确认），
+  // 成功后按 store+theme 连带清理引用该主题的本地项目（deleteProjectsByTheme）
+  ipcMain.handle('repos:deleteTheme', async (_evt, { dir, themeId, store }) => {
+    const { deleteTheme, deleteProjectsByTheme } = await load()
     try {
       const res = await deleteTheme({ cwd: dir, envName: 'dev', themeId })
       if (!res.ok) return { ok: false, error: `删除主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
-      return { ok: true }
+      // 线上主题已删（不可恢复），本地清理失败不回滚，把错误带回给前端提示即可
+      let local = { deleted: 0, synced: 0 }
+      let localError = null
+      try {
+        if (store) local = await deleteProjectsByTheme(store, themeId, dir)
+      } catch (err) {
+        localError = err.message
+      }
+      return { ok: true, deletedProjects: local.deleted, tomlDeleted: local.synced, localError }
     } catch (err) {
       return { ok: false, error: err.message }
     }

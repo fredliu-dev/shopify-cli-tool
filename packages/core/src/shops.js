@@ -188,6 +188,29 @@ export async function deleteProjectSynced(id, repoPath) {
 }
 
 /**
+ * 删除线上主题后清理其本地项目：按 store + theme id 命中所有引用该主题的项目并删除。
+ * 同一主题可被多条项目引用（六要素含 _branch/project_desc 等，同 theme id 可多次保存），
+ * 故跨分支全量匹配；逐条复用 deleteProjectSynced——其中若有某仓库「当前生效」项，
+ * 会一并删掉该仓库的 shopify.theme.toml（与单独删项目的行为一致）。
+ * @param {string} store 主题所在 store（theme id 只在 store 内唯一）
+ * @param {string|number} themeId 主题 id
+ * @param {string} [repoPath] 关联仓库目录；不传则只删 projects.json、不删 toml
+ * @returns {Promise<{ deleted: number, synced: number }>} synced 为顺带清除 toml 的数量
+ */
+export async function deleteProjectsByTheme(store, themeId, repoPath) {
+  const theme = String(themeId ?? '').trim()
+  const hits = loadProjects().filter(
+    (p) => p.store === store && String(p.theme ?? '').trim() === theme,
+  )
+  let synced = 0
+  for (const p of hits) {
+    const r = await deleteProjectSynced(p.id, repoPath)
+    if (r.synced) synced++
+  }
+  return { deleted: hits.length, synced }
+}
+
+/**
  * 取某环境的提测链接 —— `pre` 的纯逻辑。
  * @param {{ startDir?: string, envName?: string, args?: string[] }} [opts]
  *   - startDir: 项目目录（GUI 传入；CLI 默认 cwd）
