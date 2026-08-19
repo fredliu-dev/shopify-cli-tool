@@ -19,6 +19,13 @@ export const SHOPIFY_CLI_VERSION = pkg.version || null
 const isElectron = !!process.versions.electron
 /** 缓存解析出的系统 node 路径（Electron 下不能直接拿偏旧的内置 Node 跑新版 @shopify/cli）。 */
 let _systemNode = null
+/** 解析结果是否为兜底（没找到系统 Node、只能退回 Electron 内置 Node）；桌面端据此提示安装 Node.js。 */
+let _nodeIsFallback = false
+/**
+ * 子进程的 stdin 策略：有真实 TTY（CLI 场景）才 inherit 以保留 shopify 的交互输入（如登录确认）；
+ * 双击启动的 Windows GUI Electron 无控制台、stdin 句柄无效，inherit 会让 spawn 直接 EBADF/EINVAL 失败，故降级 ignore。
+ */
+const STDIN = process.stdin?.isTTY ? 'inherit' : 'ignore'
 
 /**
  * 扫 process.env.PATH 各目录，返回第一个存在且可执行的 node（同步、即时）。
@@ -30,6 +37,8 @@ function nodeFromPath() {
   const exe = isWin ? 'node.exe' : 'node'
   for (const dir of (process.env.PATH || '').split(delimiter)) {
     if (!dir) continue
+    // 跳过 Microsoft Store 的 App Execution Alias 目录：里面的 node.exe 是 0 字节 stub，存在但执行即失败
+    if (isWin && /\\microsoft\\windowsapps[\\/]?$/i.test(dir)) continue
     const full = join(dir, exe)
     try {
       accessSync(full, constants.X_OK)
@@ -61,7 +70,9 @@ function resolveShopifyNode() {
   }
   const isWin = process.platform === 'win32'
   return new Promise((resolve) => {
-    const shell = process.env.SHELL || (isWin ? 'cmd.exe' : '/bin/sh')
+    // Windows 必须用 cmd（ComSpec）且不能先看 SHELL：Git Bash 里启动的进程带着 SHELL=/usr/bin/bash
+    // （POSIX 路径 + bash 语法），spawn 它再传 cmd 的 /c 会直接 ENOENT，node 解析链就此断裂。
+    const shell = isWin ? process.env.ComSpec || 'cmd.exe' : process.env.SHELL || '/bin/sh'
     const flag = isWin ? '/c' : '-lic' // -l 登录 + -i 交互：source .zshrc/.zprofile 等以还原 nvm/homebrew
     const script = isWin ? 'where node' : 'command -v node'
     const child = spawn(shell, [flag, script], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 })
@@ -73,7 +84,13 @@ function resolveShopifyNode() {
     const finish = () => {
       if (settled) return
       settled = true
-      const picked = out.split('\n').map((l) => l.trim()).filter(Boolean).pop()
+      // 过滤不可用的命中：.cmd/.bat shim（Node 18.20+ 禁止无 shell 直接 spawn，会 EINVAL）与
+      // Microsoft Store 的 0 字节 App Execution Alias；取首个 = PATH 优先级最高的 node。
+      const picked = out
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .find((l) => (isWin ? l.toLowerCase().endsWith('.exe') && !/\\microsoft\\windowsapps\\/i.test(l) : true))
       if (picked && existsSync(picked)) {
         _systemNode = picked
         return resolve(picked)
@@ -88,11 +105,25 @@ function resolveShopifyNode() {
           return resolve(cand)
         }
       }
-      resolve(process.execPath) // 兜底：退回 Electron 自带 Node（可能仍因 enableCompileCache 失败）
+      // 兜底：退回 Electron 自带 Node（跑新版 @shopify/cli 大概率因 enableCompileCache 失败）。
+      // 标记 fallback 供桌面端启动自检提示「请安装 Node.js」；同时缓存，避免每条命令重跑 shell 探测。
+      _systemNode = process.execPath
+      _nodeIsFallback = true
+      resolve(process.execPath)
     }
     child.on('close', finish)
     child.on('error', finish)
   })
+}
+
+/**
+ * 查询跑 @shopify/cli 的 node 解释器状态（桌面端启动自检 / 「关于」展示用）。
+ * @returns {Promise<{ node: string, fallback: boolean }>} fallback=true 表示没找到系统 Node、
+ *   只能退回 Electron 内置的偏旧 Node（跑新版 @shopify/cli 会失败），应提示用户安装 Node.js ≥22。
+ */
+export async function getShopifyNodeInfo() {
+  const node = await resolveShopifyNode()
+  return { node, fallback: isElectron && _nodeIsFallback }
 }
 
 /**
@@ -108,8 +139,9 @@ export async function runShopify(args, { cwd } = {}) {
   const node = await resolveShopifyNode()
   return new Promise((resolve) => {
     const child = spawn(node, [SHOPIFY_BIN, ...args], {
-      stdio: 'inherit',
-      env: { ...process.env, FORCE_COLOR: '1', INIT_CWD: cwd || process.cwd() },
+      stdio: [STDIN, 'inherit', 'inherit'],
+      // 只有真终端才强制开色：重定向到文件/管道（shop xxx > log.txt）时保留原始文本，不混入 ESC 序列
+      env: { ...process.env, FORCE_COLOR: process.stdout?.isTTY ? '1' : '0', INIT_CWD: cwd || process.cwd() },
       ...(cwd ? { cwd } : {}),
     })
     child.on('close', (code) => resolve(code ?? 0))
@@ -129,7 +161,7 @@ export async function captureShopify(args, { cwd } = {}) {
   const node = await resolveShopifyNode()
   return new Promise((resolve) => {
     const child = spawn(node, [SHOPIFY_BIN, ...args], {
-      stdio: ['inherit', 'pipe', 'pipe'],
+      stdio: [STDIN, 'pipe', 'pipe'],
       // INIT_CWD 必须同步到 cwd：shopify 的 cwd() 是 process.env.INIT_CWD || process.cwd()，
       // Electron 主进程的 INIT_CWD 是 dev 启动目录（项目根），会让 shopify 拿错目录去找 toml。
       env: { ...process.env, FORCE_COLOR: '0', INIT_CWD: cwd || process.cwd() },
@@ -144,7 +176,14 @@ export async function captureShopify(args, { cwd } = {}) {
       stderr += d.toString()
     })
     child.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }))
-    child.on('error', () => resolve({ code: 1, stdout, stderr }))
+    // spawn 失败（node 缺失/不可执行）时把原因写进 stderr，让 GUI / CLI 至少能看到可读错误而非只有退出码 1
+    child.on('error', (err) =>
+      resolve({
+        code: 1,
+        stdout,
+        stderr: `${stderr}\nshopify 子进程启动失败（${node}）：${err.message}`,
+      }),
+    )
   })
 }
 
@@ -160,7 +199,7 @@ export async function captureShopify(args, { cwd } = {}) {
 export async function streamShopify(args, { onData, env, cwd } = {}) {
   const node = await resolveShopifyNode()
   const child = spawn(node, [SHOPIFY_BIN, ...args], {
-    stdio: ['inherit', 'pipe', 'pipe'],
+    stdio: [STDIN, 'pipe', 'pipe'],
     env: { ...process.env, FORCE_COLOR: '1', INIT_CWD: cwd || process.cwd(), ...env },
     ...(cwd ? { cwd } : {}),
   })
@@ -169,7 +208,11 @@ export async function streamShopify(args, { onData, env, cwd } = {}) {
 
   const done = new Promise((resolve) => {
     child.on('close', (code) => resolve(code ?? 0))
-    child.on('error', () => resolve(1))
+    child.on('error', (err) => {
+      // 与 captureShopify 一致：spawn 失败时把可读原因回灌到 stderr 流，GUI 日志能看到
+      onData?.(`shopify 子进程启动失败（${node}）：${err.message}\n`, 'stderr')
+      resolve(1)
+    })
   })
   return { child, done }
 }

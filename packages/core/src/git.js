@@ -31,7 +31,14 @@ function runGit(args, cwd, { timeout = 15000 } = {}) {
     child.stderr.on('data', (d) => {
       stderr += d.toString()
     })
-    child.on('error', () => finish(1))
+    child.on('error', (err) => {
+      // git 缺失（ENOENT）等启动失败写入 stderr：调用方按退出码只能看到「失败」，
+      // 这里给出可读原因（如「未找到 git 命令」），不再静默吞掉
+      stderr += err.code === 'ENOENT'
+        ? '未找到 git 命令：请安装 Git 并确认其已加入 PATH。'
+        : `git 进程启动失败：${err.message}`
+      finish(1)
+    })
     child.on('close', finish)
   })
 }
@@ -39,6 +46,44 @@ function runGit(args, cwd, { timeout = 15000 } = {}) {
 /** 多行文本按行去空白、去重、排序后返回（用于文件名列表）。 */
 function uniqLines(s) {
   return [...new Set(String(s).split('\n').map((l) => l.trim()).filter(Boolean))].sort()
+}
+
+/**
+ * 还原 git 的 C 风格引用路径：去首尾引号 + 解码 \NNN 八进制转义（还原为 UTF-8 字节再解码）。
+ * 即便禁用了 core.quotepath，含 "、\t 等控制字符的路径仍会被 git 引用输出。
+ * @param {string} p
+ * @returns {string}
+ */
+function unquotePath(p) {
+  if (!p.startsWith('"') || !p.endsWith('"')) return p
+  const inner = p.slice(1, -1)
+  let out = ''
+  let bytes = []
+  const flush = () => {
+    if (bytes.length) {
+      out += Buffer.from(bytes).toString('utf8')
+      bytes = []
+    }
+  }
+  for (let i = 0; i < inner.length; ) {
+    const m = /^\\([0-7]{3})/.exec(inner.slice(i))
+    if (m) {
+      bytes.push(parseInt(m[1], 8)) // 八进制转义是 UTF-8 字节序列，攒够再整体解码
+      i += 4
+    } else {
+      flush()
+      if (inner[i] === '\\') {
+        // \" 与 \\ 的简单反转义
+        out += inner[i + 1] ?? '\\'
+        i += 2
+      } else {
+        out += inner[i]
+        i += 1
+      }
+    }
+  }
+  flush()
+  return out
 }
 
 /**
@@ -186,12 +231,13 @@ export async function listAllBranches(repoPath, { fetch = true } = {}) {
 export async function getChangedFiles(repoPath, { maxCount = 20 } = {}) {
   const range = await resolveRange(repoPath)
 
-  const args = ['log', '--name-only', '--no-merges', '--pretty=format:']
+  // core.quotepath=false：非 ASCII 路径原样输出，避免中文文件名被转成 "\344\270\255" 八进制转义
+  const args = ['-c', 'core.quotepath=false', 'log', '--name-only', '--no-merges', '--pretty=format:']
   if (range) args.push(range)
   else args.push('-n', String(maxCount), 'HEAD')
 
   const lg = await runGit(args, repoPath)
-  const committed = uniqLines(lg.code === 0 ? lg.stdout : '')
+  const committed = uniqLines(lg.code === 0 ? lg.stdout : '').map(unquotePath)
 
   // 合并工作区未提交改动（已暂存 / 未暂存），与已提交记录去重，得到最终的 template 变动
   const dirty = await workingTreeFiles(repoPath)
@@ -574,7 +620,8 @@ export async function isTomlTracked(repoPath) {
  * @returns {Promise<string[]>}
  */
 export async function workingTreeFiles(repoPath) {
-  const r = await runGit(['status', '--porcelain'], repoPath)
+  // core.quotepath=false + unquotePath：中文/含引号路径原样还原，否则 /\.json$/ 之类的匹配会漏文件
+  const r = await runGit(['-c', 'core.quotepath=false', 'status', '--porcelain'], repoPath)
   if (r.code !== 0) return []
   return r.stdout
     .split('\n')
@@ -584,8 +631,8 @@ export async function workingTreeFiles(repoPath) {
     .map((l) => {
       // "XY path"（前 2 列状态码 + 1 空格），rename 形如 "R  old -> new" 取新路径
       const arrow = l.indexOf(' -> ')
-      if (arrow >= 0) return l.slice(arrow + 4).trim()
-      return l.slice(3).trim()
+      if (arrow >= 0) return unquotePath(l.slice(arrow + 4).trim())
+      return unquotePath(l.slice(3).trim())
     })
 }
 

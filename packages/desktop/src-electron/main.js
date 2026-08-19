@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, Menu } from 'electron'
 import { join } from 'node:path'
 import { registerShopsIpc } from './ipc/shops.js'
 import { registerLinksIpc } from './ipc/links.js'
@@ -43,6 +43,30 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Windows 用户双击 exe 多开很常见：两个实例并发读-改-写 settings.json / projects.json
+  // 会互相覆盖（后写者冲掉先写者），故第二实例启动时只聚焦已有窗口。
+  if (!app.requestSingleInstanceLock()) {
+    app.quit()
+    return
+  }
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+
+  // 基础菜单：不设置时 Windows 会显示英文默认菜单（含开发者工具等无关项），
+  // macOS 则完全没有菜单、复制粘贴快捷键失效；role 系菜单自带跨平台正确行为。
+  const isMac = process.platform === 'darwin'
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      ...(isMac ? [{ role: 'appMenu' }] : []),
+      { role: 'editMenu' },
+      { role: 'viewMenu' },
+    ]),
+  )
+
   registerShopsIpc()
   registerLinksIpc()
   registerConfigIpc()

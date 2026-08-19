@@ -13,7 +13,8 @@ export function getPortPids(port) {
   if (process.platform === 'win32') {
     let out = ''
     try {
-      out = execSync('netstat -ano', { encoding: 'utf8' })
+      // windowsHide：GUI Electron 里 execSync 默认会闪黑色 cmd 窗口
+      out = execSync('netstat -ano', { encoding: 'utf8', windowsHide: true })
     } catch {
       return []
     }
@@ -21,6 +22,9 @@ export function getPortPids(port) {
       const cols = line.trim().split(/\s+/)
       // TCP: Proto Local Foreign State PID；UDP 无 State；跳过表头/空行
       if (cols.length < 4) continue
+      // 只认 LISTENING：TIME_WAIT/ESTABLISHED 的同号本地端口不算「占用服务端口」，
+      // 否则可能误杀恰好用到该本地端口的无关进程（UDP 行无状态列，一并跳过）
+      if (cols[3] !== 'LISTENING') continue
       const local = cols[1] ?? ''
       const pid = cols[cols.length - 1]
       // 形如 0.0.0.0:9292 / [::]:9292，只匹配末尾端口，避免误伤 92920
@@ -53,8 +57,8 @@ export function killPort(port) {
   for (const pid of pids) {
     try {
       if (process.platform === 'win32') {
-        // /T 连带子进程一起杀（dev server 常派生子进程）
-        execSync(`taskkill /PID ${pid} /F /T`, { stdio: 'ignore' })
+        // /T 连带子进程一起杀（dev server 常派生子进程）；windowsHide 防 GUI 下闪 cmd 黑框
+        execSync(`taskkill /PID ${pid} /F /T`, { stdio: 'ignore', windowsHide: true })
       } else {
         process.kill(Number(pid), 'SIGKILL')
       }

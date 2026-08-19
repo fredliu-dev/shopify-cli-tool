@@ -9,7 +9,7 @@
  *       且按 realpath 校验归属，避免被 Trae / Cursor 的同名命令劫持）；归属不明则用 app bundle / .exe 兜底。
  * 终端：仅 macOS 对 VS Code 系（含 Cursor / Trae）自动注入其集成终端；其余一律开系统终端跑命令。
  */
-import { existsSync, writeFileSync, realpathSync } from 'node:fs'
+import { existsSync, readdirSync, writeFileSync, realpathSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
@@ -36,7 +36,8 @@ function winRoots() {
 const EDITORS = [
   { id: 'vscode', name: 'Visual Studio Code',
     mac: { apps: ['Visual Studio Code.app'], cmd: 'code' },
-    win: { cmd: 'code.cmd', rels: [join('Programs', 'Microsoft VS Code', 'Code.exe')] },
+    // 第二条 rel 覆盖系统级安装（C:\Program Files\Microsoft VS Code）
+    win: { cmd: 'code.cmd', rels: [join('Programs', 'Microsoft VS Code', 'Code.exe'), join('Microsoft VS Code', 'Code.exe')] },
     linux: { cmd: 'code' } },
   { id: 'codex', name: 'Codex',
     // OpenAI Codex 桌面应用（独立应用，非 VS Code 系）。codex CLI 是 agent，不用来打开目录，故 cmd 留空、只用 app 本体打开。
@@ -54,19 +55,21 @@ const EDITORS = [
   { id: 'trae-cn', name: 'Trae CN',
     // Trae CN 的 shell 命令名是 trae-cn（不是 trae），和 VS Code 的 code 一样能 `trae-cn <dir>` 打开目录
     mac: { apps: ['Trae CN.app'], cmd: 'trae-cn' },
-    win: { cmd: 'trae.cmd', rels: [join('Programs', 'Trae CN', 'Trae.exe')] },
+    // Windows 的命令名同样是 trae-cn（不带 .cmd 后缀让 where 按 PATHEXT 找到任意形态），
+    // 不能与 trae 共用命令名——否则装了 Trae 的机器会把「Trae CN」也误检出
+    win: { cmd: 'trae-cn', rels: [join('Programs', 'Trae CN', 'Trae.exe'), join('Programs', 'Trae CN', 'Trae CN.exe')] },
     linux: { cmd: 'trae-cn' } },
   { id: 'webstorm', name: 'WebStorm',
     mac: { apps: ['WebStorm.app'], cmd: 'webstorm' },
-    win: { cmd: 'webstorm.exe', rels: [] },
+    win: { cmd: 'webstorm', rels: [], toolbox: { dirs: ['WebStorm'], exes: ['webstorm64.exe', 'webstorm.exe'] } },
     linux: { cmd: 'webstorm' } },
   { id: 'phpstorm', name: 'PhpStorm',
     mac: { apps: ['PhpStorm.app'], cmd: 'phpstorm' },
-    win: { cmd: 'phpstorm.exe', rels: [] },
+    win: { cmd: 'phpstorm', rels: [], toolbox: { dirs: ['PhpStorm'], exes: ['phpstorm64.exe', 'phpstorm.exe'] } },
     linux: { cmd: 'phpstorm' } },
   { id: 'idea', name: 'IntelliJ IDEA',
     mac: { apps: ['IntelliJ IDEA.app'], cmd: 'idea' },
-    win: { cmd: 'idea.exe', rels: [] },
+    win: { cmd: 'idea', rels: [], toolbox: { dirs: ['IntelliJ IDEA Ultimate', 'IntelliJ IDEA Community', 'IntelliJ IDEA'], exes: ['idea64.exe', 'idea.exe'] } },
     linux: { cmd: 'idea' } },
   { id: 'sublime', name: 'Sublime Text',
     mac: { apps: ['Sublime Text.app'], cmd: 'subl' },
@@ -74,9 +77,52 @@ const EDITORS = [
     linux: { cmd: 'subl' } },
   { id: 'zed', name: 'Zed',
     mac: { apps: ['Zed.app'], cmd: 'zeditor' },
-    win: { cmd: 'zeditor.exe', rels: [] },
+    win: { cmd: 'zeditor', rels: [join('Programs', 'Zed', 'Zed.exe'), join('Programs', 'zed', 'Zed.exe')] },
     linux: { cmd: 'zeditor' } },
 ]
+
+/**
+ * 在 dir 下（含子目录，限深度）查找名为 names 之一的文件；找不到返回 null。
+ * 供 JetBrains 这类「安装目录带渠道/版本层级、无法静态枚举」的编辑器定位主程序。
+ */
+function findFileDeep(dir, names, depth) {
+  if (depth < 0) return null
+  try {
+    for (const name of names) {
+      const p = join(dir, name)
+      if (existsSync(p)) return p
+    }
+    for (const entry of readdirSync(dir)) {
+      const hit = findFileDeep(join(dir, entry), names, depth - 1)
+      if (hit) return hit
+    }
+  } catch {
+    /* 目录不存在/不可读，视为未安装 */
+  }
+  return null
+}
+
+/**
+ * 定位 JetBrains 系编辑器主程序：Toolbox 装在 %LOCALAPPDATA%\JetBrains\Toolbox\apps\<产品>\ch-0\<版本>\bin，
+ * 独立安装包在 %ProgramFiles%\JetBrains\<产品+版本>\bin——都带版本层级，需按产品目录限深扫描。
+ * @param {string[]} dirs 产品目录名候选
+ * @param {string[]} exes 主程序文件名候选（老版本 *64.exe、新版去掉 64 后缀）
+ * @returns {string | null}
+ */
+function jetbrainsExe(dirs, exes) {
+  const env = process.env
+  const roots = []
+  if (env.LOCALAPPDATA) roots.push(join(env.LOCALAPPDATA, 'JetBrains', 'Toolbox', 'apps'))
+  if (env.PROGRAMFILES) roots.push(join(env.PROGRAMFILES, 'JetBrains'))
+  if (env['PROGRAMFILES(X86)']) roots.push(join(env['PROGRAMFILES(X86)'], 'JetBrains'))
+  for (const root of roots) {
+    for (const d of dirs) {
+      const hit = findFileDeep(join(root, d), exes, 4) // 产品/ch-0/版本/bin/exe 共 4 层
+      if (hit) return hit
+    }
+  }
+  return null
+}
 
 /** 命令是否在 PATH 中：macOS/Linux 用 which，Windows 用 where。 */
 function cmdExists(cmd) {
@@ -124,7 +170,11 @@ function macDetected(e) {
   return e.mac.apps.some((a) => MAC_APP_DIRS.some((d) => existsSync(join(d, a)))) || (e.mac.cmd ? cmdExists(e.mac.cmd) : false)
 }
 function winDetected(e) {
-  return e.win.rels.some((rel) => winRoots().some((r) => existsSync(join(r, rel)))) || (e.win.cmd ? cmdExists(e.win.cmd) : false)
+  return (
+    e.win.rels.some((rel) => winRoots().some((r) => existsSync(join(r, rel)))) ||
+    (e.win.toolbox ? !!jetbrainsExe(e.win.toolbox.dirs, e.win.toolbox.exes) : false) ||
+    (e.win.cmd ? cmdExists(e.win.cmd) : false)
+  )
 }
 function linuxDetected(e) {
   return e.linux.cmd ? cmdExists(e.linux.cmd) : false
@@ -139,7 +189,7 @@ export function listEditors() {
   return EDITORS.filter(detected).map((e) => ({ id: e.id, name: e.name }))
 }
 
-/** 取 Windows 上编辑器 .exe 的首个存在路径（按 winRoots × rels 顺序）。 */
+/** 取 Windows 上编辑器 .exe 的首个存在路径（按 winRoots × rels，再 Toolbox 扫描）。 */
 function winExePath(e) {
   for (const rel of e.win.rels) {
     for (const r of winRoots()) {
@@ -147,6 +197,7 @@ function winExePath(e) {
       if (existsSync(p)) return p
     }
   }
+  if (e.win.toolbox) return jetbrainsExe(e.win.toolbox.dirs, e.win.toolbox.exes)
   return null
 }
 
@@ -186,7 +237,9 @@ function openWin(e, dir) {
     return
   }
   if (e.win.cmd && cmdExists(e.win.cmd)) {
-    spawn(e.win.cmd, [dir], { detached: true, stdio: 'ignore', shell: true }).unref()
+    // shell:true 时 Node 只按空格拼接参数、不加引号：路径含空格（如 C:\Users\张 三\repo）
+    // 会被截断成多个参数，必须自己包一层引号
+    spawn(e.win.cmd, [`"${dir}"`], { detached: true, stdio: 'ignore', shell: true }).unref()
     return
   }
   spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore' }).unref()
@@ -281,10 +334,13 @@ end tell`
  */
 function openWinTerminal(command) {
   const bat = join(tmpdir(), `shopify-cli-run-${Date.now()}.bat`)
-  writeFileSync(bat, `${command}\r\ndel "%~f0"\r\n`)
-  spawn('cmd.exe', ['/c', 'start', '"Shopify"', 'cmd.exe', '/k', `"${bat}"`], {
+  // chcp 65001：bat 以 UTF-8 写入，中文 Windows 的 cmd 默认 GBK 代码页会把中文命令解析成乱码
+  writeFileSync(bat, `@chcp 65001 >nul\r\n${command}\r\ndel "%~f0"\r\n`, 'utf8')
+  // 引号交给 spawn 的参数序列化（自己再包会被双重转义，用户名含空格时路径断裂）
+  spawn('cmd.exe', ['/c', 'start', 'Shopify Toolbox', 'cmd.exe', '/k', bat], {
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
   }).unref()
 }
 

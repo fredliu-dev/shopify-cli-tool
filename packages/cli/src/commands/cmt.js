@@ -6,12 +6,18 @@ import { isGitRepo, workingTreeFiles, COMMIT_TYPES, formatCommitTitle } from '@s
 /**
  * 以 inherit stdio 跑 git 子进程，让 commit 输出实时透传给用户（不被捕获）。
  * @param {string[]} args 透传给 git 的参数
+ * @param {object} log 命令上下文的 logger（spawn 失败时给出可读原因）
  * @returns {Promise<number>} 退出码
  */
-function runGitLive(args) {
+function runGitLive(args, log) {
   return new Promise((resolve) => {
     const child = spawn('git', args, { stdio: 'inherit' })
-    child.on('error', () => resolve(1))
+    child.on('error', (err) => {
+      // git 缺失等启动失败不再静默成退出码 1，至少让用户知道原因
+      if (err.code === 'ENOENT') log.error('未找到 git 命令：请确认已安装 Git 并加入 PATH')
+      else log.error(`git 进程启动失败：${err.message}`)
+      resolve(1)
+    })
     child.on('close', (code) => resolve(code ?? 0))
   })
 }
@@ -76,13 +82,13 @@ export default {
     const commitMsg = formatCommitTitle(type, message)
     log.step(`提交信息：${pc.cyan(commitMsg)}`)
 
-    const addCode = await runGitLive(['add', '-A'])
+    const addCode = await runGitLive(['add', '-A'], log)
     if (addCode !== 0) {
       log.error('git add 失败')
       return addCode
     }
 
-    const code = await runGitLive(['commit', '-m', commitMsg])
+    const code = await runGitLive(['commit', '-m', commitMsg], log)
     if (code !== 0) {
       log.error(`提交失败，退出码 ${code}`)
       return code
@@ -114,7 +120,7 @@ export default {
 
     // 推送到远程分支：HEAD 自动解析为当前分支；-u 首次推送时设置上游跟踪，已设则无害
     log.step('推送到远程分支...')
-    const pushCode = await runGitLive(['push', '-u', 'origin', 'HEAD'])
+    const pushCode = await runGitLive(['push', '-u', 'origin', 'HEAD'], log)
     if (pushCode === 0) {
       log.success('推送成功 🚀')
     } else {

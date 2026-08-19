@@ -1,4 +1,5 @@
 import {
+  Alert,
   App,
   AutoComplete,
   Avatar,
@@ -2475,185 +2476,9 @@ function CreateBranchModal({ open, repo, onClose, onDone, contacts }) {
   )
 }
 
-// 创建 release 弹窗用：把「同类输入 + 拼出的名字」圈成一组的描边色框（按 accent 染色，两类一眼可分）。
-const releaseGroupBox = (accent) => ({
-  border: `1px solid ${accent}66`,
-  borderRadius: 10,
-  padding: '4px 14px 14px',
-  marginBottom: 16,
-  background: `${accent}12`,
-})
-// 圈内拼出的名字预览：浅色底突出，与上方输入形成「输入 → 拼接结果」的视觉对应。
-const releasePreviewBox = (accent) => ({
-  marginTop: 4,
-  padding: '8px 12px',
-  borderRadius: 6,
-  background: `${accent}1f`,
-  border: `1px solid ${accent}55`,
-})
-
-/* ---------------- 创建 release（release/version-{英文版本名}；复制主题名称供后台手动建主题） ---------------- */
-function CreateReleaseModal({ open, repo, onClose, onDone, contacts, onSaveThemeName }) {
-  const { message } = App.useApp()
-  const { local, remote, loading: branchLoading, reload } = useRepoBranches(repo)
-  const [loading, setLoading] = useState(false)
-  const [form] = Form.useForm()
-  const version = Form.useWatch('version', form)
-  const activity = Form.useWatch('activity', form)
-  const owner = Form.useWatch('owner', form)
-
-  const branchName = version ? `release/version-${version}` : ''
-
-  useEffect(() => {
-    if (!open) return
-    form.setFieldsValue({ version: '', activity: '', owner: '' })
-    reload().then((snap) => snap?.current && form.setFieldValue('base', snap.current))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, repo])
-
-  // 主题名命名规则与 core duplicateLiveTheme(namePrefix='release') 完全一致：
-  // [release] 活动 | 负责人 | YYYYMMDD。此处仅生成名称供复制，主题由用户在 Shopify 后台手动新建（不再自动 shop copy）。
-  const themeName = (() => {
-    const a = (activity || '').trim()
-    const o = (owner || '').trim()
-    if (!a || !o) return ''
-    const now = new Date()
-    const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
-    return `[release] ${a} | ${o} | ${dateStr}`
-  })()
-
-  const copyThemeName = async () => {
-    if (!themeName) return
-    try {
-      await navigator.clipboard.writeText(themeName)
-      message.success(`已复制主题名称：${themeName}`)
-    } catch {
-      message.error('复制失败，请手动选中复制')
-    }
-  }
-
-  const submit = async (vals) => {
-    setLoading(true)
-    // 主题不再由本工具复制：用户点「复制主题名称」后到 Shopify 后台手动新建。
-    // 这里只创建 release 分支（推送到远程），switch:false 不切换——仍停留在当前开发分支，不打断开发。
-    const res = await window.api.repos.createBranch({ dir: repo.path, base: vals.base, name: branchName, push: true, switch: false })
-    setLoading(false)
-    if (!res.ok) {
-      message.error(res.error || '创建分支失败')
-      return
-    }
-    // 主题名与「当前开发分支」绑定保存（release 分支本身不切换，repo.currentBranch 即开发分支）：
-    // 弹窗关闭后，仓库卡片项目面板上的「复制 release 主题名」按钮据此长期可用
-    const saved = !!(themeName && repo?.currentBranch)
-    if (saved) await onSaveThemeName?.(repo.path, repo.currentBranch, themeName)
-    message.success(
-      `已创建 release 分支 ${branchName}（已推送远程），未切换、仍停留在 ${repo?.currentBranch || '当前分支'}` +
-        (saved ? `；主题名已绑定到 ${repo.currentBranch}，可在仓库卡片复制` : ''),
-    )
-    onDone?.()
-  }
-
-  return (
-    <Modal title={`创建 release - ${repo?.name ?? ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose>
-      <Form form={form} layout="vertical" onFinish={submit}>
-        {/* ① 分支名称：基准分支 + 版本名 → 拼出的分支名，圈在一块更醒目 */}
-        <div style={releaseGroupBox('#1677ff')}>
-          <SectionLabel color="#1677ff">分支名称</SectionLabel>
-          <Form.Item name="base" label="基准分支" rules={[{ required: true, message: '请选择基准分支' }]} style={{ marginBottom: 12 }}>
-            <Select
-              showSearch
-              loading={branchLoading}
-              placeholder="选择基准分支（展开自动 fetch origin）"
-              popupMatchSelectWidth={false}
-              onDropdownVisibleChange={(o) => o && reload()}
-            >
-              {local.length > 0 && (
-                <Select.OptGroup label="本地分支">
-                  {local.map((b) => (
-                    <Select.Option key={`l/${b}`} value={b}>
-                      {b}
-                    </Select.Option>
-                  ))}
-                </Select.OptGroup>
-              )}
-              {remote.length > 0 && (
-                <Select.OptGroup label="远程分支">
-                  {remote.map((b) => (
-                    <Select.Option key={`r/${b}`} value={b}>
-                      {b}
-                    </Select.Option>
-                  ))}
-                </Select.OptGroup>
-              )}
-            </Select>
-          </Form.Item>
-          <Form.Item
-            name="version"
-            label="版本名（英文）"
-            rules={[
-              { required: true, message: '请输入版本名' },
-              { pattern: /^[A-Za-z0-9._-]+$/, message: '仅限英文 / 数字 / . _ -' },
-            ]}
-            style={{ marginBottom: 12 }}
-          >
-            <Input placeholder="如 2024spring" />
-          </Form.Item>
-          <div style={releasePreviewBox('#1677ff')}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              拼出的分支名
-            </Text>
-            <div style={{ marginTop: 4, fontFamily: 'monospace', fontSize: 13 }}>
-              <Text strong copyable={!!branchName}>
-                {branchName || 'release/version-{版本名}'}
-              </Text>
-            </div>
-          </div>
-        </div>
-
-        {/* ② 主题名称：活动名称 + 负责人 → 拼出的主题名，圈在一块更醒目 */}
-        <div style={releaseGroupBox('#52c41a')}>
-          <SectionLabel color="#52c41a">主题名称</SectionLabel>
-          <Form.Item name="activity" label="活动名称" style={{ marginBottom: 12 }}>
-            <Input placeholder="用于生成主题名称" />
-          </Form.Item>
-          <Form.Item name="owner" label="负责人" style={{ marginBottom: 12 }}>
-            <AutoComplete
-              options={(contacts || []).map((c) => ({ value: c.name }))}
-              filterOption={(v, o) => String(o.value).toLowerCase().includes(String(v).toLowerCase())}
-              style={{ width: '100%' }}
-            >
-              <Input placeholder="负责人（可从已录入人员选择或手输）" />
-            </AutoComplete>
-          </Form.Item>
-          <div style={releasePreviewBox('#52c41a')}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                拼出的主题名
-              </Text>
-              <Button size="small" onClick={copyThemeName} disabled={!themeName}>
-                复制主题名称
-              </Button>
-            </div>
-            <Text strong style={{ display: 'block', marginTop: 6, wordBreak: 'break-all' }}>
-              {themeName || '填写活动名称与负责人后生成'}
-            </Text>
-            <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
-              格式：[release] 活动 | 负责人 | 日期。复制后到 Shopify 后台手动新建主题。
-            </Text>
-          </div>
-        </div>
-
-        <Button type="primary" htmlType="submit" loading={loading} block>
-          创建 release
-        </Button>
-      </Form>
-    </Modal>
-  )
-}
-
-/* ---------------- Git 流程：阶段式流程卡（开发→提测→release→合并信息） ---------------- */
-// 四段彩色卡片用箭头串联，结构同构：序号+图标+动作标题+阶段副标题，整卡可点击（禁用则置灰+tooltip）。
-// ①开发·拉分支 → ②开发完·提测 → ③提测完·创建 release → ④上线前·合并信息。
+/* ---------------- Git 流程：阶段式流程卡（开发→提测→合并信息） ---------------- */
+// 三段彩色卡片用箭头串联，结构同构：序号+图标+动作标题+阶段副标题，整卡可点击（禁用则置灰+tooltip）。
+// ①开发·拉分支 → ②开发完·提测 → ③上线前·合并信息。
 function FlowArrow() {
   return <ArrowRightOutlined style={{ fontSize: 12, color: '#c9cdd4', flexShrink: 0, alignSelf: 'center' }} />
 }
@@ -2741,7 +2566,7 @@ function StageCard({ index, color, stageName, title, disabled, tooltip, onClick,
 
 function GitFlowSteps({ repo, project, projects, onAction }) {
   const hasProject = !!project
-  // 当前分支下的本地项目：第④步「合并信息」的候选来源（不要求含工单链接）；无则置灰
+  // 当前分支下的本地项目：第③步「合并信息」的候选来源（不要求含工单链接）；无则置灰
   const branchProjects = (projects || []).filter((p) => p.description)
   const noProjects = branchProjects.length === 0
 
@@ -2767,14 +2592,6 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
       <FlowArrow />
       <StageCard
         index={3}
-        color="#52c41a"
-        title="创建 release"
-        stageName="提测完"
-        onClick={() => onAction('release', repo)}
-      />
-      <FlowArrow />
-      <StageCard
-        index={4}
         color="#722ed1"
         title="合并信息"
         stageName="上线前"
@@ -2846,7 +2663,7 @@ function OpenEditorButton({ dir, defaultEditor }) {
   )
 }
 
-function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, themeProjectCounts, defaultEditor, releaseThemes }) {
+function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, themeProjectCounts, defaultEditor }) {
   const matched = !!repo.matched
   const { message } = App.useApp()
   const [hovered, setHovered] = useState(false) // 玻璃亮光 hover 态（仅本卡重渲，不影响其它卡片）
@@ -2902,8 +2719,6 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
   // 当前生效（toml dev 段对应）的项目：仅用于面板「当前生效」标识，不改变展示顺序
   const matchedId = repo.matched?.id
 
-  // 当前分支绑定的 release 主题名（创建 release 弹窗提交成功时保存）：同分支下所有项目面板共用
-  const releaseThemeName = releaseThemes?.[repo.path]?.[repo.currentBranch] || ''
 
   return (
     <Card
@@ -3063,7 +2878,7 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
           </Space>
         </div>
 
-        {/* Git 流程：开发→拉分支 / 开发完→提测 / 提测完→release 创建 */}
+        {/* Git 流程：开发→拉分支 / 开发完→提测 / 上线前→合并信息 */}
         <div>
           <SectionLabel color="#52c41a">Git 流程</SectionLabel>
           <GitFlowSteps repo={repo} project={repo.matched} projects={projects} onAction={onAction} />
@@ -3077,7 +2892,6 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
             onAction={onProjectAction}
             active={p.id === matchedId}
             embedded
-            releaseThemeName={releaseThemeName}
             themeProjectCount={themeProjectCounts?.get(`${p.store}|${String(p.theme ?? '').trim()}`) || 0}
           />
         ))}
@@ -3259,7 +3073,7 @@ const QUICK_LINKS = [
   { key: 'editor', label: '编辑器', Icon: FormatPainterOutlined, urlKey: 'editorLink', color: '#9254de', copyLabel: '编辑器链接' },
 ]
 
-function ProjectPanel({ project, onAction, active, embedded, releaseThemeName, themeProjectCount }) {
+function ProjectPanel({ project, onAction, active, embedded, themeProjectCount }) {
   const { message, modal } = App.useApp()
   const noRepo = !project.repoPath
   const [themeDelLoading, setThemeDelLoading] = useState(false)
@@ -3272,14 +3086,6 @@ function ProjectPanel({ project, onAction, active, embedded, releaseThemeName, t
     const res = await window.api.shell.copy(url)
     await window.api.shell.openExternal(url)
     if (res?.ok) message.success(`已复制${label}并在默认浏览器打开`)
-  }
-
-  // 复制当前分支绑定的 release 主题名（创建 release 弹窗提交成功时保存，见 CreateReleaseModal）
-  const copyReleaseThemeName = async () => {
-    if (!releaseThemeName) return
-    const res = await window.api.shell.copy(releaseThemeName)
-    if (res?.ok) message.success(`已复制 release 主题名：${releaseThemeName}`)
-    else message.error('复制失败')
   }
 
   // 删除线上主题：本地只存 theme id，先拉主题名（顺带确认主题还存在），再弹红色二次确认后执行。
@@ -3441,37 +3247,6 @@ function ProjectPanel({ project, onAction, active, embedded, releaseThemeName, t
         <InfoField label="preview_key" value={project.previewKey} copyable />
       </div>
 
-      {/* release 主题名：与当前开发分支绑定（创建 release 时保存）；有值才可复制 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }} onClick={(e) => e.stopPropagation()}>
-        <Tooltip
-          title={
-            releaseThemeName
-              ? '复制主题名称，去 Shopify 后台手动新建主题'
-              : '当前分支尚未绑定 release 主题名；在「Git 流程 → 创建 release」填写活动名称与负责人后自动绑定'
-          }
-        >
-          <span>
-            <Button size="small" disabled={!releaseThemeName} onClick={copyReleaseThemeName}>
-              复制 release 主题名
-            </Button>
-          </span>
-        </Tooltip>
-        {releaseThemeName && (
-          <Text
-            style={{
-              fontSize: 12,
-              flex: 1,
-              minWidth: 0,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {releaseThemeName}
-          </Text>
-        )}
-      </div>
-
       {/* 操作：JSON 改动 / 提测 / 删除线上主题 / 编辑 / 删除本地项目（整行 stopPropagation，避免点按钮误触发卡片切换） */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }} onClick={(e) => e.stopPropagation()}>
         <Space size={6}>
@@ -3520,6 +3295,8 @@ function AboutModal({ open, onClose, onOpenReleases }) {
     ['git', info?.git],
     ['Electron', info?.electron],
     ['Node', info?.node],
+    // 跑 @shopify/cli 的系统 Node；fallback=true 时提示安装（与页面顶部告警同源）
+    ['系统 Node', info?.systemNode?.fallback ? '未找到（shopify 功能不可用）' : info?.systemNode?.path],
   ]
   return (
     <Modal title="关于 Shopify 工具箱" open={open} onCancel={onClose} footer={null} destroyOnClose>
@@ -3549,15 +3326,25 @@ export default function Repos() {
   const [workspaceDir, setWorkspaceDir] = useState('')
   const [repos, setRepos] = useState([])
   const [repoOrder, setRepoOrder] = useState([]) // 用户拖拽自定义的仓库顺序（path 数组），持久化于 settings.repoOrder
-  // release 主题名绑定表：repoPath → { 分支名 → 主题名 }，持久化于 settings.releaseThemes。
-  // 创建 release 弹窗提交成功时写入（主题名绑定到当时的开发分支），仓库卡片据此启用「复制 release 主题名」
-  const [releaseThemes, setReleaseThemes] = useState({})
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [defaultEditor, setDefaultEditor] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
+  const [nodeFallback, setNodeFallback] = useState(false)
+  // 启动自检：未找到系统 Node 时 shopify 相关功能（复制 live 主题/删除主题/主题信息）会静默失败，
+  // 置顶常驻提示安装（Windows 分发给未装 Node 的用户时高发）
+  useEffect(() => {
+    window.api.system
+      .versions()
+      .then((v) => setNodeFallback(!!v?.systemNode?.fallback))
+      .catch(() => {})
+  }, [])
+  const openNodeDownload = async () => {
+    const r = await window.api.shell.openExternal('https://nodejs.org/en/download')
+    if (!r?.ok) message.error('打开 Node.js 下载页失败')
+  }
   // 不再自动检测更新：统一引导用户到 GitHub Release 页面下载安装包
   const openReleasesPage = async () => {
     const r = await window.api.shell.openExternal(GITHUB_RELEASES_URL)
@@ -3568,14 +3355,14 @@ export default function Repos() {
   const [groupsOpen, setGroupsOpen] = useState(false)
   const [templatesOpen, setTemplatesOpen] = useState(false)
   const [gotestFor, setGotestFor] = useState(null) // 提测目标 project
-  const [mergeInfoFor, setMergeInfoFor] = useState(null) // 第④步「获取合并提交信息」目标 repo
+  const [mergeInfoFor, setMergeInfoFor] = useState(null) // 第③步「获取合并提交信息」目标 repo
 
   const [jsonModal, setJsonModal] = useState(null) // { title, files }
   const [editRepo, setEditRepo] = useState(null) // { mode:'init'|'save', repo }
   const [cloneable, setCloneable] = useState([]) // 模板 _github 项目 + 是否已存在（供「创建项目」查重）
   const [createProjectOpen, setCreateProjectOpen] = useState(false)
   const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false)
-  const [gitModal, setGitModal] = useState(null) // { mode:'branch'|'release', repo }
+  const [gitModal, setGitModal] = useState(null) // { mode:'branch', repo }
   const [editProject, setEditProject] = useState(null) // 编辑本地项目
 
   // 刷新「创建项目」可选模板（带 _github 且未在工作区存在的）
@@ -3617,16 +3404,6 @@ export default function Repos() {
     window.api.settings.set({ repoOrder: newPaths })
   }, [])
 
-  // 创建 release 时把主题名绑定到「仓库 + 当前开发分支」（settings:set 是浅合并，
-  // 嵌套的 releaseThemes 需先读最新值再整块写回，避免并发保存互相覆盖）
-  const saveReleaseTheme = useCallback(async (repoPath, branch, themeName) => {
-    const s = await window.api.settings.get()
-    const prev = s?.releaseThemes || {}
-    const next = { ...prev, [repoPath]: { ...(prev[repoPath] || {}), [branch]: themeName } }
-    const res = await window.api.settings.set({ releaseThemes: next })
-    if (res?.ok) setReleaseThemes(next)
-  }, [])
-
   const refreshProjects = useCallback(async () => {
     const res = await window.api.shops.ls()
     if (res.ok) setProjects(res.data || [])
@@ -3642,7 +3419,6 @@ export default function Repos() {
       const s = await window.api.settings.get()
       setWorkspaceDir(s?.workspaceDir || '')
       setDefaultEditor(s?.defaultEditor || '')
-      setReleaseThemes(s?.releaseThemes || {})
       setLoading(false)
       if (s?.workspaceDir) {
         await scan(s.workspaceDir)
@@ -3712,7 +3488,7 @@ export default function Repos() {
     else if (type === 'save') setEditRepo({ mode: 'save', repo: payload })
     else if (type === 'json') setJsonModal(payload)
     else if (type === 'checkout') checkoutBranch(payload.repo.path, payload.branch)
-    else if (type === 'branch' || type === 'release') setGitModal({ mode: type, repo: payload })
+    else if (type === 'branch') setGitModal({ mode: 'branch', repo: payload })
     else if (type === 'gotest') setGotestFor(payload)
     else if (type === 'mergeInfo') setMergeInfoFor(payload)
   }
@@ -3969,6 +3745,25 @@ export default function Repos() {
         </Space>
       </div>
 
+      {nodeFallback && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="未检测到系统 Node.js"
+          description={
+            <Space direction="vertical" size={4}>
+              <Text style={{ fontSize: 12 }}>
+                主题复制 / 删除 / 信息等 shopify 功能依赖系统 Node.js（≥22）运行，当前机器未找到，相关操作会失败。安装后重启本应用即可。
+              </Text>
+              <Button size="small" type="primary" onClick={openNodeDownload}>
+                去官网安装 Node.js
+              </Button>
+            </Space>
+          }
+        />
+      )}
+
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
         <Title level={5} style={{ margin: 0 }}>
           Git 仓库（{repos.length}）
@@ -3995,7 +3790,6 @@ export default function Repos() {
               onAction={repoAction}
               onProjectAction={projectAction}
               defaultEditor={defaultEditor}
-              releaseThemes={releaseThemes}
             />
           ))}
         </Masonry>
@@ -4109,26 +3903,12 @@ export default function Repos() {
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} onOpenReleases={openReleasesPage} />
 
 
-      {/* 拉取分支 / 创建 release */}
+      {/* 拉取分支 */}
       {gitModal?.mode === 'branch' && (
         <CreateBranchModal
           open
           contacts={contacts}
           repo={gitModal.repo}
-          onClose={() => setGitModal(null)}
-          onDone={() => {
-            const path = gitModal.repo.path
-            setGitModal(null)
-            refreshRepo(path)
-          }}
-        />
-      )}
-      {gitModal?.mode === 'release' && (
-        <CreateReleaseModal
-          open
-          repo={gitModal.repo}
-          contacts={contacts}
-          onSaveThemeName={saveReleaseTheme}
           onClose={() => setGitModal(null)}
           onDone={() => {
             const path = gitModal.repo.path

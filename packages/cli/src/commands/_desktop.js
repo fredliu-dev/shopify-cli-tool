@@ -33,11 +33,15 @@ function findMacApp() {
   return null
 }
 
-/** Windows：NSIS 默认装到 %LOCALAPPDATA%\<APP_NAME>；Program Files 兜底。 */
+/** Windows：NSIS 默认（oneClick、perMachine=false）装到 %LOCALAPPDATA%\Programs\<APP_NAME>；其余位置兜底。 */
 function findWinApp() {
   const exe = `${APP_NAME}.exe`
   const candidates = []
-  if (process.env.LOCALAPPDATA) candidates.push(join(process.env.LOCALAPPDATA, APP_NAME, exe))
+  if (process.env.LOCALAPPDATA) {
+    // electron-builder NSIS 的默认安装目录带 Programs 这一层，必须放首位
+    candidates.push(join(process.env.LOCALAPPDATA, 'Programs', APP_NAME, exe))
+    candidates.push(join(process.env.LOCALAPPDATA, APP_NAME, exe))
+  }
   if (process.env['ProgramFiles']) candidates.push(join(process.env['ProgramFiles'], APP_NAME, exe))
   if (process.env['ProgramFiles(x86)']) candidates.push(join(process.env['ProgramFiles(x86)'], APP_NAME, exe))
   return candidates.find(existsSync) || null
@@ -62,19 +66,21 @@ export function launchApp() {
   if (process.platform === 'darwin') {
     spawn('open', [p], { detached: true, stdio: 'ignore' }).unref()
   } else if (process.platform === 'win32') {
-    spawn('cmd', ['/c', 'start', '', p], { detached: true, stdio: 'ignore' }).unref()
+    // 直接 spawn exe 路径（libuv 负责加引号），不绕 cmd start——后者会对 %、& 等元字符二次解释
+    spawn(p, [], { detached: true, stdio: 'ignore' }).unref()
   } else {
     return { ok: false }
   }
   return { ok: true, path: p }
 }
 
-/** 用系统默认方式打开文件（macOS `open` / Windows `start`）；用于下载后打开安装包。 */
+/** 用系统默认方式打开文件（macOS `open` / Windows 资源管理器）；用于下载后打开安装包。 */
 export function openFile(p) {
   if (process.platform === 'darwin') {
     spawn('open', [p], { detached: true, stdio: 'ignore' }).unref()
   } else if (process.platform === 'win32') {
-    spawn('cmd', ['/c', 'start', '', p], { detached: true, stdio: 'ignore' }).unref()
+    // explorer.exe 打开文件等同双击，且不会像 cmd start 那样解释路径里的元字符
+    spawn('explorer.exe', [p], { detached: true, stdio: 'ignore' }).unref()
   }
 }
 
