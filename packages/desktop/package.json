@@ -17,6 +17,7 @@
     "@shopify-cli-tool/core": "workspace:*",
     "@shopify/cli": "^4.5.2",
     "adm-zip": "^0.6.0",
+    "echarts": "^6.1.0",
     "smol-toml": "^1.7.1"
   },
   "devDependencies": {

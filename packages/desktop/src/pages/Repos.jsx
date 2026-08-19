@@ -29,6 +29,7 @@ import {
   ArrowRightOutlined,
   CodeOutlined,
   DashboardOutlined,
+  DeploymentUnitOutlined,
   DownloadOutlined,
   ExclamationCircleOutlined,
   EyeOutlined,
@@ -2719,6 +2720,12 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
   // 当前生效（toml dev 段对应）的项目：仅用于面板「当前生效」标识，不改变展示顺序
   const matchedId = repo.matched?.id
 
+  // 引用图：打开独立窗口（标题=仓库名，窗口内自己加载数据/显示进度/支持模糊搜索）；
+  // 同仓库重复点击聚焦已开窗口，主窗口不再 loading
+  const openDepGraph = async () => {
+    const res = await window.api.repos.openDepGraph({ dir: repo.path, name: repo.name })
+    if (!res.ok) message.error(res.error || '打开失败')
+  }
 
   return (
     <Card
@@ -2875,6 +2882,11 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
                 </Tooltip>
               </>
             )}
+            <Tooltip title="在新窗口打开文件引用关系图（支持文件名模糊搜索，结果缓存）">
+              <Button size="small" icon={<DeploymentUnitOutlined />} onClick={openDepGraph}>
+                引用图
+              </Button>
+            </Tooltip>
           </Space>
         </div>
 

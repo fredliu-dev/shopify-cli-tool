@@ -16,6 +16,20 @@ const lastLine = (s) =>
 /** 把消息推给渲染层（取首个窗口；桌面端只有一个主窗口）。 */
 const send = (channel, payload) => BrowserWindow.getAllWindows()[0]?.webContents.send(channel, payload)
 
+/** 推送给全部窗口：引用图是独立窗口，进度事件不能再只发首个（主）窗口。 */
+const broadcast = (channel, payload) => {
+  for (const w of BrowserWindow.getAllWindows()) {
+    try {
+      w.webContents.send(channel, payload)
+    } catch {
+      /* 窗口销毁瞬间：跳过 */
+    }
+  }
+}
+
+/* -------- 引用图独立窗口（每仓库一个，重复点击聚焦已有窗口） -------- */
+const depWindows = new Map() // repoPath -> BrowserWindow
+
 /* -------- 文件监听：配置/templates 变动后重取该仓库状态并推给渲染层 -------- */
 const watchers = new Map() // repoPath -> FSWatcher[]
 const debounce = new Map() // repoPath -> timer
@@ -150,6 +164,63 @@ export function registerReposIpc() {
       // 监听工作区目录本身：子目录（仓库）新增/删除后实时重扫
       watchWorkspace(dir, core)
       return { ok: true, data }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 打开引用图独立窗口（标题=仓库名，hash 路由 #/dep-graph 渲染专用页面）；
+  // 同仓库已开过则聚焦，不重复开
+  ipcMain.handle('repos:openDepGraph', (_evt, { dir, name }) => {
+    try {
+      const existed = depWindows.get(dir)
+      if (existed && !existed.isDestroyed()) {
+        if (existed.isMinimized()) existed.restore()
+        existed.focus()
+        return { ok: true }
+      }
+      const win = new BrowserWindow({
+        width: 1200,
+        height: 800,
+        title: name || '文件引用关系',
+        backgroundColor: '#0d0d0f',
+        webPreferences: {
+          preload: join(__dirname, '../preload/index.js'),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: false,
+        },
+      })
+      depWindows.set(dir, win)
+      win.on('closed', () => depWindows.delete(dir))
+      const hash = `#/dep-graph?${new URLSearchParams({ dir, name: name || '' }).toString()}`
+      if (process.env.ELECTRON_RENDERER_URL) {
+        win.loadURL(`${process.env.ELECTRON_RENDERER_URL}/${hash}`)
+      } else {
+        win.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+      }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 扫描仓库内 Shopify 主题文件的静态引用关系（render/section/asset_url 等），供前端画关系图。
+  // 默认读缓存（上次扫描结果，秒开）；force=true 清缓存重扫。
+  // 扫描进度经 repos:depGraphProgress 广播到全部窗口（引用图是独立窗口，首个窗口不一定是它）。
+  ipcMain.handle('repos:depGraph', async (_evt, { dir, force }) => {
+    const { scanThemeDeps, loadDepGraphCache, saveDepGraphCache } = await load()
+    try {
+      if (!force) {
+        const cached = loadDepGraphCache()[dir]
+        if (cached) return { ok: true, cached: true, savedAt: cached.savedAt, data: cached.data }
+      }
+      const res = await scanThemeDeps(dir, {
+        onProgress: (p) => broadcast('repos:depGraphProgress', { dir, ...p }),
+      })
+      // 空结果（非主题仓库）不缓存，避免下次点击直接命中空缓存、无法重试
+      if (res.ok && res.data?.nodes?.length) saveDepGraphCache(dir, res.data)
+      return { ...res, cached: false, savedAt: Date.now() }
     } catch (err) {
       return { ok: false, error: err.message }
     }

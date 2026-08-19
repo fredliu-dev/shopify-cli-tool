@@ -33,6 +33,14 @@ contextBridge.exposeInMainWorld('api', {
   repos: {
     scan: (dir) => ipcRenderer.invoke('repos:scan', dir),
     status: (repoPath) => ipcRenderer.invoke('repos:status', repoPath),
+    openDepGraph: (opts) => ipcRenderer.invoke('repos:openDepGraph', opts),
+    depGraph: (opts) => ipcRenderer.invoke('repos:depGraph', opts),
+    // 引用图扫描进度（主进程推送 { dir, stage, current, total }，按 dir 过滤自己的仓库）
+    onDepGraphProgress: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('repos:depGraphProgress', listener)
+      return () => ipcRenderer.removeListener('repos:depGraphProgress', listener)
+    },
     save: (opts) => ipcRenderer.invoke('repos:save', opts),
     copyLive: (opts) => ipcRenderer.invoke('repos:copyLive', opts),
     themeInfo: (opts) => ipcRenderer.invoke('repos:themeInfo', opts),

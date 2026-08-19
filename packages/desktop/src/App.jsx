@@ -3,10 +3,18 @@ import { ConfigProvider, Layout, theme as antdTheme } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { version } from '../package.json'
 import Repos from './pages/Repos.jsx'
+import DepGraphPage from './pages/DepGraph.jsx'
+
+// 引用图独立窗口（#/dep-graph?dir=...&name=...）复用同一入口：按 hash 分流渲染，
+// 不带主框架（Layout/光晕背景），窗口标题为仓库名（由 DepGraphPage 设置）。
+const isDepGraphRoute = () => window.location.hash.startsWith('#/dep-graph')
 
 // 窗口标题带版本号：读 desktop package.json，每次发版改 version 即自动跟上
-// （Electron 原生标题由 main.js 用 app.getVersion() 设置；这里同步页面 <title>，避免页面加载后覆盖回去）
-document.title = `Shopify 工具箱 v${version}`
+// （Electron 原生标题由 main.js 用 app.getVersion() 设置；这里同步页面 <title>，避免页面加载后覆盖回去）。
+// 引用图窗口的标题是仓库名，不在此覆盖（由 DepGraphPage 的 effect 设置）。
+if (!isDepGraphRoute()) {
+  document.title = `Shopify 工具箱 v${version}`
+}
 
 const { Content } = Layout
 
@@ -36,21 +44,25 @@ const theme = {
 export default function App() {
   return (
     <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }} theme={theme}>
-      <Layout style={{ height: '100vh' }}>
-        <Content
-          style={{
-            padding: 20,
-            overflow: 'auto',
-            background: '#0d0d0f',
-            // 彩色光晕：毛玻璃卡片 blur 后透出的色彩来源（iOS 控制中心式背景）
-            backgroundImage:
-              'radial-gradient(circle at 12% 18%, rgba(22,119,255,0.14), transparent 38%), radial-gradient(circle at 88% 12%, rgba(114,46,241,0.12), transparent 36%), radial-gradient(circle at 78% 88%, rgba(19,194,194,0.10), transparent 40%)',
-            backgroundAttachment: 'fixed',
-          }}
-        >
-          <Repos />
-        </Content>
-      </Layout>
+      {isDepGraphRoute() ? (
+        <DepGraphPage />
+      ) : (
+        <Layout style={{ height: '100vh' }}>
+          <Content
+            style={{
+              padding: 20,
+              overflow: 'auto',
+              background: '#0d0d0f',
+              // 彩色光晕：毛玻璃卡片 blur 后透出的色彩来源（iOS 控制中心式背景）
+              backgroundImage:
+                'radial-gradient(circle at 12% 18%, rgba(22,119,255,0.14), transparent 38%), radial-gradient(circle at 88% 12%, rgba(114,46,241,0.12), transparent 36%), radial-gradient(circle at 78% 88%, rgba(19,194,194,0.10), transparent 40%)',
+              backgroundAttachment: 'fixed',
+            }}
+          >
+            <Repos />
+          </Content>
+        </Layout>
+      )}
     </ConfigProvider>
   )
 }
