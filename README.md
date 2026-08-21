@@ -1,7 +1,22 @@
 # shopify-cli-tool
 
-对 [`@shopify/cli`](https://www.npmjs.com/package/@shopify/cli) 的美化封装。兼容所有原生 shopify 命令，并围绕主题开发流程提供了一组更易用的自定义命令（所有命令需要再项目根目录执行）。
-***当前工具只支持us，ca，de三个项目配置模版***
+对 [`@shopify/cli`](https://www.npmjs.com/package/@shopify/cli) 的美化封装，提供终端和桌面两种使用方式：
+
+- **命令行工具 `shop`**：兼容所有原生 shopify 命令，并围绕主题开发流程提供了一组更易用的自定义命令（所有命令需要在项目根目录执行）。
+- **桌面应用「Shopify 工具箱」**：把同一条开发流程搬进图形界面，见[六、桌面应用](#六桌面应用shopify-工具箱)。
+
+***当前工具只支持 us、ca、de 三个项目配置模版***
+
+本仓库是 pnpm monorepo，包含三个包：
+
+| 目录 | 包名 | 说明 | 分发 |
+|---|---|---|---|
+| [packages/cli](packages/cli/) | `shopify-cli-tool` | 终端命令 `shop` | npm |
+| [packages/core](packages/core/) | `@shopify-cli-tool/core` | CLI 与桌面应用共用的核心逻辑（headless） | npm |
+| [packages/desktop](packages/desktop/) | `@shopify-cli-tool/desktop` | Electron 桌面应用「Shopify 工具箱」 | GitHub Release（macOS / Windows） |
+
+参与开发请看 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
 ## 一、背景
 ### 1.项目通常不上传配置文件shopify.theme.toml到仓库，手动创建耗时且容易出错，从其他地方复制耗时
 命令：shop init
@@ -51,6 +66,8 @@ npm install -g shopify-cli-tool
 ```
 
 要求 Node.js >= 22。
+
+不想用命令行？可以直接下载[桌面应用](#六桌面应用shopify-工具箱)，图形界面完成同样的流程。
 
 ### 1. 初始化配置
 
@@ -318,3 +335,45 @@ shop theme push
 | `project_desc` | 项目描述（选填） |
 
 工具自带 us / ca / de / empty 等模板，`shop init` 时按需选择。
+
+## 六、桌面应用（Shopify 工具箱）
+
+命令行之外，本仓库还提供一个 Electron 桌面应用，把同一条主题开发流程（拉分支 → 开发 → 提测 → 合并）搬进图形界面。桌面应用与 CLI 共用 `@shopify-cli-tool/core`，本地项目（`projects.json`）、钉钉配置（`dingtalk.json`）和用户模板都存放在同一数据目录，两边互通。
+
+### 安装
+
+到 [GitHub Releases](https://github.com/fredliu-dev/shopify-cli-tool/releases) 下载对应平台的安装包（macOS `.dmg` / Windows `.exe`）。已装旧版的用户启动应用时会自动检查并提示更新。
+
+### 功能
+
+#### 仓库工作台
+
+- 选择本地工作区目录后自动扫描其中的 git 仓库，以卡片展示当前分支、`shopify.theme.toml` 状态与绑定的本地项目。
+- 仓库卡片：切换分支（本地 / 远程分组，标注每个分支绑定的项目数）、用编辑器打开目录（自动检测本机编辑器，可设默认）、直达 GitHub 当前分支页和 Shopify 主题后台。
+- 未初始化的仓库可「创建配置」，已有配置但缺 dev 环境的可「合并 dev 环境」（即 `shop init` 的桌面版）；「本地保存」即 `shop add`。
+
+#### 开发流程（仓库卡片上的三步）
+
+1. **拉取分支**：选类型（新功能 / 缺陷修复 / 紧急热修复）、基准分支（展开自动 fetch origin）、负责人、工单链接，自动命名分支并切换，同时同步配置。
+2. **提测**：多选当前分支下的本地项目，选模板后按项目填充通知内容（可直接改），一键发钉钉群，可 @ 人员。
+3. **合并信息**：上线前汇总多个项目的标题 / 工单生成合并通知；并可继续**提交 Pull Request**（类型 / 标题 / 目标分支 / reviewers），创建成功后展示 PR 链接并复制审核话术。
+
+#### 项目管理
+
+- 项目面板展示 store / theme / port / preview_key（theme、preview_key 点击复制），支持编辑、删除。
+- 「JSON改动」列出当前分支改动里的 `.json` 文件，方便核对页面配置变更。
+- 「删除主题」用 shopify 删除该 theme ID 对应的线上主题，并连带清理引用它的本地项目（红色二次确认）。
+- 支持复制线上 live 主题为新草稿；「创建项目」可从模板的 `_github` 仓库一键克隆（自动查重）。
+
+#### 文件引用关系图
+
+- 仓库卡片「引用图」按钮在新窗口打开主题文件引用关系图（echarts）：扫描 `render` / `section` / `asset_url` 等静态引用，按 layout / templates / sections / snippets / assets 目录配色。
+- 顶栏文件名模糊搜索（fzf 风格子序列匹配，如输入 `hro` 命中 `hero.liquid`）定位节点；悬停高亮该文件及其直接相邻节点；空白处拖拽平移、滚轮缩放。
+- 扫描结果有缓存，秒开；「重新扫描」强制重扫并覆盖缓存。
+
+#### 其他
+
+- **模板管理**：内置模板只读，可新建用户模板（写入数据目录 `templates/`，`shop init` 也能选到）。
+- **人员 / 通知群 / 信息模板管理**：维护钉钉手机号、群 webhook（加签 secret）和消息模板。
+- **本地配置**：一键导出整个数据目录为 zip 备份、迁移。
+- **关于**：查看客户端 / shopify CLI / git / Electron / Node 版本。

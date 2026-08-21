@@ -5,9 +5,13 @@
  *   index.html#/dep-graph?dir=<仓库路径>&name=<仓库名>
  * 数据走 repos:depGraph（默认读缓存，秒开）；「重新扫描」force 重扫覆盖缓存。
  * 顶栏支持文件名模糊搜索（fzf 风格子序列匹配，如 hro 命中 hero.liquid），选中后高亮定位节点。
+ * 图铺满整个画布，整体半透明（0.5）：悬停或选中任一文件时，它与直接相邻的节点/边高亮为不透明；
+ * 画布任意空白处可拖拽平移、滚轮缩放（echarts 6.1 默认只在图内容包围盒内允许 roam，需 roamTrigger 解除）。
+ * 拖拽节点后圆点仍是正圆 —— view 坐标系默认把数据包围盒非等比拉伸铺满画布（圆点会被拉成椭圆），
+ * 由两个隐形锚点节点把包围盒钉成画布等比框来保证等比拟合（见 frameAnchors）。
  */
 import { Alert, App, AutoComplete, Button, Descriptions, Empty, Progress, Space, Spin, Tag, Tooltip, Typography } from 'antd'
-import { ReloadOutlined, SearchOutlined } from '@ant-design/icons'
+import { CloseOutlined, InfoCircleOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import * as echarts from 'echarts/core'
 import { GraphChart } from 'echarts/charts'
 import { LegendComponent, TooltipComponent } from 'echarts/components'
@@ -31,7 +35,12 @@ const DEP_DIR_META = [
 // 节点 id / path（仓库相对路径）取首段即所属主题目录；path 缺失（旧缓存）时回退 id
 const depDirOf = (id = '') => (id.includes('/') ? id.slice(0, id.indexOf('/')) : id)
 
-// 关系图限制说明（静态扫描的边界），侧栏常驻展示
+// 半透明基调：整个图默认 0.5；标签按 0.82×0.5 折算，保持原有「标签略淡于圆点」的层级
+const DIM_OPACITY = 0.5
+const LABEL_DIM_COLOR = 'rgba(255,255,255,0.41)'
+const LABEL_LIT_COLOR = 'rgba(255,255,255,0.95)'
+
+// 关系图限制说明（静态扫描的边界），浮层面板常驻展示
 const DEP_LIMITS = [
   "只识别字面量引用：{% render 'x' %} / include / section / sections 标签、asset_url 过滤器、CSS 的 @import 与 url()；用变量或拼接出来的动态引用（如 {% render name %}）无法识别，图中会缺失。",
   'JSON 模板与 section 分组只取 sections.<key>.type 指向的 section 文件；其中 blocks[].type 是区块类型、不指向具体文件，不计入引用。',
@@ -123,16 +132,68 @@ function livePositions(chart) {
   return out
 }
 
+const sameHover = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+
+// —— 等比适配锚点 ——
+// view 坐标系把「数据包围盒」拉伸铺满画布（graph 无 preserveAspect，宽高各自缩放），
+// 数据宽高比 ≠ 画布宽高比时圆点被拉成椭圆 —— 拖拽节点把包围盒往一侧撑长后尤其明显（变扁）。
+// 解法：附加两个隐形锚点数据项，把包围盒钉成与画布等宽高比的框（内容变大时框按内容等比外扩），
+// 拟合恒为等比，圆点始终是正圆；包围盒尺寸不变时视图也完全不动。
+const FRAME_ANCHOR_A = '__frame_a__'
+const FRAME_ANCHOR_B = '__frame_b__'
+const FRAME_MARGIN = 1.04 // 框比内容大 4%，内容不贴边（标签也能露出）
+
+/** 按当前内容包围盒 + 画布宽高比计算锚点框的两个角点数据项；无有效坐标时返回 null。 */
+function frameAnchors(chart, items) {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  let seen = 0
+  for (const it of items) {
+    if (!Number.isFinite(it.x) || !Number.isFinite(it.y)) continue
+    seen++
+    if (it.x < minX) minX = it.x
+    if (it.x > maxX) maxX = it.x
+    if (it.y < minY) minY = it.y
+    if (it.y > maxY) maxY = it.y
+  }
+  if (!seen) return null
+  const aspect = chart.getWidth() / chart.getHeight()
+  const cx = (minX + maxX) / 2
+  const cy = (minY + maxY) / 2
+  const fw = Math.max((maxX - minX) * FRAME_MARGIN, (maxY - minY) * aspect * FRAME_MARGIN, 60)
+  const fh = fw / aspect
+  const mk = (name, x, y) => ({
+    name,
+    x,
+    y,
+    category: 0,
+    symbolSize: 0.01,
+    silent: true,
+    itemStyle: { opacity: 0 },
+    label: { show: false },
+  })
+  return [mk(FRAME_ANCHOR_A, cx - fw / 2, cy - fh / 2), mk(FRAME_ANCHOR_B, cx + fw / 2, cy + fh / 2)]
+}
+
 /**
- * 全量重设 series 数据，三件事一起做：
+ * 全量重设 series 数据，四件事一起做：
  * 1) 搜索过滤：未命中（含一跳关联）的节点/边直接从图里移除 —— 不能用透明占位，
  *    graph 节点的 per-item silent 不生效，透明节点照样会被 hover 出 tooltip；
  * 2) 命中节点标签加粗，与仅为「关联」保留的邻居区分；清空搜索恢复全部；
  * 3) 坐标固化：setOption 的 data 是整体替换，坐标按名字缓存后每次带上，
- *    过滤/恢复/拖拽后节点都不跳位。
+ *    过滤/恢复/拖拽后节点都不跳位；
+ * 4) 高亮（半透明主题的核心）：opts.hover（悬停的节点/边）与 opts.pinned（点击/搜索选中的文件）
+ *    的「一跳关系子图」—— 本身 + 直接相邻的节点和边 —— 以不透明度 1 显示，其余维持 0.5。
+ *    手动重设 data 实现而非 emphasis 的 focus/blur 状态机：后者在快速滑过节点时偶发不恢复
+ *    （echarts 6.1 实测仍在），表现为高亮卡死或线消失；手动重设是纯数据、无状态可卡。
+ * 5) 等比锚点（见 frameAnchors）：全量重设会触发 view 坐标系按数据包围盒重新拟合，
+ *    无锚点时拖拽节点撑大包围盒 → 非等比拉伸 → 圆点变扁；锚点把包围盒钉成画布等比框。
  * freeze=true 时同时把布局切成 none（初始力导向排布完成后冻结：拖拽不被弹回、不触发全场重收敛）。
  */
-function applySeries(chart, data, keep, match, freeze = false) {
+function applySeries(chart, data, keep, match, opts = {}) {
+  const { freeze = false, hover = null, pinned = null } = opts
   let cache = nodePosCache.get(chart)
   if (!cache) {
     cache = new Map()
@@ -140,10 +201,41 @@ function applySeries(chart, data, keep, match, freeze = false) {
   }
   for (const [name, p] of livePositions(chart)) cache.set(name, p)
 
+  const shownEdges = keep ? data.edges.filter((e) => keep.has(e.source) && keep.has(e.target)) : data.edges
+
+  // 高亮集合：悬停/选中对象直接相连的边（及对端节点）
+  let litNodes = null
+  let litEdges = null
+  if (hover || pinned) {
+    litNodes = new Set()
+    litEdges = new Set()
+    for (const e of shownEdges) {
+      const hit =
+        (hover?.type === 'node' && (e.source === hover.name || e.target === hover.name)) ||
+        (hover?.type === 'edge' && e.source === hover.a && e.target === hover.b) ||
+        (pinned && (e.source === pinned || e.target === pinned))
+      if (hit) {
+        litEdges.add(`${e.source} ${e.target}`)
+        litNodes.add(e.source)
+        litNodes.add(e.target)
+      }
+    }
+    if (hover?.type === 'node') litNodes.add(hover.name)
+    if (pinned) litNodes.add(pinned)
+  }
+
   const dataArray = buildChartNodes(data)
     .filter((n) => !keep || keep.has(n.name))
     .map((n) => {
-      const item = { ...n, label: { fontWeight: match?.has(n.name) ? 600 : 400 } }
+      const lit = litNodes?.has(n.name)
+      const label = { fontWeight: match?.has(n.name) ? 600 : 400 }
+      const item = { ...n, label }
+      if (lit) {
+        label.color = LABEL_LIT_COLOR
+        item.itemStyle = { opacity: 1 }
+        // 悬停本体额外放大一点（选中钉住的不放大，避免持续变大碍眼）
+        if (hover?.type === 'node' && hover.name === n.name) item.symbolSize = Math.round(n.symbolSize * 1.4)
+      }
       const p = cache.get(n.name)
       if (p) {
         item.x = p[0]
@@ -151,7 +243,12 @@ function applySeries(chart, data, keep, match, freeze = false) {
       }
       return item
     })
-  const links = keep ? data.edges.filter((e) => keep.has(e.source) && keep.has(e.target)) : data.edges
+  // 锚点追加在末尾（lastSentData 按下标反查节点名，锚点恒在同样位置），不受搜索过滤影响
+  const anchors = frameAnchors(chart, dataArray)
+  if (anchors) dataArray.push(...anchors)
+  const links = litEdges
+    ? shownEdges.map((e) => (litEdges.has(`${e.source} ${e.target}`) ? { ...e, lineStyle: { opacity: 1, width: 2.4 } } : e))
+    : shownEdges
 
   lastSentData.set(chart, dataArray)
   chart.setOption({ series: [{ ...(freeze ? { layout: 'none' } : {}), data: dataArray, links }] })
@@ -164,12 +261,15 @@ export default function DepGraphPage() {
   const [loading, setLoading] = useState(true)
   const [progress, setProgress] = useState(null) // { current, total } 扫描进度
   const [empty, setEmpty] = useState(false) // 非主题仓库（无主题目录）
-  const [sel, setSel] = useState(null) // 点击/搜索选中的节点（侧栏详情）
+  const [sel, setSel] = useState(null) // 点击/搜索选中的节点（浮层详情）
+  const [panelOpen, setPanelOpen] = useState(false) // 右上角浮层面板（详情+说明），默认收起不挡画布
   const [search, setSearch] = useState('')
   const chartDivRef = useRef(null)
-  const chartRef = useRef(null) // 供搜索选中时 dispatchAction 高亮
-  const lastHighlightRef = useRef(null) // 上一个高亮节点（切换前先 downplay）
+  const chartRef = useRef(null) // 供搜索选中/悬停时重设 series
   const searchMatchRef = useRef(null) // 当前搜索命中的节点 id 集合（冻结布局时也要带上）
+  const hoverRef = useRef(null) // 当前悬停的节点/边（重建 series 时保持高亮）
+  const pinnedRef = useRef(null) // 点击/搜索选中的文件名（钉住其关系子图高亮）
+  const bakedRef = useRef(false) // 力导向是否已冻结（冻结前不响应悬停高亮，避免干扰布局）
 
   const stats = data?.stats || {}
 
@@ -223,10 +323,13 @@ export default function DepGraphPage() {
     if (!data?.nodes?.length) return
     const el = chartDivRef.current
     if (!el) return
-    // useDirtyRect:false —— 全帧重绘：快速悬停切换强调态时，脏矩形增量渲染偶发漏重绘，
+    // useDirtyRect:false —— 全帧重绘：快速悬停切换高亮态时，脏矩形增量渲染偶发漏重绘，
     // 表现为部分线「消失」；图规模不大，全帧重绘的代价可以接受
     const chart = echarts.init(el, null, { useDirtyRect: false })
     chartRef.current = chart
+    hoverRef.current = null
+    pinnedRef.current = null
+    bakedRef.current = false
     const chartNodes = buildChartNodes(data)
     const fileNameOf = {}
     chartNodes.forEach((n) => {
@@ -246,6 +349,12 @@ export default function DepGraphPage() {
         {
           top: 0,
           data: DEP_DIR_META.map((d) => d.key),
+          // 图内容铺满画布后会从图例底下穿过，给图例垫一层半透明底保证可读
+          backgroundColor: 'rgba(13,13,15,0.6)',
+          borderColor: 'rgba(255,255,255,0.12)',
+          borderWidth: 1,
+          borderRadius: 4,
+          padding: [4, 8],
           textStyle: { color: 'rgba(255,255,255,0.65)', fontSize: 11 },
         },
       ],
@@ -253,52 +362,113 @@ export default function DepGraphPage() {
         {
           type: 'graph',
           layout: 'force',
+          // 铺满整个画布（默认 80%×80% 居中，四周留白）；
+          // roamTrigger:'global' 让平移/缩放在整个画布生效 —— echarts 6.1 起 roam 只在
+          // 「图内容包围盒内」响应（View.containPoint），图缩小或被移开后空白处就拖不动也缩放不了
+          left: 0,
+          top: 0,
+          right: 0,
+          bottom: 0,
           roam: true,
+          roamTrigger: 'global',
           draggable: true,
           categories: DEP_DIR_META.map((d) => ({ name: d.key, itemStyle: { color: d.color } })),
           data: chartNodes,
           links: data.edges, // source=被引用文件 → target=引用它的文件（箭头指向引用方）
           edgeSymbol: ['none', 'arrow'],
           edgeSymbolSize: 7,
-          lineStyle: { color: 'source', curveness: 0.15, opacity: 0.45, width: 1.2 },
+          // 整体半透明基调；悬停/选中的高亮由 applySeries 重设 data 实现
+          itemStyle: { opacity: DIM_OPACITY },
+          lineStyle: { color: 'source', curveness: 0.15, opacity: DIM_OPACITY, width: 1.2 },
           label: {
             show: true,
             position: 'right',
             distance: 3,
-            color: 'rgba(255,255,255,0.82)',
+            color: LABEL_DIM_COLOR,
             fontSize: 10,
             formatter: (p) => p.data.fileName,
           },
-          // 不用 focus:'adjacency'：悬停节点时其余线会被打入 blur 态近乎消失，
-          // 快速在不同圆点间移动时该状态偶发不恢复，表现为「线不见了」；
-          // 悬停只放大节点本身、加粗压着的线，其余画面保持原样
-          emphasis: { scale: 1.3, lineStyle: { width: 2.6 } },
+          // 关闭原生 emphasis：scale/focus 状态机在快速滑过节点时偶发不恢复（高亮卡死/线消失），
+          // 悬停放大与连线加粗全部改由 applySeries 按数据手动实现
+          emphasis: { disabled: true },
           force: { repulsion: 170, edgeLength: [50, 110], gravity: 0.12, layoutAnimation: false },
         },
       ],
     })
     chart.on('click', (p) => {
-      if (p.dataType === 'node') setSel(p.data)
+      if (p.dataType !== 'node') return
+      pinnedRef.current = p.data.name
+      setSel(p.data)
+      setPanelOpen(true)
+      applySeries(chart, data, searchMatchRef.current?.keep ?? null, searchMatchRef.current?.match ?? null, {
+        hover: hoverRef.current,
+        pinned: pinnedRef.current,
+      })
+    })
+    // 悬停高亮：悬停节点/边时，其一跳关系子图恢复不透明；离开后回到整体 0.5。
+    // mouseout 后延迟 40ms 才复位 —— 鼠标在相邻元素间移动会先 out 后 over，立即复位会闪
+    let hoverResetTimer = null
+    const setHover = (desc) => {
+      if (sameHover(hoverRef.current, desc)) return
+      hoverRef.current = desc
+      if (!bakedRef.current) return // 力导向排布中先不重设，等冻结后由 finished 统一带上
+      applySeries(chart, data, searchMatchRef.current?.keep ?? null, searchMatchRef.current?.match ?? null, {
+        hover: desc,
+        pinned: pinnedRef.current,
+      })
+    }
+    chart.on('mouseover', (p) => {
+      if (hoverResetTimer) {
+        clearTimeout(hoverResetTimer)
+        hoverResetTimer = null
+      }
+      if (p.dataType === 'node') setHover({ type: 'node', name: p.data.name })
+      else if (p.dataType === 'edge') setHover({ type: 'edge', a: p.data.source, b: p.data.target })
+    })
+    chart.on('mouseout', () => {
+      hoverResetTimer = setTimeout(() => setHover(null), 40)
+    })
+    chart.on('globalout', () => {
+      if (hoverResetTimer) clearTimeout(hoverResetTimer)
+      setHover(null)
     })
     // 登记初始数据，供 livePositions 按 dataIndex 反查节点名（bake 冻结时要读全部坐标）
     lastSentData.set(chart, chartNodes)
-    // 力导向排布完成（图表首次空闲）后冻结布局；带上当前搜索过滤状态
-    let baked = false
+    // 力导向排布完成（图表首次空闲）后冻结布局；带上当前搜索过滤与高亮状态。
+    // 冻结后立刻 resize() 一次：坐标系按固化坐标的最终适配（fit）当场完成 ——
+    // 否则它会推迟到下一次全量更新（如悬停离开）时才发生，表现为视图突然跳动一下
     const onFinished = () => {
-      if (baked) return
-      baked = true
-      applySeries(chart, data, searchMatchRef.current?.keep ?? null, searchMatchRef.current?.match ?? null, true)
+      if (bakedRef.current) return
+      bakedRef.current = true
+      applySeries(chart, data, searchMatchRef.current?.keep ?? null, searchMatchRef.current?.match ?? null, {
+        freeze: true,
+        hover: hoverRef.current,
+        pinned: pinnedRef.current,
+      })
+      chart.resize()
     }
     chart.on('finished', onFinished)
-    // 窗口缩放时重算画布
-    const ro = new ResizeObserver(() => chart.resize())
+    // 窗口缩放时重算画布；宽高比变了要跟着重算锚点框（框与画布等比），防抖避免连续全量重设
+    let resizeTimer = null
+    const ro = new ResizeObserver(() => {
+      chart.resize()
+      if (!bakedRef.current) return
+      clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        applySeries(chart, data, searchMatchRef.current?.keep ?? null, searchMatchRef.current?.match ?? null, {
+          hover: hoverRef.current,
+          pinned: pinnedRef.current,
+        })
+      }, 120)
+    })
     ro.observe(el)
     return () => {
+      clearTimeout(hoverResetTimer)
+      clearTimeout(resizeTimer)
       ro.disconnect()
       chart.off('finished', onFinished)
       chart.dispose()
       chartRef.current = null
-      lastHighlightRef.current = null
     }
   }, [data])
 
@@ -322,7 +492,10 @@ export default function DepGraphPage() {
     searchMatchRef.current = searchMatch
     const chart = chartRef.current
     if (!chart || !data?.nodes?.length) return
-    applySeries(chart, data, searchMatch?.keep ?? null, searchMatch?.match ?? null)
+    applySeries(chart, data, searchMatch?.keep ?? null, searchMatch?.match ?? null, {
+      hover: hoverRef.current,
+      pinned: pinnedRef.current,
+    })
   }, [searchMatch, data])
 
   // 搜索候选：与图过滤共用 matchNodes（完整包含优先，无命中才模糊），短文件名优先，最多 50 条
@@ -346,21 +519,20 @@ export default function DepGraphPage() {
       }))
   }, [search, data])
 
-  // 搜索选中：回填文件名到输入框、侧栏展示详情，并在图上高亮该节点（含邻接，先取消上一个高亮）
+  // 搜索选中：回填文件名到输入框、打开浮层详情，并把该文件的关系子图钉在高亮态
   const onSearchSelect = (id) => {
     const node = data?.nodes.find((n) => n.id === id)
     if (!node) return
     setSearch(node.name)
     setSel(node)
+    setPanelOpen(true)
+    pinnedRef.current = id
     const chart = chartRef.current
-    if (chart) {
-      try {
-        if (lastHighlightRef.current) chart.dispatchAction({ type: 'downplay', seriesIndex: 0, name: lastHighlightRef.current })
-        chart.dispatchAction({ type: 'highlight', seriesIndex: 0, name: id })
-        lastHighlightRef.current = id
-      } catch {
-        /* 节点可能刚被重新扫描移除：忽略 */
-      }
+    if (chart && data?.nodes?.length) {
+      applySeries(chart, data, searchMatchRef.current?.keep ?? null, searchMatchRef.current?.match ?? null, {
+        hover: hoverRef.current,
+        pinned: id,
+      })
     }
   }
 
@@ -433,99 +605,126 @@ export default function DepGraphPage() {
         />
       )}
 
-      {/* 主体：左侧关系图 + 右侧详情/限制侧栏 */}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        <div style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          {empty ? (
+      {/* 主体：关系图铺满整个画布区域；详情/限制说明收进右上角浮层（默认收起，不占画布） */}
+      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+        {empty ? (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Empty description="未在该仓库发现 Shopify 主题目录（layout/templates/sections/snippets/assets）">
               <Button type="primary" loading={loading} onClick={() => load(true)}>
                 重新扫描
               </Button>
             </Empty>
-          ) : !data ? (
+          </div>
+        ) : !data ? (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Space direction="vertical" align="center">
               <Spin />
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {progress ? `正在解析文件 ${progress.current}/${progress.total}…` : '正在加载…'}
               </Text>
             </Space>
-          ) : (
-            <div ref={chartDivRef} style={{ width: '100%', height: '100%' }} />
-          )}
-          {searchMatch && searchMatch.match.size === 0 && (
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                pointerEvents: 'none',
-              }}
-            >
-              <Text type="secondary">无匹配文件，清空搜索恢复全部</Text>
+          </div>
+        ) : (
+          <div ref={chartDivRef} style={{ position: 'absolute', inset: 0 }} />
+        )}
+        {searchMatch && searchMatch.match.size === 0 && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              pointerEvents: 'none',
+            }}
+          >
+            <Text type="secondary">无匹配文件，清空搜索恢复全部</Text>
+          </div>
+        )}
+
+        {/* 右上角浮层：选中文件详情 + 限制说明（毛玻璃底，不挡其余画布交互） */}
+        {panelOpen ? (
+          <div
+            style={{
+              position: 'absolute',
+              top: 12,
+              right: 12,
+              width: 300,
+              maxHeight: 'calc(100% - 24px)',
+              overflow: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+              padding: 12,
+              borderRadius: 10,
+              background: 'rgba(18,18,22,0.82)',
+              backdropFilter: 'blur(10px)',
+              WebkitBackdropFilter: 'blur(10px)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              zIndex: 5,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text strong style={{ fontSize: 13 }}>
+                {sel ? '文件详情' : '关系图说明'}
+              </Text>
+              <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => setPanelOpen(false)} />
             </div>
-          )}
-        </div>
+            {sel ? (
+              <Descriptions size="small" column={1} bordered>
+                <Descriptions.Item label="文件名">
+                  <Space size={8}>
+                    <Text strong>{sel.fileName ?? sel.name}</Text>
+                    <Tag style={{ marginInlineEnd: 0 }} color={DEP_DIR_META.find((d) => d.key === selDir)?.color}>
+                      {selDir}
+                    </Tag>
+                  </Space>
+                </Descriptions.Item>
+                <Descriptions.Item label="文件路径">
+                  <Text code style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                    {sel.path || sel.id}
+                  </Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="文件描述">
+                  {sel.desc ? <Text>{sel.desc}</Text> : <Text type="secondary">（无）</Text>}
+                </Descriptions.Item>
+                <Descriptions.Item label="引用统计">
+                  <Text style={{ fontSize: 12 }}>
+                    被引用 {sel.refIn ?? 0} 次 · 引用 {sel.refOut ?? 0} 个文件
+                  </Text>
+                </Descriptions.Item>
+              </Descriptions>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                图整体半透明展示；悬停或点击任一文件（含搜索选中），它及其直接引用关系会高亮为不透明。画布任意空白处可拖拽平移、滚轮缩放，圆点可单独拖动（停在哪就在哪）；搜索时图中保留匹配的文件及其直接关联，清空恢复；圆点越大被引用越多，点图例可隐藏对应目录。
+              </Text>
+            )}
 
-        {/* 侧栏：选中节点详情 + 限制说明 */}
-        <div
-          style={{
-            width: 300,
-            flexShrink: 0,
-            borderLeft: '1px solid rgba(255,255,255,0.08)',
-            padding: 12,
-            overflow: 'auto',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 12,
-          }}
-        >
-          {sel ? (
-            <Descriptions size="small" column={1} bordered>
-              <Descriptions.Item label="文件名">
-                <Space size={8}>
-                  <Text strong>{sel.fileName ?? sel.name}</Text>
-                  <Tag style={{ marginInlineEnd: 0 }} color={DEP_DIR_META.find((d) => d.key === selDir)?.color}>
-                    {selDir}
-                  </Tag>
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="文件路径">
-                <Text code style={{ fontSize: 12, wordBreak: 'break-all' }}>
-                  {sel.path || sel.id}
-                </Text>
-              </Descriptions.Item>
-              <Descriptions.Item label="文件描述">
-                {sel.desc ? <Text>{sel.desc}</Text> : <Text type="secondary">（无）</Text>}
-              </Descriptions.Item>
-              <Descriptions.Item label="引用统计">
-                <Text style={{ fontSize: 12 }}>
-                  被引用 {sel.refIn ?? 0} 次 · 引用 {sel.refOut ?? 0} 个文件
-                </Text>
-              </Descriptions.Item>
-            </Descriptions>
-          ) : (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              点击圆点或搜索选中文件查看详情；搜索时图中保留匹配的文件及其直接关联（引用/被引用，命中文件标签加粗），清空恢复；圆点越大被引用越多，支持拖拽节点（停在哪就在哪）、滚轮缩放，点图例可隐藏对应目录。
-            </Text>
-          )}
-
-          <Alert
-            type="info"
-            showIcon
-            message="关系图的限制（静态扫描，仅供参考）"
-            description={
-              <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {DEP_LIMITS.map((t, i) => (
-                  <li key={i} style={{ fontSize: 12, marginBottom: 3 }}>
-                    {'一二三四五'[i]}、{t}
-                  </li>
-                ))}
-              </ul>
-            }
-          />
-        </div>
+            <Alert
+              type="info"
+              showIcon
+              message="关系图的限制（静态扫描，仅供参考）"
+              description={
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {DEP_LIMITS.map((t, i) => (
+                    <li key={i} style={{ fontSize: 12, marginBottom: 3 }}>
+                      {'一二三四五'[i]}、{t}
+                    </li>
+                  ))}
+                </ul>
+              }
+            />
+          </div>
+        ) : (
+          <Button
+            size="small"
+            icon={<InfoCircleOutlined />}
+            style={{ position: 'absolute', top: 12, right: 12, zIndex: 5 }}
+            onClick={() => setPanelOpen(true)}
+          >
+            详情 / 说明
+          </Button>
+        )}
       </div>
     </div>
   )
