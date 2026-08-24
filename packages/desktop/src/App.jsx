@@ -4,15 +4,17 @@ import zhCN from 'antd/locale/zh_CN'
 import { version } from '../package.json'
 import Repos from './pages/Repos.jsx'
 import DepGraphPage from './pages/DepGraph.jsx'
+import TapdPage from './pages/Tapd.jsx'
 
-// 引用图独立窗口（#/dep-graph?dir=...&name=...）复用同一入口：按 hash 分流渲染，
-// 不带主框架（Layout/光晕背景），窗口标题为仓库名（由 DepGraphPage 设置）。
+// 引用图独立窗口（#/dep-graph?dir=...&name=...）与 TAPD 工单独立窗口（#/tapd）复用同一入口：
+// 按 hash 分流渲染，不带主框架（Layout/光晕背景），窗口标题由各自页面设置。
 const isDepGraphRoute = () => window.location.hash.startsWith('#/dep-graph')
+const isTapdRoute = () => window.location.hash.startsWith('#/tapd')
 
 // 窗口标题带版本号：读 desktop package.json，每次发版改 version 即自动跟上
 // （Electron 原生标题由 main.js 用 app.getVersion() 设置；这里同步页面 <title>，避免页面加载后覆盖回去）。
-// 引用图窗口的标题是仓库名，不在此覆盖（由 DepGraphPage 的 effect 设置）。
-if (!isDepGraphRoute()) {
+// 引用图窗口的标题是仓库名、TAPD 窗口的标题是「TAPD 工单」，均由各自页面的 effect 设置，不在此覆盖。
+if (!isDepGraphRoute() && !isTapdRoute()) {
   document.title = `Shopify 工具箱 v${version}`
 }
 
@@ -44,7 +46,9 @@ const theme = {
 export default function App() {
   return (
     <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }} theme={theme}>
-      {isDepGraphRoute() ? (
+      {isTapdRoute() ? (
+        <TapdPage />
+      ) : isDepGraphRoute() ? (
         <DepGraphPage />
       ) : (
         <Layout style={{ height: '100vh' }}>

@@ -171,13 +171,13 @@ export function registerConfigIpc() {
     return { exists: true, hasDevDomain }
   })
 
-  // 新建 shopify.theme.toml（文件不存在分支）
+  // 新建 shopify.theme.toml（文件不存在分支）；tapd 为初始化弹窗关联的工单链接（写 dev 环境 _tapd）
   ipcMain.handle(
     'config:initCreate',
-    async (_evt, { dir, templateName, theme, port, previewKey, previewPath, projectDesc }) => {
+    async (_evt, { dir, templateName, theme, port, previewKey, previewPath, projectDesc, tapd }) => {
       const { buildThemeConfig } = await import('@shopify-cli-tool/core')
       try {
-        const content = buildThemeConfig({ templateName, theme, port, previewKey, previewPath, projectDesc })
+        const content = buildThemeConfig({ templateName, theme, port, previewKey, previewPath, projectDesc, tapd })
         writeFileSync(join(dir, THEME_FILE), content, 'utf8')
         return { ok: true }
       } catch (err) {

@@ -41,12 +41,15 @@ import {
   MessageOutlined,
   MoreOutlined,
   PlusOutlined,
+  ProjectOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
   SettingOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
 import { COMMIT_TYPES, formatCommitTitle } from '@shopify-cli-tool/core/commit'
+import WorkItemSelect from '../components/WorkItemSelect.jsx'
+import TapdItemDrawer from '../components/TapdItemDrawer.jsx'
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 const { Title, Text, Link: ALink } = Typography
@@ -354,6 +357,8 @@ function InitRepoModal({ open, repo, onClose, onDone }) {
 
   const submit = async (vals) => {
     setLoading(true)
+    // 工单选择器的值：title 写 project_desc，url 写 dev 环境 _tapd（本地保存时回显并带入 projects.json）
+    const item = vals.workItem || null
     const res = repo.hasToml
       ? await window.api.config.initMerge({ dir: repo.path, templateName: vals.template })
       : await window.api.config.initCreate({
@@ -363,7 +368,8 @@ function InitRepoModal({ open, repo, onClose, onDone }) {
           port: vals.port,
           previewKey: vals.previewKey,
           previewPath: vals.previewPath,
-          projectDesc: vals.projectDesc,
+          projectDesc: item?.title || '',
+          tapd: item?.url || '',
         })
     setLoading(false)
     if (res.ok) {
@@ -402,8 +408,8 @@ function InitRepoModal({ open, repo, onClose, onDone }) {
             >
               <Input placeholder="/pages/xxx" />
             </Form.Item>
-            <Form.Item name="projectDesc" label="project_desc（选填）">
-              <Input />
+            <Form.Item name="workItem" label="工单（选填，标题作为 project_desc）">
+              <WorkItemSelect />
             </Form.Item>
           </>
         )}
@@ -416,7 +422,7 @@ function InitRepoModal({ open, repo, onClose, onDone }) {
 }
 
 /* ---------------- 本地保存 Modal（shop add 可视化，含复制线上 live 主题） ---------------- */
-function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
+function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts }) {
   const { message, modal } = App.useApp()
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
@@ -433,11 +439,12 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
     if (open) {
       // dev 来自仓库 shopify.theme.toml 的 [environments.dev]（getRepoStatus 实时读取），
       // 配置里已有的值一律回填，避免用户重复输入；theme 留空时仍可点「复制线上 live 主题」覆盖。
+      // project_desc 回显初始化时关联的工单链接（toml _tapd），提交时 splitDesc 会再拆回 _tapd
       form.setFieldsValue({
         port: dev.port != null ? String(dev.port) : '',
         theme: dev.theme != null ? String(dev.theme) : '',
         preview_key: dev.preview_key ?? '',
-        project_desc: dev.project_desc ?? '',
+        project_desc: [dev.project_desc, dev._tapd].filter(Boolean).join('\n'),
       })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -507,28 +514,76 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
     return { desc, tapd }
   }
 
+  // 与当前仓库（同 store）已有本地项目判重，口径与 core isSameProject 六要素一致：
+  // store / domain / theme / preview_key / project_desc / _branch（port 不参与身份）。
+  // 完全一致则阻止保存（不写 toml / projects.json）；改任一身份字段才能另存为新项目。
+  // 历史项目无 _branch 视为通配，与后端规则一致。提交时与按钮禁用态共用此函数
+  const findDup = (vals) => {
+    const { desc } = splitDesc(vals.project_desc)
+    const branch = repo.currentBranch || null
+    return (projects || []).find(
+      (p) =>
+        String(p.store ?? '') === String(dev.store ?? '') &&
+        String(p.domain ?? '').trim() === String(dev.domain ?? '').trim() &&
+        String(p.theme ?? '').trim() === String(vals.theme ?? '').trim() &&
+        String(p.previewKey ?? '').trim() === String(vals.preview_key ?? '').trim() &&
+        String(p.description ?? '').trim() === String(desc ?? '').trim() &&
+        (p._branch == null || p._branch === branch),
+    )
+  }
+
+  // 身份字段实时联动（port 不参与判重不监听）：命中重复直接禁用保存按钮并挂问号提示，
+  // 免得点了才在弹窗里报「已存在相同项目」；必填项（theme/project_desc）没填时跳过判重，
+  // 避免空表单与历史空字段子项目误判
+  const wTheme = Form.useWatch('theme', form)
+  const wPreviewKey = Form.useWatch('preview_key', form)
+  const wDesc = Form.useWatch('project_desc', form)
+  const dup = useMemo(() => {
+    if (!open || !repo) return null
+    if (!String(wTheme ?? '').trim() || !String(wDesc ?? '').trim()) return null
+    return findDup({ theme: wTheme, preview_key: wPreviewKey, project_desc: wDesc })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, repo, wTheme, wPreviewKey, wDesc, projects, dev.store, dev.domain, repo?.currentBranch])
+
   const submit = async (vals) => {
     const { desc, tapd } = splitDesc(vals.project_desc)
+    const dup = findDup(vals)
+    if (dup) {
+      modal.warning({
+        title: '已存在完全相同的本地项目，无需重复保存',
+        content: `「${dup.description || dup.theme || dup.id}」与表单内容一致（store / domain / theme / preview_key / project_desc / 分支 均相同）。修改任一字段后即可另存为新项目。`,
+      })
+      return
+    }
     setLoading(true)
-    const res = await window.api.repos.save({
-      dir: repo.path,
-      envName: 'dev',
-      fields: {
-        domain: dev.domain,
-        port: vals.port,
-        theme: vals.theme,
-        preview_key: vals.preview_key,
-        project_desc: desc,
-      },
-      templateName: resolvedTpl || vals.template || null,
-      tapd,
-    })
-    setLoading(false)
-    if (res.ok) {
-      message.success(res.data.created ? '已保存为本地项目' : '该配置已存在本地项目（字段一致）')
-      onDone?.()
-    } else {
-      message.error(res.error || '保存失败')
+    // try/finally 兜底：提交中途抛错（如 IPC 异常）也必须复位 loading，否则按钮永远转圈
+    try {
+      const res = await window.api.repos.save({
+        dir: repo.path,
+        envName: 'dev',
+        fields: {
+          domain: dev.domain,
+          port: vals.port,
+          theme: vals.theme,
+          preview_key: vals.preview_key,
+          project_desc: desc,
+        },
+        templateName: resolvedTpl || vals.template || null,
+        tapd,
+      })
+      if (res.ok) {
+        // created=false 为后端兜底命中（如项目列表已过时）：不提示成功，按重复处理
+        if (res.data.created) {
+          message.success('已保存为本地项目')
+        } else {
+          message.warning('该配置与已有本地项目字段一致，未另存为新项目')
+        }
+        onDone?.()
+      } else {
+        message.error(res.error || '保存失败')
+      }
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -565,11 +620,25 @@ function SaveRepoModal({ open, repo, onClose, onDone, contacts }) {
           <Input />
         </Form.Item>
         <Form.Item name="project_desc" label="project_desc（标题，可附工单链接）" rules={[{ required: true, message: '请输入 project_desc' }]}>
-          <Input.TextArea autoSize={{ minRows: 1, maxRows: 4 }} placeholder="活动标题；可另起一行粘贴工单链接，自动拆为 _tapd" />
+          {/* freeText 版工单选择器：手填任意标题，或下拉/粘贴工单自动回填「标题\n链接」，提交时 splitDesc 拆为 _tapd */}
+          <WorkItemSelect
+            freeText
+            footerHint="手填标题即可；选工单会自动填「标题 + 链接」两行，保存时链接拆为 _tapd 随项目保存"
+          />
         </Form.Item>
-        <Button type="primary" htmlType="submit" loading={loading}>
-          保存为本地项目
-        </Button>
+        {/* 命中已有项目判重时禁用保存（antd 禁用按钮不触发鼠标事件，问号单独挂 Tooltip） */}
+        <Space>
+          <Button type="primary" htmlType="submit" loading={loading} disabled={!!dup}>
+            保存为本地项目
+          </Button>
+          {dup && (
+            <Tooltip
+              title={`与已有本地项目「${dup.description || dup.theme || dup.id}」字段完全一致（store / domain / theme / preview_key / project_desc / 分支 均相同），不会重复保存。修改任一身份字段后即可另存为新项目。`}
+            >
+              <QuestionCircleOutlined style={{ color: '#faad14', fontSize: 16, cursor: 'help' }} />
+            </Tooltip>
+          )}
+        </Space>
       </Form>
 
       <Modal title="复制线上 live 主题" open={copyOpen} onCancel={() => setCopyOpen(false)} footer={null} destroyOnClose>
@@ -2665,7 +2734,6 @@ function OpenEditorButton({ dir, defaultEditor }) {
 }
 
 function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, themeProjectCounts, defaultEditor }) {
-  const matched = !!repo.matched
   const { message } = App.useApp()
   const [hovered, setHovered] = useState(false) // 玻璃亮光 hover 态（仅本卡重渲，不影响其它卡片）
 
@@ -2705,13 +2773,9 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
     })
   }
 
-  const saveBtn = matched ? (
-    <Tooltip title="该配置已在本地缓存项目中，无需重复添加">
-      <Button size="small" disabled>
-        本地保存
-      </Button>
-    </Tooltip>
-  ) : (
+  // 本地保存不再因 matched 禁用：已保存过的仓库也可打开表单改字段另存为新项目
+  // （与现有项目完全一致时由 SaveRepoModal 提交判重拦截）。仅无 dev 环境时禁用（无处可存）。
+  const saveBtn = (
     <Button size="small" type="primary" disabled={!repo.devEnv} onClick={() => onAction('save', repo)}>
       本地保存
     </Button>
@@ -2951,8 +3015,9 @@ function EditProjectModal({ open, project, onClose, onDone }) {
       editableKeys.forEach((k) => {
         vals[k] = project[k] != null ? String(project[k]) : ''
       })
-      // 工单链接（_ 开头字段被 editableKeys 过滤掉）与网页路径（老项目无此 key）单独回填，允许编辑
-      vals._tapd = project._tapd ?? ''
+      // 工单（_ 开头字段被 editableKeys 过滤掉）与网页路径（老项目无此 key）单独回填，允许编辑。
+      // 工单用选择器组件（值 { title, url }），回填只给链接（标题不参与，项目描述是独立字段）
+      vals._tapd = project._tapd ? { title: '', url: String(project._tapd) } : null
       vals.previewPath = project.previewPath ?? ''
       form.setFieldsValue(vals)
     }
@@ -2961,8 +3026,11 @@ function EditProjectModal({ open, project, onClose, onDone }) {
 
   const submit = async (vals) => {
     setLoading(true)
+    // 工单字段是选择器的 { title, url } 对象，这里只取链接存 _tapd；
+    // 清空（null）传空串，与原先 Input 清空行为一致
+    const payload = { ...vals, _tapd: vals._tapd?.url || '' }
     // 传 repoPath：后端据此在「当前生效」时回写该仓库 shopify.theme.toml（保持配置与项目一致）
-    const res = await window.api.shops.update(project.id, vals, project.repoPath)
+    const res = await window.api.shops.update(project.id, payload, project.repoPath)
     setLoading(false)
     if (res.ok) {
       message.success('已更新')
@@ -3008,8 +3076,11 @@ function EditProjectModal({ open, project, onClose, onDone }) {
         >
           <Input placeholder="/pages/xxx" />
         </Form.Item>
-        <Form.Item name="_tapd" label="工单（tapd 链接）">
-          <Input placeholder="工单链接，可留空" />
+        <Form.Item name="_tapd" label="工单（选填）">
+          <WorkItemSelect
+            initialUrl={project?._tapd ? String(project._tapd) : ''}
+            footerHint="仅保存工单链接（重新选择或粘贴新链接即替换）；活动标题请维护上方「项目描述」"
+          />
         </Form.Item>
         <Button type="primary" htmlType="submit" loading={loading}>
           保存
@@ -3177,13 +3248,59 @@ function ProjectPanel({ project, onAction, active, embedded, themeProjectCount }
     : { padding: 16, borderRadius: 14, ...GLASS, ...ACTIVE_GLOW }
 
   const title = project.description || project.templateName || project.store || '-'
+  // 关联工单链接（初始化选工单/本地保存拆链接时记入的 _tapd）：有则右上角挂工单彩带
+  const tapdUrl = String(project._tapd || '').trim()
+  // 彩带点击后在主窗口右侧打开工单详情抽屉（与 TAPD 工单页同款：描述/评论/流转路径/流转弹窗）
+  const [tapdDrawerOpen, setTapdDrawerOpen] = useState(false)
 
   return (
-    <div
-      style={{ ...wrapperStyle, cursor: clickable ? 'pointer' : undefined }}
-      title={clickable ? '点击切换为当前生效配置' : undefined}
-      onClick={clickable ? () => onAction('switch', project) : undefined}
-    >
+    <div style={{ position: 'relative' }}>
+      {/* 工单彩带：右上角斜向入口，点击打开工单详情抽屉（GitHub 彩带的同款造型）。
+          放在面板根节点外层：当前生效面板 overflow:hidden（裁剪扫光）不会把彩带裁掉 */}
+      {tapdUrl && (
+        <Tooltip title="查看工单详情">
+          <div
+            onClick={() => setTapdDrawerOpen(true)}
+            style={{
+              position: 'absolute',
+              top: -10,
+              right: -10,
+              width: 70,
+              height: 70,
+              overflow: 'hidden',
+              zIndex: 2,
+              cursor: 'pointer',
+              userSelect: 'none',
+            }}
+          >
+            <span
+              style={{
+                display: 'block',
+                position: 'absolute',
+                top: 12,
+                right: -20,
+                width: 96,
+                textAlign: 'center',
+                transform: 'rotate(45deg)',
+                background: 'linear-gradient(135deg, #722ed1 0%, #531dab 100%)',
+                color: '#fff',
+                fontSize: 11,
+                fontWeight: 600,
+                lineHeight: '22px',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+              }}
+            >
+              <ProjectOutlined style={{ marginRight: 2 }} />
+              工单
+            </span>
+          </div>
+        </Tooltip>
+      )}
+      <div
+        style={{ ...wrapperStyle, cursor: clickable ? 'pointer' : undefined }}
+        title={clickable ? '点击切换为当前生效配置' : undefined}
+        onClick={clickable ? () => onAction('switch', project) : undefined}
+      >
       {/* 当前生效：绿色高光带横向无限扫过（linear 时序 + 渐变两端透明 → 循环无跳变；pointer-events:none 不挡点击） */}
       {active && (
         <div
@@ -3199,8 +3316,8 @@ function ProjectPanel({ project, onAction, active, embedded, themeProjectCount }
           }}
         />
       )}
-      {/* 标题：项目名 + 模板 + 仓库状态（长标题自动省略） */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 10 }}>
+      {/* 标题：项目名 + 模板 + 仓库状态（长标题自动省略）；右侧预留工单彩带的角落空间 */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 10, paddingRight: tapdUrl ? 40 : 0 }}>
         <Text strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {title}
         </Text>
@@ -3291,6 +3408,11 @@ function ProjectPanel({ project, onAction, active, embedded, themeProjectCount }
           </Popconfirm>
         </Space>
       </div>
+      </div>
+      {/* 工单详情抽屉：与 TAPD 工单页同款，彩带点击打开（Portal 挂载，不影响面板布局） */}
+      {tapdUrl && (
+        <TapdItemDrawer open={tapdDrawerOpen} link={tapdUrl} onClose={() => setTapdDrawerOpen(false)} />
+      )}
     </div>
   )
 }
@@ -3487,6 +3609,12 @@ export default function Repos() {
     else message.error(res.error || '导出失败')
   }
 
+  // TAPD 工单：打开独立窗口（窗口内自己选项目/拉列表/流转）；重复点击聚焦已开窗口
+  const openTapdWindow = async () => {
+    const res = await window.api.tapd.openWindow()
+    if (!res?.ok) message.error(res?.error || '打开 TAPD 工单窗口失败')
+  }
+
   // init/save 后：刷新该仓库状态 + 刷新本地项目列表
   const refreshRepo = async (repoPath) => {
     const res = await window.api.repos.status(repoPath)
@@ -3534,7 +3662,7 @@ export default function Repos() {
     }
     // synced=true 表示该仓库当前生效配置已被清除，单独提示；其余情况（非生效/tracked/无 toml）普通提示
     message.success(res.synced ? '已删除项目，并清除该仓库当前生效配置' : '已删除')
-    // 删除后须刷新关联仓库的 matched 状态：否则仓库卡「本地保存」仍因旧 matched 被禁用，
+    // 删除后须刷新关联仓库的 matched 状态：否则「当前生效」标识与项目面板停留旧数据，
     // 要点「重新扫描」才恢复。refreshRepo 内部已含 refreshProjects。
     if (project.repoPath) {
       refreshRepo(project.repoPath)
@@ -3717,6 +3845,22 @@ export default function Repos() {
               </Button>
             </span>
           </Tooltip>
+          {/* TAPD 工单入口：高频功能，从「更多」下拉提到顶栏（渐变底突出，与 outlined 按钮区分）；重复点击聚焦已开窗口 */}
+          <Tooltip title="需求 / 缺陷 / 任务工单，独立窗口打开">
+            <Button
+              icon={<ProjectOutlined />}
+              onClick={openTapdWindow}
+              style={{
+                border: 'none',
+                background: 'linear-gradient(135deg, #1677ff 0%, #722ed1 100%)',
+                color: '#fff',
+                fontWeight: 600,
+                boxShadow: '0 2px 10px rgba(22,119,255,0.4)',
+              }}
+            >
+              TAPD 工单
+            </Button>
+          </Tooltip>
           <Tooltip title='前往 GitHub Release 下载最新版本'>
             <Button variant="outlined" icon={<DownloadOutlined />} onClick={openReleasesPage}>
               下载最新版
@@ -3824,6 +3968,8 @@ export default function Repos() {
         <SaveRepoModal
           open
           repo={editRepo.repo}
+          // 判重用同 store 全量项目（不按分支过滤：历史项目无 _branch 视为通配，与后端一致）
+          projects={projects.filter((p) => p.store === editRepo.repo.devEnv?.store)}
           contacts={contacts}
           onClose={() => setEditRepo(null)}
           onDone={() => {

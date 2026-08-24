@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu } from 'electron'
+import { app, BrowserWindow, Menu, protocol, shell } from 'electron'
 import { join } from 'node:path'
 import { registerShopsIpc } from './ipc/shops.js'
 import { registerLinksIpc } from './ipc/links.js'
@@ -10,12 +10,19 @@ import { registerReposIpc } from './ipc/repos.js'
 import { registerShellIpc } from './ipc/shell.js'
 import { registerContactsIpc } from './ipc/contacts.js'
 import { registerDingtalkIpc } from './ipc/dingtalk.js'
+import { registerTapdIpc } from './ipc/tapd.js'
 import { registerSystemIpc } from './ipc/system.js'
 
 // macOS Dock 标签、菜单栏应用名都取自 app.getName()：dev 下裸 electron 进程默认名是 "Electron"，
 // 打包后由 Info.plist 的 productName 改回 "Shopify Toolbox"。dev 下显式 setName 让两者一致；
 // 副作用：userData 目录从 Application Support/Electron 变为 Shopify Toolbox（与打包态一致）。
 app.setName('Shopify Toolbox')
+
+// TAPD 富文本图片走自定义协议由主进程代理（见 ipc/tapd.js）。
+// 必须在 app ready 前注册为特权 scheme，<img> 才能像 https 一样加载（standard 解析 host、stream 支持流式）。
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'tapd-img', privileges: { standard: true, secure: true, stream: true } },
+])
 
 let mainWindow
 
@@ -32,6 +39,13 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
     },
+  })
+
+  // 富文本（工单详情抽屉等）里 Ctrl/Cmd+点击链接会被 Chromium 当「新标签打开」走
+  // window.open，不拦会弹出裸 Electron 窗口：拦下转系统浏览器（普通点击由渲染层处理）
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url)
+    return { action: 'deny' }
   })
 
   // dev：electron-vite 注入 ELECTRON_RENDERER_URL；prod：加载打包后的 index.html
@@ -77,6 +91,7 @@ app.whenReady().then(() => {
   registerShellIpc()
   registerContactsIpc()
   registerDingtalkIpc()
+  registerTapdIpc()
   registerSystemIpc()
   createWindow()
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Button, Typography, App, Card, Input, Space, Select, Form, Alert } from 'antd'
+import WorkItemSelect from '../components/WorkItemSelect.jsx'
 
 const { Title, Text } = Typography
 
@@ -31,6 +32,8 @@ export default function Init() {
       return
     }
     setLoading(true)
+    // 工单选择器的值：title 写 project_desc，url 写 dev 环境 _tapd（本地保存时回显并带入 projects.json）
+    const item = vals.workItem || null
     const res = status?.exists
       ? await window.api.config.initMerge({ dir, templateName: vals.template })
       : await window.api.config.initCreate({
@@ -40,7 +43,8 @@ export default function Init() {
           port: vals.port,
           previewKey: vals.previewKey,
           previewPath: vals.previewPath,
-          projectDesc: vals.projectDesc,
+          projectDesc: item?.title || '',
+          tapd: item?.url || '',
         })
     setLoading(false)
     if (res.ok) {
@@ -93,8 +97,8 @@ export default function Init() {
                 <Form.Item name="previewPath" label="网页路径（选填）" extra="如 /pages/back-to-school-sale；无 preview_key 时拼到预览/开发链接，编辑器链接挂 previewPath 参数">
                   <Input placeholder="/pages/xxx" />
                 </Form.Item>
-                <Form.Item name="projectDesc" label="project_desc（选填）">
-                  <Input />
+                <Form.Item name="workItem" label="工单（选填，标题作为 project_desc）">
+                  <WorkItemSelect />
                 </Form.Item>
               </>
             )}

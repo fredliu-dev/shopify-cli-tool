@@ -299,10 +299,13 @@ function stripReadonlyLines(content) {
 /**
  * 用模板生成一份新的 shopify.theme.toml 内容（`shop init` 的「文件不存在」分支纯逻辑）。
  * 注意：模板里以 `_` 开头的只读字段（如 `_github`）不会写入生成结果。
- * @param {{ templateName: string, theme?: string, port?: string, previewKey?: string, previewPath?: string, projectDesc?: string }} opts
+ * @param {{ templateName: string, theme?: string, port?: string, previewKey?: string, previewPath?: string, projectDesc?: string, tapd?: string }} opts
+ *   tapd 为关联的 TAPD 工单链接：初始化时还没有 projects.json 身份（store 可能缺），
+ *   链接先记到 dev 环境 `_tapd`（与 upsert 写 `_branch` 同约定），本地保存时由
+ *   upsertProjectFromConfig 兜底带入 projects.json 并在表单里回显
  * @returns {string} 生成的 TOML 文本
  */
-export function buildThemeConfig({ templateName, theme, port, previewKey, previewPath, projectDesc }) {
+export function buildThemeConfig({ templateName, theme, port, previewKey, previewPath, projectDesc, tapd }) {
   const file = findTemplateFile(templateName)
   if (!file) throw new Error(`未找到模板「${templateName}」`)
   let content = readFileSync(file, 'utf8')
@@ -314,7 +317,11 @@ export function buildThemeConfig({ templateName, theme, port, previewKey, previe
   content = fillValue(content, 'preview_path', pathVal)
   if (pathVal && !/^\s*preview_path\s*=/.test(content)) content = setEnvField(content, 'dev', 'preview_path', pathVal)
   content = fillValue(content, 'project_desc', String(projectDesc ?? '').trim())
-  return stripReadonlyLines(content)
+  // 先剔模板只读行再补 _tapd，避免刚写入就被自己剔掉
+  content = stripReadonlyLines(content)
+  const tapdVal = String(tapd ?? '').trim()
+  if (tapdVal) content = setEnvField(content, 'dev', '_tapd', tapdVal)
+  return content
 }
 
 /** TOML 字符串值序列化：加双引号并转义 `\` 与 `"`。 */

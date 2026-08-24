@@ -335,7 +335,9 @@ export function templateFromRemote(remoteUrl) {
  * @param {{ startDir: string, envName?: string, fields?: object, branch?: string, templateName?: string, tapd?: string }} opts
  *   fields 用 toml 键名（preview_key / project_desc）；branch 为当前 git 分支；
  *   templateName 覆盖按 store 反查到的模板（GUI 在 store 反查不到模板时让用户选好后传入）；
- *   tapd 为从 project_desc 复合文本里拆出的工单链接，只记到 projects.json 的 _tapd（不写回 toml）
+ *   tapd 为从 project_desc 复合文本里拆出的工单链接，只记到 projects.json 的 _tapd（不写回 toml）。
+ *   未传时回退取 toml dev 环境的 _tapd（初始化弹窗关联工单时写入），保证「初始化选工单 → 本地保存」
+ *   即使用户清掉了表单里的链接，projects.json 也能带上
  * @returns {{ project: object, created: boolean }} project 含 links
  * @throws {Error} 缺配置文件 / 缺环境 / 缺 store 时抛错，由调用方提示
  */
@@ -347,6 +349,8 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
   if (!env.store) throw new Error(`[environments.${envName}] 缺少 store`)
 
   const resolved = { ...env, ...fields }
+  // 工单链接优先级：调用方显式传入（表单复合文本拆出）> toml _tapd（初始化时关联的工单）
+  const tapdLink = tapd || String(resolved._tapd || '').trim() || null
 
   // 把填好的字段写回 toml（保持原格式，仅改值/补行）
   let content = readFileSync(cfg.path, 'utf8')
@@ -368,7 +372,7 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
     port: String(resolved.port),
     description: resolved.project_desc,
     _branch: branch || null,
-    _tapd: tapd || null,
+    _tapd: tapdLink,
   }
 
   const projects = loadProjects()
@@ -377,8 +381,8 @@ export function upsertProjectFromConfig({ startDir, envName = 'dev', fields = {}
     // 命中已有项目：不在六要素里的字段（_tapd 衍生数据、preview_path/port 等非身份字段）
     // 单独回填为本次保存的值，不算"新建"——否则已存项目永远带不上后来才填的网页路径
     let dirty = false
-    if (tapd && dup._tapd !== tapd) {
-      dup._tapd = tapd
+    if (tapdLink && dup._tapd !== tapdLink) {
+      dup._tapd = tapdLink
       dirty = true
     }
     const nextPath = String(resolved.preview_path ?? '')
