@@ -110,19 +110,20 @@ pnpm release:npm
 
 ### `pnpm release:desktop` — 打包桌面应用 + 提示发版
 
-交互选择版本位，bump desktop 版本，**本机打包**验证，并给出推 tag 的指令。
+**先把代码全部提交**，再交互选择版本位，bump desktop 版本，**本机打包**验证，自动提交版本号改动、打 tag，确认后推送触发 CI。
 
 ```bash
+git add -A && git commit -m "feat: xxx"   # ① 先提交所有代码
 pnpm release:desktop
 # 当前版本：desktop 0.1.0
 # 升级版本位 ... : 3   → desktop 0.1.1
 # 本机打包（packages/desktop/release/，不上传 Release）…
-# ✅ 打包完成。要发布到 GitHub Release：
-#   git add -A && git commit -m "desktop v0.1.1"
-#   git tag desktop-v0.1.1 && git push origin desktop-v0.1.1
+# ✅ 已提交并打 tag。立即推送 origin 触发 CI 发布？[Y/n]
 ```
 
 要点：
+- **工作区不干净会直接拒绝发版**：tag 只能指向已提交的 commit，未提交的改动进不了 CI 构建的安装包（v0.1.24 就因此漏掉了 TAPD 工单系统）。务必先提交、再发版。
+- 本地落后远端（`origin/<分支>` 有新提交）同样拒绝，先 `git pull`。
 - 本机没有 `GH_TOKEN`，**不能直接上传到 Release**；真正发布靠**推 `desktop-v*` tag 触发 CI**。
 - CI（`.github/workflows/release.yml`）会在 macOS + Windows 各构建，把 `.dmg` / `.exe` 挂到 GitHub Release。
 - 已装旧版的用户启动 app 时，`electron-updater` 会自动检查、下载、提示更新。
@@ -142,10 +143,8 @@ git push
 ### 改了桌面界面（desktop）→ 发 GitHub Release
 
 ```bash
-pnpm release:desktop      # 选版本位，本机打包验证
-git add -A && git commit -m "desktop vX.Y.Z"
-git tag desktop-vX.Y.Z
-git push origin desktop-vX.Y.Z   # 触发 CI，自动出 .dmg / .exe
+git add -A && git commit -m "feat: xxx"   # ① 先提交所有代码（必须，脚本会检查工作区干净）
+pnpm release:desktop                      # ② bump 版本 + 本机打包验证 + 自动 commit/tag，确认后推送触发 CI
 ```
 
 > 桌面发版 tag 用 `desktop-v*` 前缀，刻意与 CLI 的 npm 版本解耦，两边可独立迭代。

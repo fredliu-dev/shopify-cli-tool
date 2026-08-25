@@ -1,5 +1,6 @@
-// 发布桌面应用：交互选版本位 → bump desktop 版本 → 本机打包验证 → 自动提交/tag → 确认推送触发 CI。
-// 真正发布到 GitHub Release 由推 desktop-v* tag 触发 CI 完成（本机无 GH_TOKEN 不能直接上传）。
+// 发布桌面应用：前置检查（工作区必须干净、不落后远端）→ 交互选版本位 → bump → 本机打包验证
+// → 自动提交/tag → 确认推送触发 CI。真正发布到 GitHub Release 由推 desktop-v* tag 触发 CI 完成
+// （本机无 GH_TOKEN 不能直接上传）。
 import { readFileSync, writeFileSync } from 'node:fs'
 import { createInterface } from 'node:readline/promises'
 import { execSync } from 'node:child_process'
@@ -16,6 +17,30 @@ const run = (cmd) => execSync(cmd, { stdio: 'inherit', cwd: root })
 /** 取当前分支名（detached HEAD 返回 'HEAD'）。 */
 const currentBranch = () =>
   execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8', cwd: root }).trim()
+
+/** 捕获命令输出（单行字符串）。 */
+const capture = (cmd) => execSync(cmd, { encoding: 'utf8', cwd: root }).trim()
+
+// —— 发版前置检查：先把代码全部提交，再打 tag ——
+// tag 只能指向已提交的 commit，工作区里的改动进不了 CI 构建。v0.1.24 就是在功能代码（TAPD
+// 工单系统）还没提交时打了 tag，发布的安装包里缺了整个功能。所以这里直接拒绝发版，强制先提交。
+const dirty = capture('git status --porcelain').split('\n').filter(Boolean)
+if (dirty.length) {
+  console.error('❌ 工作区有未提交改动。tag 只包含已提交的代码，这些改动不会进 CI 构建的安装包，')
+  console.error('   请先提交（git add -A && git commit -m "..."）后再发版：')
+  for (const line of dirty) console.error(`     ${line}`)
+  process.exit(1)
+}
+
+const branch = currentBranch()
+if (branch && branch !== 'HEAD') {
+  run(`git fetch origin ${branch}`)
+  const behind = Number(capture(`git rev-list --count HEAD..origin/${branch}`))
+  if (behind > 0) {
+    console.error(`❌ 本地落后 origin/${branch} ${behind} 个提交，先 git pull 再发版，保证 tag 打在最新代码上。`)
+    process.exit(1)
+  }
+}
 
 const bump = (v, kind) => {
   const [x, y, z] = v.split('.').map(Number)
@@ -53,14 +78,12 @@ const push = (await rl2.question('\n✅ 已提交并打 tag。立即推送 origi
 rl2.close()
 if (push === 'n') {
   console.log('已跳过推送。稍后手动执行：')
-  const br = currentBranch()
-  if (br && br !== 'HEAD') console.log(`  git push origin ${br}`)
+  if (branch && branch !== 'HEAD') console.log(`  git push origin ${branch}`)
   console.log(`  git push origin ${tagName}`)
   process.exit(0)
 }
 
 // 先推当前分支（让 tag 指向的 commit 在远端存在），再推 tag 触发 CI
-const branch = currentBranch()
 if (branch && branch !== 'HEAD') {
   run(`git push origin ${branch}`)
 } else {
