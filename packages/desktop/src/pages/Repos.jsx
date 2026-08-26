@@ -25,27 +25,19 @@ import {
   Typography,
 } from 'antd'
 import {
-  AppstoreOutlined,
   ArrowRightOutlined,
   CodeOutlined,
   DashboardOutlined,
   DeploymentUnitOutlined,
-  DownloadOutlined,
   ExclamationCircleOutlined,
   EyeOutlined,
-  FileTextOutlined,
   FolderOpenOutlined,
   FormatPainterOutlined,
   GithubOutlined,
-  InfoCircleOutlined,
-  MessageOutlined,
-  MoreOutlined,
   PlusOutlined,
   ProjectOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
-  SettingOutlined,
-  TeamOutlined,
 } from '@ant-design/icons'
 import { COMMIT_TYPES, formatCommitTitle } from '@shopify-cli-tool/core/commit'
 import WorkItemSelect from '../components/WorkItemSelect.jsx'
@@ -3455,7 +3447,9 @@ function AboutModal({ open, onClose, onOpenReleases }) {
 const GITHUB_RELEASES_URL = "https://github.com/fredliu-dev/shopify-cli-tool/releases/latest"
 
 /* ---------------- 页面主体 ---------------- */
-export default function Repos() {
+// registerMenu：主壳（App.jsx 左侧栏）注入的注册器。头像「更多」菜单里的弹窗/动作
+// 都定义在本页内部，挂载时注册给壳层渲染菜单时回调；TAPD / 爬虫页切换只切显隐，本页常驻不卸载。
+export default function Repos({ registerMenu }) {
   const { message } = App.useApp()
   const [workspaceDir, setWorkspaceDir] = useState('')
   const [repos, setRepos] = useState([])
@@ -3609,11 +3603,28 @@ export default function Repos() {
     else message.error(res.error || '导出失败')
   }
 
-  // TAPD 工单：打开独立窗口（窗口内自己选项目/拉列表/流转）；重复点击聚焦已开窗口
-  const openTapdWindow = async () => {
-    const res = await window.api.tapd.openWindow()
-    if (!res?.ok) message.error(res?.error || '打开 TAPD 工单窗口失败')
+  // 头像「更多」菜单动作分发（菜单壳层在 App.jsx 左侧栏渲染，动作实现在本页）：
+  // 管理类弹窗 + 本地配置/导出 + 设置编辑器/关于 + 下载最新版本。
+  // handler 走 ref 转发：注册只在挂载/defaultEditor 变化时执行一次，点击时取最新闭包。
+  const handleMenuAction = (key) => {
+    if (key === 'manageTemplates') setManageTemplatesOpen(true)
+    else if (key === 'contacts') setContactsOpen(true)
+    else if (key === 'groups') setGroupsOpen(true)
+    else if (key === 'dingtalkTemplates') setTemplatesOpen(true)
+    else if (key === 'localConfig') openLocalConfig()
+    else if (key === 'exportConfig') exportConfig()
+    else if (key === 'settings') setSettingsOpen(true)
+    else if (key === 'about') setAboutOpen(true)
+    else if (key === 'releases') openReleasesPage()
   }
+  const menuActionRef = useRef(handleMenuAction)
+  menuActionRef.current = handleMenuAction
+  useEffect(() => {
+    registerMenu?.({
+      run: (key) => menuActionRef.current?.(key),
+      editorLabel: defaultEditor, // 菜单项「默认编辑器：X」的动态标签
+    })
+  }, [registerMenu, defaultEditor])
 
   // init/save 后：刷新该仓库状态 + 刷新本地项目列表
   const refreshRepo = async (repoPath) => {
@@ -3845,59 +3856,8 @@ export default function Repos() {
               </Button>
             </span>
           </Tooltip>
-          {/* TAPD 工单入口：高频功能，从「更多」下拉提到顶栏（渐变底突出，与 outlined 按钮区分）；重复点击聚焦已开窗口 */}
-          <Tooltip title="需求 / 缺陷 / 任务工单，独立窗口打开">
-            <Button
-              icon={<ProjectOutlined />}
-              onClick={openTapdWindow}
-              style={{
-                border: 'none',
-                background: 'linear-gradient(135deg, #1677ff 0%, #722ed1 100%)',
-                color: '#fff',
-                fontWeight: 600,
-                boxShadow: '0 2px 10px rgba(22,119,255,0.4)',
-              }}
-            >
-              TAPD 工单
-            </Button>
-          </Tooltip>
-          <Tooltip title='前往 GitHub Release 下载最新版本'>
-            <Button variant="outlined" icon={<DownloadOutlined />} onClick={openReleasesPage}>
-              下载最新版
-            </Button>
-          </Tooltip>
-          <Dropdown
-            placement="bottomRight"
-            menu={{
-              items: [
-                { key: 'manageTemplates', icon: <AppstoreOutlined />, label: '模板管理' },
-                { key: 'contacts', icon: <TeamOutlined />, label: '人员管理' },
-                { key: 'groups', icon: <MessageOutlined />, label: '通知群管理' },
-                { key: 'dingtalkTemplates', icon: <FileTextOutlined />, label: '信息模板管理' },
-                { key: 'localConfig', icon: <FolderOpenOutlined />, label: '本地配置' },
-                { key: 'exportConfig', icon: <DownloadOutlined />, label: '导出配置' },
-                { type: 'divider' },
-                {
-                  key: 'settings',
-                  icon: <SettingOutlined />,
-                  label: defaultEditor ? `默认编辑器：${defaultEditor}` : '设置默认编辑器',
-                },
-                { key: 'about', icon: <InfoCircleOutlined />, label: '关于' },
-              ],
-              onClick: ({ key }) => {
-                if (key === 'manageTemplates') setManageTemplatesOpen(true)
-                else if (key === 'contacts') setContactsOpen(true)
-                else if (key === 'groups') setGroupsOpen(true)
-                else if (key === 'dingtalkTemplates') setTemplatesOpen(true)
-                else if (key === 'localConfig') openLocalConfig()
-                else if (key === 'exportConfig') exportConfig()
-                else if (key === 'settings') setSettingsOpen(true)
-                else if (key === 'about') setAboutOpen(true)
-              },
-            }}
-          >
-            <Button variant="outlined" icon={<MoreOutlined />}>更多</Button>
-          </Dropdown>
+          {/* TAPD 工单 / 爬虫工作流入口与「更多」「下载最新版」已移至左侧栏：
+              前两者是左侧栏页面切换项，后两者收进左上角头像菜单 */}
         </Space>
       </div>
 

@@ -3,9 +3,6 @@ import { join } from 'node:path'
 
 const load = () => import('@shopify-cli-tool/core')
 
-// TAPD 工单独立窗口（单例；对比 repos.js 的 per-dir Map：TAPD 面板全局只有一个）
-let tapdWindow = null
-
 // TAPD 网页登录窗口引用（取图 Cookie 用；窗口在 tapd:openLogin handler 里创建）
 let loginWindow = null
 
@@ -310,54 +307,8 @@ export function registerTapdIpc() {
     }
   })
 
-  // 打开 TAPD 工单独立窗口（hash 路由 #/tapd 渲染专用页面）；已开则聚焦，不重复开
-  ipcMain.handle('tapd:openWindow', () => {
-    try {
-      if (tapdWindow && !tapdWindow.isDestroyed()) {
-        if (tapdWindow.isMinimized()) tapdWindow.restore()
-        tapdWindow.focus()
-        return { ok: true }
-      }
-      tapdWindow = new BrowserWindow({
-        width: 1280,
-        height: 820,
-        title: 'TAPD 工单',
-        backgroundColor: '#0d0d0f',
-        webPreferences: {
-          preload: join(__dirname, '../preload/index.js'),
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: false,
-        },
-      })
-      tapdWindow.webContents.setWindowOpenHandler(openExternalOnly)
-      tapdWindow.on('closed', () => (tapdWindow = null))
-      const hash = '#/tapd'
-      if (process.env.ELECTRON_RENDERER_URL) {
-        tapdWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}/${hash}`)
-      } else {
-        tapdWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash })
-      }
-      return { ok: true }
-    } catch (err) {
-      return { ok: false, error: err.message }
-    }
-  })
-
-  // 工单窗口左上角「本地项目」入口：聚焦主窗口（本地项目页在主窗口）。
-  // 主窗口识别：URL 不带 #/ 哈希路由（#/tapd、#/dep-graph 均为独立窗口）
-  ipcMain.handle('tapd:showMain', () => {
-    try {
-      const main = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('#/'))
-      if (!main) return { ok: false, error: '主窗口不存在' }
-      if (main.isMinimized()) main.restore()
-      main.show()
-      main.focus()
-      return { ok: true }
-    } catch (err) {
-      return { ok: false, error: err.message }
-    }
-  })
+  // TAPD 工单页已并入主窗口（左侧栏切换），不再有独立窗口 / showMain 聚焦逻辑；
+  // 网页登录窗口（tapd:openLogin）仍是独立 BrowserWindow。
 
   // 读取配置（{ token, workspaceId, recentWorkspaceIds }）
   ipcMain.handle('tapd:loadConfig', async () => {

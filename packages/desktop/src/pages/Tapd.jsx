@@ -1,7 +1,7 @@
 /**
- * TAPD 工单独立窗口页（需求/缺陷/任务列表 + 详情 + 手动流转）。
+ * TAPD 工单页（需求/缺陷/任务列表 + 详情 + 手动流转）。
  *
- * 由主窗口「更多 → TAPD 工单」经 IPC tapd:openWindow 打开，URL 形如 index.html#/tapd。
+ * 内嵌在主窗口左侧栏切换（App.jsx MainShell），不再是独立窗口。
  * 布局：顶栏（项目名 + 当前账号 + 刷新）→ 统计卡片（全部/待办/进行中/已完成，点击筛选）
  *   → Tab + 过滤行（只看我的/状态/迭代/关键字）→ 工单表格（名称/状态/处理人/规模点/截止时间；类型列缀优先级圆点徽标；点状态 Tag 流转、点行开详情）。
  * 点表格行打开详情抽屉（关键字段 + 流转路径轨道 + 描述富文本 + 评论历史，可直接回评论）；
@@ -1438,15 +1438,7 @@ export default function TapdPage() {
   const [flowItem, setFlowItem] = useState(null)
   const [detailItem, setDetailItem] = useState(null)
 
-  useEffect(() => {
-    document.title = 'TAPD 工单'
-  }, [])
-
-  // 左上角「本地项目」入口：聚焦主窗口（本地项目页在那边），工单窗口保留不关
-  const showMain = async () => {
-    const res = await window.api.tapd.showMain()
-    if (!res.ok) message.error(res.error || '打开主窗口失败')
-  }
+  // 本页内嵌在主窗口左侧栏切换（不再独立窗口）：标题沿用主窗口，页面切换由左侧栏负责
 
   // 进门三连检（顺序引导，任一缺失都先引导再加载）：
   // ① 令牌 —— 无效直接弹令牌表单，不往下走；
@@ -1881,7 +1873,8 @@ export default function TapdPage() {
       style={{
         display: 'flex',
         flexDirection: 'column',
-        height: '100vh',
+        // 内嵌主窗口：高度撑满内容区（壳层容器已定高），不再是独立窗口的 100vh
+        height: '100%',
         background: '#0d0d0f',
         color: 'rgba(255,255,255,0.88)',
       }}
@@ -1889,7 +1882,7 @@ export default function TapdPage() {
       {/* 富文本/流转动效样式（抽成 TapdStyles 与主窗口的工单抽屉共用） */}
       <TapdStyles />
 
-      {/* 顶栏：回主窗口入口 + 标题 + 项目名 + 当前账号 + 缓存时间 + 凭据设置 + 刷新 */}
+      {/* 顶栏：标题 + 项目名 + 当前账号 + 缓存时间 + 凭据设置 + 刷新（页面切换在左侧栏） */}
       <div
         style={{
           padding: '10px 16px',
@@ -1900,12 +1893,6 @@ export default function TapdPage() {
           flexWrap: 'wrap',
         }}
       >
-        {/* 左上角标识：本地项目页在主窗口，点击聚焦主窗口（本窗口保留不关） */}
-        <Tooltip title="回到本地项目页面（主窗口）">
-          <Button icon={<LeftOutlined />} onClick={showMain}>
-            本地项目
-          </Button>
-        </Tooltip>
         <Text strong style={{ fontSize: 15 }}>
           TAPD 工单
         </Text>

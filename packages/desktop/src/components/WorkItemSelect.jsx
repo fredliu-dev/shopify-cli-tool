@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { AutoComplete, Button, Space, Tag, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
+import { switchShellPage } from '../shell-events.js'
 
 const { Text } = Typography
 
@@ -218,7 +219,7 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
     return (
       <div>
         <Space>
-          <Button type="primary" onClick={() => window.api.tapd.openWindow()}>
+          <Button type="primary" onClick={() => switchShellPage('tapd')}>
             去登录并配置工单系统
           </Button>
           <Button icon={<ReloadOutlined />} onClick={() => detect(true)}>
@@ -226,7 +227,7 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
           </Button>
         </Space>
         <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 12 }}>
-          打开 TAPD 工单窗口完成令牌配置与登录后，回到此处会自动刷新
+          切到左侧 TAPD 工单页完成令牌配置与登录后，回到此处会自动刷新
         </Text>
       </div>
     )
@@ -264,7 +265,7 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
           <Text type="secondary" style={{ fontSize: 12 }}>
             未配置 TAPD 工单系统：可先手填标题，或
           </Text>
-          <Button size="small" type="link" style={{ padding: 0, fontSize: 12 }} onClick={() => window.api.tapd.openWindow()}>
+          <Button size="small" type="link" style={{ padding: 0, fontSize: 12 }} onClick={() => switchShellPage('tapd')}>
             去配置
           </Button>
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -279,7 +280,7 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
           <Button size="small" type="text" icon={<ReloadOutlined />} onClick={() => detect(true)}>
             重试
           </Button>
-          <Button size="small" type="text" onClick={() => window.api.tapd.openWindow()}>
+          <Button size="small" type="text" onClick={() => switchShellPage('tapd')}>
             去检查工单系统配置
           </Button>
         </Space>

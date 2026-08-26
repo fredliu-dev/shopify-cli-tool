@@ -112,8 +112,6 @@ contextBridge.exposeInMainWorld('api', {
     checkLogin: () => ipcRenderer.invoke('tapd:checkLogin'),
     logout: () => ipcRenderer.invoke('tapd:logout'),
     saveConfig: (patch) => ipcRenderer.invoke('tapd:saveConfig', patch),
-    openWindow: () => ipcRenderer.invoke('tapd:openWindow'),
-    showMain: () => ipcRenderer.invoke('tapd:showMain'),
     workspaces: () => ipcRenderer.invoke('tapd:workspaces'),
     workspaceInfo: (workspaceId) => ipcRenderer.invoke('tapd:workspaceInfo', workspaceId),
     user: () => ipcRenderer.invoke('tapd:user'),
@@ -130,5 +128,51 @@ contextBridge.exposeInMainWorld('api', {
     comments: (opts) => ipcRenderer.invoke('tapd:comments', opts),
     addComment: (opts) => ipcRenderer.invoke('tapd:addComment', opts),
     updateComment: (opts) => ipcRenderer.invoke('tapd:updateComment', opts),
+  },
+  // 爬虫工作流（主窗口左侧栏切换页）：项目 CRUD / 画布导入导出 / 运行控制 / 结果导出。
+  // 推送事件按 projectId 过滤自己的项目（同 repos:depGraphProgress 按 dir 过滤）。
+  crawler: {
+    ls: () => ipcRenderer.invoke('crawler:ls'),
+    create: (name) => ipcRenderer.invoke('crawler:create', name),
+    get: (id) => ipcRenderer.invoke('crawler:get', id),
+    save: (opts) => ipcRenderer.invoke('crawler:save', opts),
+    saveAs: (opts) => ipcRenderer.invoke('crawler:saveAs', opts),
+    rename: (opts) => ipcRenderer.invoke('crawler:rename', opts),
+    delete: (id) => ipcRenderer.invoke('crawler:delete', id),
+    exportGraph: (id) => ipcRenderer.invoke('crawler:exportGraph', id),
+    importGraph: () => ipcRenderer.invoke('crawler:importGraph'),
+    run: (opts) => ipcRenderer.invoke('crawler:run', opts),
+    stop: () => ipcRenderer.invoke('crawler:stop'),
+    // 登录窗口（与执行窗口同一持久会话，流程外登录目标站）
+    openLogin: (url) => ipcRenderer.invoke('crawler:openLogin', url),
+    saveResults: (opts) => ipcRenderer.invoke('crawler:saveResults', opts),
+    // 选择表格文件（导入表格模块配置用；主进程弹框并解析，返回 { path, columns, rowCount }）
+    pickTableFile: () => ipcRenderer.invoke('crawler:pickTableFile'),
+    // 选择保存目录（表格导出模块配置用，返回 { path }）
+    pickSaveDir: () => ipcRenderer.invoke('crawler:pickSaveDir'),
+    // 实时日志（主进程推送 { projectId, runId, seq, ts, level, nodeId?, message }）
+    onLog: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('crawler:log', listener)
+      return () => ipcRenderer.removeListener('crawler:log', listener)
+    },
+    // 节点执行状态（{ projectId, runId, nodeId, status, error?, summary?, iteration?: {row,total} }）
+    onNode: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('crawler:node', listener)
+      return () => ipcRenderer.removeListener('crawler:node', listener)
+    },
+    // 整轮任务状态（{ projectId, runId, status: 'running'|'done'|'failed'|'stopped', rows?, error? }）
+    onRun: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('crawler:run', listener)
+      return () => ipcRenderer.removeListener('crawler:run', listener)
+    },
+    // 变量快照（{ projectId, runId, vars }）：每次变量变化（提取/接口拦截/表格行切换）全量推送
+    onVars: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('crawler:vars', listener)
+      return () => ipcRenderer.removeListener('crawler:vars', listener)
+    },
   },
 })

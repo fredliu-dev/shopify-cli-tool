@@ -16,6 +16,7 @@
     "@ant-design/icons": "^6.3.2",
     "@shopify-cli-tool/core": "workspace:*",
     "@shopify/cli": "^4.5.2",
+    "@xyflow/react": "^12.11.3",
     "adm-zip": "^0.6.0",
     "echarts": "^6.1.0",
     "smol-toml": "^1.7.1"

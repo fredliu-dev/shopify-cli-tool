@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { App } from 'antd'
 import { DetailDrawer, FlowModal, TapdStyles } from '../pages/Tapd.jsx'
+import { switchShellPage } from '../shell-events.js'
 
 /**
  * 工单详情抽屉宿主（主窗口本地项目彩带点击用）：传入工单链接（项目 _tapd），
@@ -33,10 +34,10 @@ export default function TapdItemDrawer({ open, link, onClose }) {
       if (res.error === 'NO_TAPD_AUTH') {
         modal.warning({
           title: '尚未配置 TAPD 访问令牌',
-          content: '打开 TAPD 工单窗口完成令牌配置后，即可在这里查看工单详情。',
+          content: '切到左侧 TAPD 工单页完成令牌配置后，即可在这里查看工单详情。',
           okText: '去配置',
           cancelText: '取消',
-          onOk: () => window.api.tapd.openWindow(),
+          onOk: () => switchShellPage('tapd'),
         })
       } else {
         message.error(res.error || '工单解析失败')

@@ -12,6 +12,7 @@ import { registerContactsIpc } from './ipc/contacts.js'
 import { registerDingtalkIpc } from './ipc/dingtalk.js'
 import { registerTapdIpc } from './ipc/tapd.js'
 import { registerSystemIpc } from './ipc/system.js'
+import { registerCrawlerIpc } from './ipc/crawler.js'
 
 // macOS Dock 标签、菜单栏应用名都取自 app.getName()：dev 下裸 electron 进程默认名是 "Electron"，
 // 打包后由 Info.plist 的 productName 改回 "Shopify Toolbox"。dev 下显式 setName 让两者一致；
@@ -93,6 +94,7 @@ app.whenReady().then(() => {
   registerDingtalkIpc()
   registerTapdIpc()
   registerSystemIpc()
+  registerCrawlerIpc()
   createWindow()
 
   // dev 模式下设置 Dock 图标：macOS 会忽略 BrowserWindow 的 icon 选项，
