@@ -11,6 +11,7 @@ import {
   buildLinks,
   parsePlaceholders,
   fillTemplate,
+  setDingtalkTemplateDefaults,
 } from '@shopify-cli-tool/core'
 
 // 列表末尾的「新增」哨兵值（用字符串避免与真实对象冲突）
@@ -365,9 +366,16 @@ export default {
       const save = await yesNo(log, `是否将以下保存为默认值？\n${preview}`, false)
       if (save === null) return
       if (save) {
-        tpl.defaults = { ...(tpl.defaults ?? {}), ...Object.fromEntries(inputEntries) }
-        saveDingtalkConfig(cfg)
-        log.success('已保存为默认值')
+        // 统一走 setDingtalkTemplateDefaults：系统模板的默认值须存 systemDefaults
+        // （saveDingtalkConfig 会剥离 system:true 模板，直接改 tpl.defaults 再存会静默丢失）
+        const merged = { ...(tpl.defaults ?? {}), ...Object.fromEntries(inputEntries) }
+        const saved = setDingtalkTemplateDefaults(tpl.id, merged)
+        if (saved) {
+          tpl.defaults = saved.defaults
+          log.success('已保存为默认值')
+        } else {
+          log.warn('未找到该模板，默认值未保存')
+        }
       }
     }
 

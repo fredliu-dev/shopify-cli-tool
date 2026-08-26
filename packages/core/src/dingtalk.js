@@ -56,6 +56,7 @@ export function loadDingtalkConfig() {
     ensureDataDir()
     let groups = []
     let templates = []
+    let systemDefaults = {}
     if (existsSync(DINGTALK_FILE)) {
         let raw = null
         try {
@@ -70,20 +71,27 @@ export function loadDingtalkConfig() {
             } else {
                 groups = Array.isArray(raw.groups) ? raw.groups : []
                 templates = Array.isArray(raw.templates) ? raw.templates : []
+                if (raw.systemDefaults && typeof raw.systemDefaults === 'object') systemDefaults = raw.systemDefaults
             }
         }
     }
-    // 系统群（来自环境变量）与系统模板（代码常量）始终合并进返回，但 save 时会被剥离、永不落盘
+    // 系统群（来自环境变量）与系统模板（代码常量）始终合并进返回，但 save 时会被剥离、永不落盘。
+    // 系统模板的默认负责人可被用户覆盖：覆盖值存 systemDefaults（随 dingtalk.json 落盘），加载时合并进内置默认值。
     return {
         groups: [...groups, ...SYSTEM_GROUPS],
-        templates: [...templates, ...SYSTEM_TEMPLATES],
+        templates: [
+            ...templates,
+            ...SYSTEM_TEMPLATES.map((t) => ({ ...t, defaults: { ...t.defaults, ...systemDefaults[t.id] } })),
+        ],
+        systemDefaults,
     }
 }
 
 /**
  * 保存钉钉配置。
  * 写入前剥离系统群/系统模板（system:true），保证只读的系统条目永不落盘 dingtalk.json（避免与环境变量/代码常量重复）。
- * @param {{ groups: Array, templates: Array }} cfg
+ * 系统模板的默认负责人覆盖值（systemDefaults）随 ...cfg 透传落盘。
+ * @param {{ groups: Array, templates: Array, systemDefaults?: object }} cfg
  */
 export function saveDingtalkConfig(cfg) {
     ensureDataDir()
@@ -260,8 +268,18 @@ export function removeDingtalkTemplate(id) {
  * @returns {object|null} 更新后的模板，找不到返回 null
  */
 export function setDingtalkTemplateDefaults(id, defaults) {
-    if (isSystemTemplate(id)) return null // 系统模板只读，不支持默认值
     const cfg = loadDingtalkConfig()
+    // 系统模板内容只读，但默认负责人可自定义：覆盖值单独存 systemDefaults，加载时合并回内置默认值
+    if (isSystemTemplate(id)) {
+        const overrides = cfg.systemDefaults[id] || {}
+        const next = defaults && Object.keys(defaults).length ? { ...overrides, ...defaults } : {}
+        if (Object.keys(next).length) cfg.systemDefaults[id] = next
+        else delete cfg.systemDefaults[id]
+        saveDingtalkConfig(cfg)
+        // 返回合并后的最新视图（cfg.templates 里还是 save 前的旧值）
+        const sys = SYSTEM_TEMPLATES.find((t) => t.id === id)
+        return { ...sys, defaults: { ...sys.defaults, ...cfg.systemDefaults[id] } }
+    }
     const idx = cfg.templates.findIndex((t) => t.id === id)
     if (idx < 0) return null
     if (defaults && Object.keys(defaults).length) cfg.templates[idx].defaults = defaults
