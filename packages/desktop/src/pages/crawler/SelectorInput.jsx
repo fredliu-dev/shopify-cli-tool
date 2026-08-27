@@ -1,8 +1,9 @@
-// 选择器共用表单块：匹配方式（class/id/class 正则）+ 值 + 超时。
+// 选择器共用表单块：匹配方式（class/id/class 正则/CSS 选择器）+ 值 + 超时。
 // wait/click/input/extract 四种模块的配置抽屉复用；语义与注入脚本 findAll 一致。
 import React from 'react'
 import { Form, Input, InputNumber, Radio, Typography } from 'antd'
 import { SELECTOR_MODES } from './constants.js'
+import { MAT } from './theme.js'
 
 const { Text } = Typography
 
@@ -19,9 +20,9 @@ export default function SelectorInput({ value, onChange, timeoutLabel = '超时�
     <div
       style={{
         padding: '12px 14px',
-        borderRadius: 10,
-        background: 'rgba(255,255,255,0.04)',
-        border: '1px solid rgba(255,255,255,0.09)',
+        borderRadius: 12,
+        background: MAT.card,
+        border: `1px solid ${MAT.line}`,
       }}
     >
       <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 10 }}>
@@ -39,7 +40,13 @@ export default function SelectorInput({ value, onChange, timeoutLabel = '超时�
       <Input
         size="small"
         placeholder={
-          sel.mode === 'id' ? '元素 id，如 kw' : sel.mode === 'classRegex' ? 'class 正则，如 price.*old' : 'class 类名，如 next'
+          sel.mode === 'id'
+            ? '元素 id，如 kw'
+            : sel.mode === 'classRegex'
+              ? 'class 正则，如 price.*old'
+              : sel.mode === 'css'
+                ? 'CSS 选择器，如 #kw、.btn.primary、a[href*="detail"]'
+                : 'class 类名，如 next'
         }
         value={sel.value}
         onChange={(e) => patch({ value: e.target.value })}
@@ -66,7 +73,9 @@ export default function SelectorInput({ value, onChange, timeoutLabel = '超时�
           ? '按 id 精确匹配元素'
           : sel.mode === 'classRegex'
             ? 'class 属性整体做正则匹配（包含即命中），可匹配动态类名'
-            : '按 class 名精确匹配（空格分隔的完整类名之一）'}
+            : sel.mode === 'css'
+              ? '标准 CSS 选择器语法：#id、.class、[属性="值"]；属性值支持 *= 包含、^= 开头、$= 结尾等模糊匹配，组合如 div.item > a[href^="/p"]'
+              : '按 class 名精确匹配（空格分隔的完整类名之一）'}
         ；查找会自动穿透 shadow DOM 与同源 iframe
       </Text>
     </div>

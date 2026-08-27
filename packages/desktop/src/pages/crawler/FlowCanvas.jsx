@@ -16,6 +16,7 @@ import CrawlerNode from './CrawlerNode.jsx'
 import CrawlerEdge from './CrawlerEdge.jsx'
 import { MODULES } from './constants.js'
 import { MODULE_DND_TYPE } from './ModulePanel.jsx'
+import { MAT } from './theme.js'
 
 const nodeTypes = Object.fromEntries(Object.keys(MODULES).map((t) => [t, CrawlerNode]))
 const edgeTypes = { crawler: CrawlerEdge }
@@ -53,7 +54,11 @@ export default function FlowCanvas({
   }, [])
 
   return (
-    <div style={{ flex: 1, minWidth: 0, position: 'relative' }} onDrop={onDrop} onDragOver={onDragOver}>
+    <div
+      style={{ flex: 1, minWidth: 0, position: 'relative', background: '#0a0a0d' }}
+      onDrop={onDrop}
+      onDragOver={onDragOver}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -74,19 +79,29 @@ export default function FlowCanvas({
         proOptions={{ hideAttribution: false }}
         style={{ backgroundColor: 'transparent' }}
         deleteKeyCode={['Backspace', 'Delete']}
-        connectionLineStyle={{ stroke: 'rgba(22,119,255,0.6)', strokeWidth: 1.5 }}
+        connectionLineStyle={{ stroke: 'rgba(10,132,255,0.55)', strokeWidth: 1.5 }}
       >
-        <Background variant={BackgroundVariant.Dots} color="rgba(255,255,255,0.08)" gap={20} size={1} />
+        <Background variant={BackgroundVariant.Dots} color="rgba(255,255,255,0.05)" gap={24} size={1.1} />
         <Controls
           showInteractive={false}
-          style={{ backgroundColor: 'rgba(20,20,24,0.9)', borderColor: 'rgba(255,255,255,0.12)' }}
+          style={{
+            backgroundColor: MAT.panel,
+            backdropFilter: MAT.blur,
+            border: `1px solid ${MAT.line}`,
+            borderRadius: 10,
+            overflow: 'hidden',
+          }}
         />
         <MiniMap
           pannable
           zoomable
-          maskColor="rgba(0,0,0,0.55)"
-          style={{ backgroundColor: 'rgba(13,13,15,0.9)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8 }}
-          nodeColor={(n) => MODULES[n.type]?.color || '#5a5a66'}
+          maskColor="rgba(5,5,7,0.55)"
+          style={{
+            backgroundColor: 'rgba(12,12,15,0.85)',
+            border: `1px solid ${MAT.line}`,
+            borderRadius: 10,
+          }}
+          nodeColor={(n) => MODULES[n.type]?.color || '#8e8e96'}
           nodeStrokeWidth={2}
         />
       </ReactFlow>

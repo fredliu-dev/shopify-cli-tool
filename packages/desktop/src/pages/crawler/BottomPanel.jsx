@@ -1,24 +1,63 @@
 // 底部控制台：抽屉式三档高度——收起（36px 细条，整条点击展开）/ 常规（默认 230px，
-// 顶缘手柄可拖拽调高）/ 最大化（78vh 大视野看日志）。Tab：日志（实时、级别着色、
-// 上限 500 条）+ 结果（提取数据）+ 变量（当前变量快照，随提取/接口拦截/表格行切换
-// 实时更新）+ 表格（导入表格模块跑完的整表，含编辑列）。Tab 栏右侧「打开窗口」开关：
-// 勾选后运行到「网页」模块打开网址时显示执行浏览器窗口（默认隐藏执行）。
+// 顶缘手柄可拖拽调高）/ 最大化（78vh 大视野看日志）。Tab：日志（实时、时间/级别徽标/
+// 模块徽标/正文四段行结构，级别整行淡染，上限 500 条）+ 结果（提取数据）+ 变量（当前
+// 变量快照，随提取/接口拦截/表格行切换实时更新；点击变量弹窗看完整内容——结构树点
+// key 复制 {{变量.路径}} 引用、格式化 JSON 全文）+ 表格（导入表格模块跑完的整表，含
+// 编辑列）。Tab 栏右侧「打开窗口」开关：勾选后运行到「网页」模块打开网址时显示执行
+// 浏览器窗口（默认隐藏执行）。
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Badge, Button, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd'
-import { DownOutlined, FullscreenExitOutlined, FullscreenOutlined, UpOutlined } from '@ant-design/icons'
+import { App, Badge, Button, Modal, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd'
+import {
+  CopyOutlined,
+  DownOutlined,
+  FullscreenExitOutlined,
+  FullscreenOutlined,
+  RightOutlined,
+  UpOutlined,
+} from '@ant-design/icons'
 import ResultsPanel from './ResultsPanel.jsx'
+import { MODULES } from './constants.js'
+import { ACCENT, EASE, INK, MAT, MONO, STATUS } from './theme.js'
 
 const { Text } = Typography
 
 const COLLAPSED_H = 36
 const MIN_H = 140
 
-const LEVEL_COLOR = {
-  info: 'rgba(255,255,255,0.55)',
-  success: '#95de64',
-  warn: '#ffc069',
-  error: '#ff7875',
+// 日志级别元数据：徽标文案/徽标底色/整行淡染底色/正文色（warn·error 整行染色，异常一眼扫到）
+const LEVEL_META = {
+  info: { text: '信息', color: 'rgba(255,255,255,0.55)', chipBg: 'rgba(255,255,255,0.08)', bg: 'transparent', msg: 'rgba(255,255,255,0.78)' },
+  success: { text: '成功', color: STATUS.success, chipBg: 'rgba(48,209,88,0.14)', bg: 'rgba(48,209,88,0.07)', msg: 'rgba(255,255,255,0.85)' },
+  warn: { text: '警告', color: '#ffd60a', chipBg: 'rgba(255,214,10,0.12)', bg: 'rgba(255,214,10,0.07)', msg: '#ffd60a' },
+  error: { text: '错误', color: STATUS.failed, chipBg: 'rgba(255,69,58,0.16)', bg: 'rgba(255,69,58,0.1)', msg: STATUS.failed },
 }
+
+// Tabs 改 macOS 分段控件样式：去 ink-bar 下划线，活动段浅白填充圆角，
+// 非活动段弱化文字；作用域挂在 .crawler-console-tabs 下避免外泄
+const CONSOLE_TABS_CSS = `
+.crawler-console-tabs .ant-tabs-nav { margin: 10px 12px 0 !important; }
+.crawler-console-tabs .ant-tabs-nav::before { display: none !important; }
+.crawler-console-tabs .ant-tabs-tab {
+  margin: 0 1px !important;
+  padding: 4px 12px !important;
+  border-radius: 8px;
+  transition: background 0.2s ${EASE}, color 0.2s ${EASE};
+}
+.crawler-console-tabs .ant-tabs-tab:first-child { margin-left: 0 !important; }
+.crawler-console-tabs .ant-tabs-tab:hover { color: rgba(255,255,255,0.85) !important; }
+.crawler-console-tabs .ant-tabs-tab .ant-tabs-tab-btn { font-size: 12px; color: ${INK[2]}; }
+.crawler-console-tabs .ant-tabs-tab-active { background: rgba(255,255,255,0.1); }
+.crawler-console-tabs .ant-tabs-tab-active .ant-tabs-tab-btn { color: rgba(255,255,255,0.95) !important; font-weight: 600; }
+.crawler-console-tabs .ant-tabs-ink-bar { display: none !important; }
+.crawler-console-tabs .ant-tabs-extra-content { margin-right: 8px; margin-left: 10px; }
+/* 高度链：Tabs 根 → 内容仓 → 面板逐层撑满，内层 overflowY:auto 才拿得到有界高度，
+   日志/结果/变量/表格四个 Tab 才能各自竖向滚动（否则内容被外层裁掉、不出现滚动条） */
+.crawler-console-tabs { height: 100%; display: flex; flex-direction: column; }
+.crawler-console-tabs .ant-tabs-nav { flex: 0 0 auto; }
+.crawler-console-tabs .ant-tabs-content-holder { flex: 1 1 auto; min-height: 0; }
+.crawler-console-tabs .ant-tabs-content,
+.crawler-console-tabs .ant-tabs-tabpane { height: 100%; }
+`
 
 const fmtTs = (ts) => {
   const d = new Date(ts || Date.now())
@@ -26,6 +65,10 @@ const fmtTs = (ts) => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+/**
+ * 日志列表：行结构 = 时间 → 级别徽标 → 模块徽标（图标+节点名，模块色）→ 正文。
+ * warn/error/success 整行淡染；与日志关联的模块由主进程随日志推送 nodeType/nodeLabel。
+ */
 function LogList({ logs }) {
   const boxRef = useRef(null)
   // 新日志自动滚到底（用户往上翻历史时不打扰：距底 <80px 才跟随）
@@ -37,21 +80,55 @@ function LogList({ logs }) {
   }, [logs])
 
   return (
-    <div ref={boxRef} style={{ height: '100%', overflowY: 'auto', padding: '6px 10px', fontSize: 12, lineHeight: 1.9 }}>
+    <div ref={boxRef} style={{ height: '100%', overflowY: 'auto', padding: '6px 10px 10px', fontSize: 12, lineHeight: 1.7 }}>
       {logs.length === 0 && <Text type="secondary">运行日志会实时输出到这里</Text>}
-      {logs.map((l) => (
-        <div key={l.seq} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-          <Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
-            {fmtTs(l.ts)}
-          </Text>
-          <span style={{ color: LEVEL_COLOR[l.level] || LEVEL_COLOR.info, wordBreak: 'break-all' }}>{l.message}</span>
-        </div>
-      ))}
+      {logs.map((l) => {
+        const lv = LEVEL_META[l.level] || LEVEL_META.info
+        const meta = MODULES[l.nodeType]
+        const Icon = meta?.icon
+        return (
+          <div
+            key={l.seq}
+            style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '2px 8px', borderRadius: 6, background: lv.bg }}
+          >
+            <span style={{ fontSize: 11, fontFamily: MONO, color: INK[3], flexShrink: 0 }}>{fmtTs(l.ts)}</span>
+            <span
+              style={{ flexShrink: 0, width: 36, textAlign: 'center', fontSize: 10.5, lineHeight: '16px', borderRadius: 4, color: lv.color, background: lv.chipBg }}
+            >
+              {lv.text}
+            </span>
+            {meta && (
+              <span
+                title={l.nodeLabel || meta.name}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  flexShrink: 0,
+                  maxWidth: 150,
+                  padding: '0 7px',
+                  fontSize: 10.5,
+                  lineHeight: '16px',
+                  borderRadius: 4,
+                  color: meta.color,
+                  background: `${meta.color}1a`,
+                }}
+              >
+                {Icon && <Icon style={{ fontSize: 10 }} />}
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {l.nodeLabel || meta.name}
+                </span>
+              </span>
+            )}
+            <span style={{ color: lv.msg, wordBreak: 'break-all' }}>{l.message}</span>
+          </div>
+        )
+      })}
     </div>
   )
 }
 
-// 变量值展示：对象/数组 JSON 化，超长截断（接口拦截的响应体可能非常大，完整值悬停 title 可看前 2000 字符）
+// 变量值单行预览：对象/数组 JSON 化，超长截断（完整内容点击行弹窗查看）
 function fmtVar(v) {
   if (v === null) return 'null'
   if (v === undefined) return 'undefined'
@@ -59,26 +136,201 @@ function fmtVar(v) {
   return s.length > 200 ? `${s.slice(0, 200)}…` : s
 }
 
+const varToString = (v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v))
+
+// 剪贴板：优先异步 API，不可用时降级 execCommand
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.cssText = 'position:fixed;opacity:0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  }
+}
+
+// 叶子值预览：字符串绿 / 数字蓝 / 布尔·null 橙（Apple 暗色系统色），超长单行截断
+function LeafValue({ value }) {
+  const text = varToString(value)
+  const color = typeof value === 'string' ? STATUS.success : typeof value === 'number' ? '#64d2ff' : ACCENT
+  return <span style={{ color, fontFamily: MONO, wordBreak: 'break-all' }}>{text.length > 160 ? `${text.slice(0, 160)}…` : text}</span>
+}
+
+/** 结构树子项每页渲染数：大响应先渲染前 50 项，「加载更多」按需铺开，防 DOM 一次撑爆。 */
+const TREE_PAGE = 50
+
+/**
+ * JSON 结构树节点：分支可折叠（默认展开前 2 层）。行点击复制 {{变量.路径}} 引用——
+ * 路径段拼接与主进程 lookupVar 的下钻规则一致（对象键 / 数组下标均可）；
+ * 折叠箭头单独点击只展开不复制。
+ */
+function TreeNode({ varName, path, label, value, depth, onCopyRef }) {
+  const isBranch = value !== null && typeof value === 'object'
+  const isArray = Array.isArray(value)
+  const [open, setOpen] = useState(depth < 2)
+  const [shown, setShown] = useState(TREE_PAGE)
+  const entries = isBranch ? (isArray ? value.map((v, i) => [String(i), v]) : Object.entries(value)) : []
+  const ref = `{{${[varName, ...path].join('.')}}}`
+  const isIndex = isArray && /^\d+$/.test(label)
+  return (
+    <div>
+      <div
+        onClick={() => onCopyRef(ref)}
+        title={`点击复制引用 ${ref}，粘贴到后续模块即可取该值`}
+        style={{ display: 'flex', alignItems: 'flex-start', gap: 6, paddingLeft: depth * 16, paddingRight: 4, cursor: 'pointer', lineHeight: 1.8, borderRadius: 4 }}
+      >
+        {isBranch ? (
+          <span
+            onClick={(e) => {
+              e.stopPropagation()
+              setOpen(!open)
+            }}
+            title={open ? '折叠' : '展开'}
+            // 高度钉在一行文本的行高上（内部再垂直居中）：后面的值折成多少行，
+            // 箭头都贴着 key 所在的第一行，不会跟着整行居中漂移
+            style={{ flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', height: '1.8em', padding: '0 3px 0 0', margin: '0 -3px 0 0' }}
+          >
+            <RightOutlined style={{ fontSize: 9, color: 'rgba(255,255,255,0.4)', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
+          </span>
+        ) : (
+          <span style={{ width: 9, flexShrink: 0, height: '1.8em' }} />
+        )}
+        <span style={{ color: isIndex ? 'rgba(255,255,255,0.35)' : ACCENT, fontFamily: MONO, flexShrink: 0 }}>{label}:</span>
+        {isBranch ? (
+          // 收起时不铺内容预览（长 JSON 挤成一行太乱），只给项数提示；点行照样复制引用
+          <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11, flexShrink: 0 }}>
+            {entries.length === 0 ? (isArray ? '[ ]' : '{ }') : isArray ? `[${entries.length} 项]` : `{${entries.length} 个键}`}
+          </span>
+        ) : (
+          <LeafValue value={value} />
+        )}
+      </div>
+      {isBranch && open && (
+        <div>
+          {entries.slice(0, shown).map(([k, v]) => (
+            <TreeNode key={k} varName={varName} path={[...path, k]} label={k} value={v} depth={depth + 1} onCopyRef={onCopyRef} />
+          ))}
+          {entries.length > shown && (
+            <Button size="small" type="link" style={{ paddingLeft: (depth + 1) * 16, height: 22 }} onClick={() => setShown(shown + 200)}>
+              还有 {entries.length - shown} 项，加载更多
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 变量完整内容弹窗：结构树（点击 key 复制 {{变量.路径}} 引用）+ 格式化 JSON 全文两个 Tab。
+ * value 优先取 vars 里的实时值（运行中拦截/换行更新时弹窗内容跟着变），变量已被清掉时用打开时的快照。
+ */
+function VarValueModal({ viewing, liveValue, onClose }) {
+  const { message } = App.useApp()
+  if (!viewing) return null
+  const value = liveValue !== undefined ? liveValue : viewing.value
+  const name = viewing.name
+  let pretty
+  try {
+    pretty = value !== null && typeof value === 'object' ? JSON.stringify(value, null, 2) : varToString(value)
+  } catch {
+    pretty = varToString(value)
+  }
+  const wholeRef = `{{${name}}}`
+  const copy = async (text, tip) => {
+    if (await copyText(text)) message.success(tip)
+    else message.error('复制失败，请手动选择复制')
+  }
+  return (
+    <Modal
+      open
+      onCancel={onClose}
+      footer={null}
+      width={780}
+      title={
+        <span style={{ fontSize: 14 }}>
+          变量 <span style={{ color: ACCENT, fontFamily: MONO }}>{name}</span> · 完整内容
+        </span>
+      }
+      styles={{ body: { height: '68vh', overflow: 'hidden', paddingTop: 4 } }}
+    >
+      <Tabs
+        size="small"
+        tabBarExtraContent={{
+          right: (
+            <Space size={4}>
+              <Button size="small" icon={<CopyOutlined />} onClick={() => copy(wholeRef, `已复制引用 ${wholeRef}`)}>
+                复制引用
+              </Button>
+              <Button size="small" icon={<CopyOutlined />} onClick={() => copy(pretty, '已复制格式化 JSON')}>
+                复制 JSON
+              </Button>
+            </Space>
+          ),
+        }}
+        items={[
+          {
+            key: 'tree',
+            label: '结构树（点 key 复制引用）',
+            children: (
+              <div style={{ height: 'calc(68vh - 56px)', overflowY: 'auto', fontSize: 12 }}>
+                <TreeNode
+                  varName={name}
+                  path={[]}
+                  label={name}
+                  value={value}
+                  depth={0}
+                  onCopyRef={(ref) => copy(ref, `已复制 ${ref}，可粘贴到后续模块取该值`)}
+                />
+              </div>
+            ),
+          },
+          {
+            key: 'json',
+            label: '格式化 JSON',
+            children: (
+              <pre
+                style={{ height: 'calc(68vh - 56px)', overflowY: 'auto', margin: 0, fontSize: 12, lineHeight: 1.7, color: 'rgba(255,255,255,0.82)', fontFamily: MONO, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+              >
+                {pretty}
+              </pre>
+            ),
+          },
+        ]}
+      />
+    </Modal>
+  )
+}
+
 function VarsList({ vars }) {
+  const [viewing, setViewing] = useState(null)
   const entries = useMemo(() => Object.entries(vars || {}), [vars])
   if (vars === null) return <Text type="secondary">运行后，变量会在这里实时显示（提取 / 接口拦截 / 表格行切换都会更新）</Text>
   if (entries.length === 0) return <Text type="secondary">暂无变量：「提取」「接口拦截」模块运行后会写入变量</Text>
   return (
     <div style={{ height: '100%', overflowY: 'auto', padding: '6px 10px', fontSize: 12, lineHeight: 1.9 }}>
-      {entries.map(([k, v]) => {
-        const raw = typeof v === 'string' ? v : JSON.stringify(v)
-        return (
-          <div key={k} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-            <span style={{ color: '#ffa940', fontFamily: 'ui-monospace, Menlo, monospace', flexShrink: 0 }}>{k}</span>
-            <span
-              title={raw?.length > 2000 ? `${raw.slice(0, 2000)}…` : raw}
-              style={{ color: 'rgba(255,255,255,0.78)', fontFamily: 'ui-monospace, Menlo, monospace', wordBreak: 'break-all' }}
-            >
-              {fmtVar(v)}
-            </span>
-          </div>
-        )
-      })}
+      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 2 }}>
+        点击变量看完整内容；后续模块用 {'{{变量名.字段.下标}}'} 取内部值
+      </Text>
+      {entries.map(([k, v]) => (
+        <div
+          key={k}
+          onClick={() => setViewing({ name: k, value: v })}
+          title="点击查看完整内容"
+          style={{ display: 'flex', gap: 8, alignItems: 'baseline', cursor: 'pointer', padding: '0 6px', borderRadius: 6 }}
+        >
+          <span style={{ color: ACCENT, fontFamily: MONO, flexShrink: 0 }}>{k}</span>
+          <span style={{ color: 'rgba(255,255,255,0.78)', fontFamily: MONO, wordBreak: 'break-all' }}>{fmtVar(v)}</span>
+          <RightOutlined style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', flexShrink: 0 }} />
+        </div>
+      ))}
+      <VarValueModal viewing={viewing} liveValue={viewing ? vars?.[viewing.name] : undefined} onClose={() => setViewing(null)} />
     </div>
   )
 }
@@ -127,9 +379,11 @@ export default function BottomPanel({
       style={{
         height: pxHeight,
         flexShrink: 0,
-        borderTop: '1px solid rgba(255,255,255,0.08)',
-        background: 'rgba(13,13,15,0.75)',
-        transition: dragging ? 'none' : 'height 0.2s',
+        borderTop: `1px solid ${MAT.line}`,
+        background: MAT.bar,
+        backdropFilter: MAT.blur,
+        WebkitBackdropFilter: MAT.blur,
+        transition: dragging ? 'none' : `height 0.28s ${EASE}`,
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
@@ -165,9 +419,11 @@ export default function BottomPanel({
           )}
         </div>
       ) : (
-        <div style={{ flex: 1, minHeight: 0, padding: '0 8px' }}>
+        <div style={{ flex: 1, minHeight: 0, padding: '0 4px' }}>
+          <style>{CONSOLE_TABS_CSS}</style>
           <Tabs
             size="small"
+            className="crawler-console-tabs"
             tabBarExtraContent={{
               right: (
                 <Space size={0}>
@@ -255,7 +511,7 @@ export default function BottomPanel({
                     <ResultsPanel
                       rows={table?.rows || []}
                       columns={table?.columns}
-                      emptyText="「导入表格」模块跑完后，整张表格（含编辑模块写入的列）会显示在这里"
+                      emptyText="表格数据实时显示在这里：「导入表格」的整表 +「表格编辑」写入的行列（没有导入表格时表格编辑会自动建表新行）"
                     />
                   </div>
                 ),

@@ -174,5 +174,11 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.on('crawler:vars', listener)
       return () => ipcRenderer.removeListener('crawler:vars', listener)
     },
+    // 表格快照（{ projectId, runId, table }）：导入表格读入、表格编辑写入后全量推送（null=清空）
+    onTable: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('crawler:table', listener)
+      return () => ipcRenderer.removeListener('crawler:table', listener)
+    },
   },
 })

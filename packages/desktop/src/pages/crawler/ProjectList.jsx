@@ -1,30 +1,32 @@
-// 爬虫项目列表视图：卡片网格（玻璃拟态），新建/导入/重命名/删除，点卡片进编辑器。
+// 爬虫项目列表视图：卡片网格（安静毛玻璃 + 悬停抬升），新建/导入/重命名/删除，
+// 点卡片进编辑器。卡片左侧着色图标 chip（iOS 设置行风格）按项目 id 稳定取色。
 import React, { useEffect, useState } from 'react'
-import { App, Button, Card, Col, Empty, Input, Modal, Popconfirm, Row, Space, Spin, Tag, Typography } from 'antd'
+import { App, Button, Col, Empty, Input, Modal, Popconfirm, Row, Space, Spin, Typography } from 'antd'
 import {
   DeleteOutlined,
+  DeploymentUnitOutlined,
   DownloadOutlined,
   EditOutlined,
   PlusOutlined,
   RightOutlined,
   UploadOutlined,
 } from '@ant-design/icons'
+import { EASE, INK, LIFT, MAT, iconChip } from './theme.js'
 
-const { Text, Title } = Typography
+const { Text } = Typography
 
-// 玻璃拟态（同 Repos.jsx 的 GLASS/HOVER_GLASS，页面独立一份避免跨页面 import）
-const GLASS = {
-  background: 'rgba(255,255,255,0.055)',
-  backdropFilter: 'blur(24px) saturate(180%)',
-  WebkitBackdropFilter: 'blur(24px) saturate(180%)',
-  border: '1px solid rgba(255,255,255,0.1)',
-  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)',
-}
-const HOVER_GLASS = {
-  background: 'rgba(255,255,255,0.1)',
-  border: '1px solid rgba(255,255,255,0.24)',
-  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.12), 0 8px 28px rgba(0,0,0,0.35)',
-}
+// 项目卡左侧 chip 的取色板（Apple 暗色系统色；按 id 哈希稳定取一个）
+const CHIP_COLORS = ['#0a84ff', '#bf5af2', '#30d158', '#ff9f0a', '#64d2ff', '#ff375f', '#5e5ce6', '#63e6e2']
+const chipColorOf = (id) => CHIP_COLORS[[...(id || '')].reduce((a, c) => a + c.charCodeAt(0), 0) % CHIP_COLORS.length]
+
+// 卡片悬停/按压：CSS 过渡（含 -2px 抬升 + 阴影弥散），比 JS 换行内样式顺滑
+const CARD_CSS = `
+.proj-card { transition: transform 0.28s ${EASE}, background 0.28s ${EASE}, border-color 0.28s ${EASE}, box-shadow 0.28s ${EASE}; }
+.proj-card:hover { transform: translateY(-2px); background: rgba(255,255,255,0.075); border-color: rgba(255,255,255,0.2); box-shadow: ${LIFT}; }
+.proj-card:active { transform: translateY(0); }
+.proj-card .proj-actions { opacity: 0; transition: opacity 0.2s ${EASE}; }
+.proj-card:hover .proj-actions { opacity: 1; }
+`
 
 const fmtTime = (iso) => {
   if (!iso) return ''
@@ -88,13 +90,16 @@ export default function ProjectList({ onOpen, onImported }) {
   }
 
   return (
-    <div style={{ padding: '28px 36px', height: '100%', overflowY: 'auto' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+    <div style={{ padding: '30px 38px', height: '100%', overflowY: 'auto' }}>
+      <style>{CARD_CSS}</style>
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 26 }}>
         <div>
-          <Title level={4} style={{ margin: 0 }}>
+          <div style={{ fontSize: 24, fontWeight: 600, letterSpacing: '-0.4px', color: INK[1], lineHeight: 1.2 }}>
             爬虫工作流
-          </Title>
-          <Text type="secondary">拖拽模块搭建流程，后台自动执行并提取数据</Text>
+          </div>
+          <Text type="secondary" style={{ fontSize: 13, marginTop: 6, display: 'block' }}>
+            拖拽模块搭建流程，后台自动执行并提取数据
+          </Text>
         </div>
         <Space>
           <Button icon={<UploadOutlined />} onClick={importGraph}>
@@ -124,49 +129,79 @@ export default function ProjectList({ onOpen, onImported }) {
         <Row gutter={[16, 16]}>
           {projects.map((p) => (
             <Col key={p.id} xs={24} sm={12} md={8} lg={6}>
-              <Card
-                hoverable
-                style={{ ...GLASS, transition: 'all 0.25s', cursor: 'pointer', borderRadius: 12 }}
-                styles={{ body: { padding: 16 } }}
+              <div
+                className="proj-card"
+                style={{
+                  borderRadius: 16,
+                  padding: '16px 16px 12px',
+                  background: MAT.card,
+                  backdropFilter: MAT.blur,
+                  WebkitBackdropFilter: MAT.blur,
+                  border: `1px solid ${MAT.line}`,
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.06)',
+                  cursor: 'pointer',
+                }}
                 onClick={() => onOpen(p.id)}
-                onMouseEnter={(e) => Object.assign(e.currentTarget.style, HOVER_GLASS)}
-                onMouseLeave={(e) => Object.assign(e.currentTarget.style, GLASS)}
+                title="打开项目"
               >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                  <Text strong ellipsis={{ tooltip: p.name }} style={{ fontSize: 15 }}>
-                    {p.name}
-                  </Text>
-                  <Tag color="blue" style={{ marginInlineEnd: 0, flexShrink: 0 }}>
-                    {p.nodeCount} 节点
-                  </Tag>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <span style={iconChip(chipColorOf(p.id), 32, 17)}>
+                    <DeploymentUnitOutlined />
+                  </span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div
+                      title={p.name}
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        color: INK[1],
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {p.name}
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      更新于 {fmtTime(p.updatedAt)}
+                    </Text>
+                  </div>
                 </div>
-                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
-                  更新于 {fmtTime(p.updatedAt)}
-                </Text>
                 <div
-                  style={{ display: 'flex', gap: 4, marginTop: 12, justifyContent: 'flex-end' }}
+                  className="proj-actions"
+                  style={{ display: 'flex', gap: 2, marginTop: 12, justifyContent: 'space-between', alignItems: 'center' }}
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <Button
-                    size="small"
-                    type="text"
-                    icon={<RightOutlined />}
-                    onClick={() => onOpen(p.id)}
-                  />
-                  <Button
-                    size="small"
-                    type="text"
-                    icon={<EditOutlined />}
-                    onClick={() => {
-                      setRenaming(p)
-                      setRenameValue(p.name)
+                  <span
+                    style={{
+                      fontSize: 10,
+                      lineHeight: '18px',
+                      padding: '0 8px',
+                      borderRadius: 999,
+                      color: '#6cb2ff',
+                      background: 'rgba(10,132,255,0.13)',
                     }}
-                  />
-                  <Popconfirm title="确定删除该项目？" onConfirm={() => remove(p.id)} okText="删除" cancelText="取消">
-                    <Button size="small" type="text" danger icon={<DeleteOutlined />} />
-                  </Popconfirm>
+                  >
+                    {p.nodeCount} 节点
+                  </span>
+                  <Space size={0}>
+                    <Button size="small" type="text" icon={<RightOutlined />} onClick={() => onOpen(p.id)} title="打开" />
+                    <Button
+                      size="small"
+                      type="text"
+                      icon={<EditOutlined />}
+                      onClick={() => {
+                        setRenaming(p)
+                        setRenameValue(p.name)
+                      }}
+                      title="重命名"
+                    />
+                    <Popconfirm title="确定删除该项目？" onConfirm={() => remove(p.id)} okText="删除" cancelText="取消">
+                      <Button size="small" type="text" danger icon={<DeleteOutlined />} title="删除" />
+                    </Popconfirm>
+                  </Space>
                 </div>
-              </Card>
+              </div>
             </Col>
           ))}
         </Row>

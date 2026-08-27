@@ -4,7 +4,18 @@ import React from 'react'
 import { App, Button, Drawer, Form, Input, InputNumber, Popconfirm, Radio, Select, Space, Tag, Typography } from 'antd'
 import { DeleteOutlined, FolderOpenOutlined, PlusOutlined } from '@ant-design/icons'
 import SelectorInput from './SelectorInput.jsx'
-import { CONDITION_OPS, MODULES, isUnaryOp } from './constants.js'
+import VariableInput from './VariableInput.jsx'
+import { CLICK_EVENTS, CLICK_TARGETS, CONDITION_OPS, MODULES, isUnaryOp } from './constants.js'
+import { INK, MAT, iconChip } from './theme.js'
+
+/** 抽屉内嵌卡片（字段卡 / 文件摘要卡）：统一材质，radius 12。 */
+const NEST_CARD = {
+  padding: 12,
+  borderRadius: 12,
+  background: MAT.card,
+  border: `1px solid ${MAT.line}`,
+  marginBottom: 10,
+}
 
 const { Text } = Typography
 
@@ -18,15 +29,7 @@ function FieldCard({ field, index, onChange, onRemove }) {
   const patch = (fields) => onChange(index, { ...field, ...fields })
   const patchSelector = (s) => patch({ selector: s })
   return (
-    <div
-      style={{
-        padding: 12,
-        borderRadius: 10,
-        background: 'rgba(255,255,255,0.03)',
-        border: '1px solid rgba(255,255,255,0.08)',
-        marginBottom: 10,
-      }}
-    >
+    <div style={NEST_CARD}>
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
         <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>
           字段{index + 1}
@@ -70,7 +73,7 @@ function FieldCard({ field, index, onChange, onRemove }) {
   )
 }
 
-export default function ConfigDrawer({ node, open, onClose, onDataPatch }) {
+export default function ConfigDrawer({ node, open, onClose, onDataPatch, variableOptions = [] }) {
   const { message } = App.useApp()
   if (!node) return null
   const meta = MODULES[node.type]
@@ -117,17 +120,20 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch }) {
     <Drawer
       title={
         <Space>
-          <span style={{ color: meta.color, display: 'flex' }}>
+          <span style={iconChip(meta.color, 24, 13)}>
             <Icon />
           </span>
-          配置「{meta.name}」模块
+          <span style={{ fontWeight: 600, color: INK[1] }}>配置「{meta.name}」模块</span>
         </Space>
       }
       placement="right"
       width={460}
       open={open}
       onClose={onClose}
-      styles={{ body: { paddingTop: 12 } }}
+      styles={{
+        header: { padding: '14px 20px', borderBottom: `1px solid ${MAT.line}` },
+        body: { paddingTop: 14, background: '#101014' },
+      }}
     >
       <Form layout="vertical" component={false}>
         <Form.Item label="节点名称" style={{ marginBottom: 14 }}>
@@ -166,8 +172,29 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch }) {
         {node.type === 'click' && (
           <>
             <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} />
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 10 }}>
-              点击后如发生页面跳转会自动等加载完成；超时时间兼作点击后等待跳转的上限。
+            <Form.Item label="触发事件" style={{ marginTop: 14, marginBottom: 12 }}>
+              <Radio.Group
+                size="small"
+                optionType="button"
+                buttonStyle="solid"
+                options={CLICK_EVENTS}
+                value={data.event || 'click'}
+                onChange={(e) => patch({ event: e.target.value })}
+              />
+            </Form.Item>
+            <Form.Item label="触发范围" style={{ marginBottom: 12 }}>
+              <Radio.Group
+                size="small"
+                optionType="button"
+                buttonStyle="solid"
+                options={CLICK_TARGETS}
+                value={data.target || 'first'}
+                onChange={(e) => patch({ target: e.target.value })}
+              />
+            </Form.Item>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4, lineHeight: 1.7 }}>
+              匹配到多个元素时：仅触发第一个，或按页面顺序依次触发全部（每个间隔约 0.1 秒）。回车会先聚焦元素再按键；
+              点击/双击/回车可能引起页面跳转，会自动等加载完成，超时时间兼作触发与等待跳转的上限。
             </Text>
           </>
         )}
@@ -270,15 +297,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch }) {
               </Button>
             </Form.Item>
             {data.filePath ? (
-              <div
-                style={{
-                  padding: 12,
-                  borderRadius: 10,
-                  background: 'rgba(255,255,255,0.03)',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  marginBottom: 12,
-                }}
-              >
+              <div style={{ ...NEST_CARD, marginBottom: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <Text style={{ fontSize: 13, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={data.filePath}>
                     {data.fileName}
@@ -300,9 +319,90 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch }) {
                 还未选择表格文件
               </Text>
             )}
+            <Form.Item label="写入变量名" style={{ marginBottom: 12 }}>
+              <Input
+                value={data.varName}
+                onChange={(e) => patch({ varName: e.target.value })}
+                placeholder="表格数据"
+                maxLength={30}
+              />
+            </Form.Item>
             <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
-              运行时重新读取文件内容（选完后文件更新也能拿到最新数据）。每一行数据依次执行后续模块，
-              列名可直接作为变量在后续模块里用 {'{{列名}}'} 引用。
+              运行时重新读取文件内容（选完后文件更新也能拿到最新数据）。整表写入上面的变量
+              （数组，每行一个对象），<b>不会自动逐行循环</b>——要逐行走就接一个{'「数据循环」'}
+              模块并选这个变量（当前项的字段就是列名）；表格照常进控制台「表格」页。
+            </Text>
+          </>
+        )}
+
+        {node.type === 'loop' && (
+          <>
+            <Form.Item label="要循环的变量" required style={{ marginBottom: 12 }}>
+              <VariableInput
+                value={data.varName}
+                onChange={(v) => patch({ varName: v })}
+                options={variableOptions}
+                mode="name"
+                placeholder="下拉选择已定义的变量，或输入 .字段.下标 深层路径"
+              />
+            </Form.Item>
+            <Form.Item label="分割符（变量为字符串时必填）" style={{ marginBottom: 12 }}>
+              <Input
+                value={data.split}
+                onChange={(e) => patch({ split: e.target.value })}
+                placeholder={'如 , 或 | ；换行填 \\n'}
+                maxLength={20}
+              />
+            </Form.Item>
+            <Form.Item label="并发进程数" style={{ marginBottom: 12 }}>
+              <InputNumber
+                min={1}
+                max={10}
+                value={data.concurrency || 1}
+                onChange={(v) => patch({ concurrency: Math.max(1, Math.min(10, Math.round(v || 1))) })}
+                style={{ width: 160 }}
+                addonAfter="进程"
+                controls={false}
+              />
+            </Form.Item>
+            <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
+              变量是数组时直接遍历（分割符不生效）；是字符串时按分割符拆分后遍历（
+              {'\\n'} 表示换行，空片段自动丢弃）。每一轮把当前项写入 {'{{当前项}}'}、
+              序号写入 {'{{当前序号}}'}（从 1 起），对象项的字段也直接作为变量可用。
+              连线方式：循环体最后一个模块连回本模块 = 继续下一项；循环完后再从它连出
+              到后续模块 = 循环结束后继续执行。并发大于 1 时同时起对应数量的隐藏浏览器
+              进程，数据项轮流分给各进程同时跑循环体（各进程变量、表格行独立，互不影响；
+              登录态共享；{'{{当前序号}}'} 仍是全局序号），跑完自动合并提取结果与表格，
+              任一进程出错则整次运行失败；循环体内连到循环体外的连线会等全部进程结束后再走。
+            </Text>
+          </>
+        )}
+
+        {node.type === 'dataProcess' && (
+          <>
+            <Form.Item label="要处理的变量" required style={{ marginBottom: 12 }}>
+              <VariableInput
+                value={data.varName}
+                onChange={(v) => patch({ varName: v })}
+                options={variableOptions}
+                mode="name"
+                placeholder="下拉选择已定义的变量，或输入 .字段.下标 深层路径"
+              />
+            </Form.Item>
+            <Form.Item label="处理代码（JS）" required style={{ marginBottom: 12 }}>
+              <Input.TextArea
+                value={data.code}
+                onChange={(e) => patch({ code: e.target.value })}
+                placeholder={'// value = 变量旧值，vars = 全部变量\nreturn value.map(x => x.title)'}
+                autoSize={{ minRows: 4, maxRows: 14 }}
+                maxLength={5000}
+                style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12 }}
+              />
+            </Form.Item>
+            <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
+              代码在主进程沙箱里执行：旧值用 <code>value</code> 取，别的变量用 <code>vars.变量名</code> 取；
+              <code>return</code> 的结果（对象/数组/数字/文本都行）作为该变量的新值，深层路径（如 接口数据.data.list）会写回原位置。
+              可用 JSON / Math / Date 等，<code>console.log</code> 会打进运行日志；支持 async/await，超过 5 秒按超时失败。
             </Text>
           </>
         )}
@@ -310,11 +410,11 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch }) {
         {node.type === 'condition' && (
           <>
             <Form.Item label="左值" required style={{ marginBottom: 12 }}>
-              <Input
+              <VariableInput
                 value={data.left}
-                onChange={(e) => patch({ left: e.target.value })}
-                placeholder="变量如 {{价格}}，或固定值"
-                maxLength={200}
+                onChange={(v) => patch({ left: v })}
+                options={variableOptions}
+                placeholder="下拉选变量（自动带 {{}}），或输入固定值"
               />
             </Form.Item>
             <Form.Item label="比较方式" style={{ marginBottom: 12 }}>
@@ -327,11 +427,11 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch }) {
             </Form.Item>
             {!isUnaryOp(data.op) && (
               <Form.Item label="右值" required style={{ marginBottom: 12 }}>
-                <Input
+                <VariableInput
                   value={data.right}
-                  onChange={(e) => patch({ right: e.target.value })}
-                  placeholder="变量 {{列名}}，或数字/文本"
-                  maxLength={200}
+                  onChange={(v) => patch({ right: v })}
+                  options={variableOptions}
+                  placeholder="下拉选变量（自动带 {{}}），或输入数字/文本"
                 />
               </Form.Item>
             )}
@@ -353,15 +453,17 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch }) {
               />
             </Form.Item>
             <Form.Item label="值" style={{ marginBottom: 12 }}>
-              <Input
+              <VariableInput
                 value={data.value}
-                onChange={(e) => patch({ value: e.target.value })}
-                placeholder="支持 {{变量}}，如 {{价格}}（提取字段 / 表格列）"
-                maxLength={200}
+                onChange={(v) => patch({ value: v })}
+                options={variableOptions}
+                placeholder="下拉选变量（自动带 {{}}），或输入固定文本"
               />
             </Form.Item>
             <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
-              在「导入表格」循环内对当前行赋值：有这一列就覆盖，没有就新建再赋值。
+              写入一列数据：有这一列就覆盖，没有就新建再赋值。自动建表并起一行（直线流程里连续的
+              表格编辑写同一行，「数据循环」每换一项新起一行），控制台「表格」页实时可见，
+              流程末尾的「表格导出」模块可直接导出。
             </Text>
           </>
         )}
