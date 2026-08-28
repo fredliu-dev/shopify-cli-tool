@@ -28,6 +28,7 @@ import {
   ArrowRightOutlined,
   CodeOutlined,
   DashboardOutlined,
+  DeleteOutlined,
   DeploymentUnitOutlined,
   ExclamationCircleOutlined,
   EyeOutlined,
@@ -2783,6 +2784,160 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
     if (!res.ok) message.error(res.error || '打开失败')
   }
 
+  /* ---------------- 删除分支流程 ---------------- */
+  // 确认弹窗数据（含远程分支存在性、关联项目快照）；确认按钮 5 秒倒计时防手滑
+  const [delBranchModal, setDelBranchModal] = useState(null)
+  const [delCountdown, setDelCountdown] = useState(0)
+  const [delBranchLoading, setDelBranchLoading] = useState(false)
+
+  // 倒计时：弹窗打开时从 5 递减到 0，归零前确认按钮禁用
+  useEffect(() => {
+    if (!delBranchModal) return undefined
+    setDelCountdown(5)
+    const timer = setInterval(() => {
+      setDelCountdown((c) => {
+        if (c <= 1) {
+          clearInterval(timer)
+          return 0
+        }
+        return c - 1
+      })
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [delBranchModal])
+
+  // 打开删除分支确认弹窗（带最新远程分支存在性）
+  const openDelBranchModal = async () => {
+    const branch = repo.currentBranch
+    const info = await reload() // 拿最新 local/remote（含 fetch origin）
+    setDelBranchModal({
+      branch,
+      remoteExists: (info?.remote || []).includes(branch),
+      projectCount: projects.length,
+    })
+  }
+
+  // 入口：当前分支有本地项目 → 先问是否连线上主题一起删；没有 → 直接进删分支确认
+  const askDeleteBranch = () => {
+    const branch = repo.currentBranch
+    if (!branch) return message.warning('未识别到当前分支')
+    if (branch === 'main' || branch === 'master') return message.warning('主分支不允许删除')
+    if (!projects.length) return openDelBranchModal()
+    const p = projects[0]
+    modal.confirm({
+      title: '该分支下有本地项目，是否先删除线上主题？',
+      icon: <ExclamationCircleOutlined style={{ color: '#faad14' }} />,
+      content: (
+        <div>
+          <Text style={{ display: 'block', marginBottom: 6 }}>
+            分支 <Text code>{branch}</Text> 关联 {projects.length} 个本地项目：
+          </Text>
+          <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
+            store {p.store} · theme {String(p.theme ?? '-')} · {p.description || '无描述'}
+          </Text>
+          <Text type="warning" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+            选「删除主题」会先从 Shopify 删除该线上主题并清理引用它的本地项目，然后再进入删除分支确认；
+            选「跳过」则不动主题，直接删除分支。
+          </Text>
+        </div>
+      ),
+      okText: '删除主题',
+      okButtonProps: { danger: true },
+      cancelText: '跳过，直接删分支',
+      onOk: () => deleteThemeThenAsk(p, branch),
+      onCancel: () => openDelBranchModal(),
+    })
+  }
+
+  // 先删线上主题（live 拦截 + 二次确认），成功后再进入删除分支确认；失败则终止整个流程
+  const deleteThemeThenAsk = (project, branch) =>
+    new Promise((resolve) => {
+      const themeId = String(project.theme ?? '').trim()
+      if (!themeId) {
+        message.warning('项目缺少 theme 字段，跳过删主题，直接进入删除分支确认')
+        resolve(openDelBranchModal())
+        return
+      }
+      ;(async () => {
+        const res = await window.api.repos.themeInfo({ dir: project.repoPath || repo.path, themeId })
+        if (!res.ok) {
+          message.error({ content: `查询主题失败，已终止：${res.error}`, duration: 8 })
+          return resolve()
+        }
+        if (!res.data) {
+          message.warning(`主题 ${themeId} 线上已不存在，跳过删主题，直接进入删除分支确认`)
+          return resolve(openDelBranchModal())
+        }
+        if (res.data.role === 'live') {
+          message.error('live 主题不允许删除，已终止；可重新点击「删除分支」选「跳过」')
+          return resolve()
+        }
+        modal.confirm({
+          title: '确认删除线上主题？',
+          icon: <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />,
+          okText: '确认删除主题',
+          okButtonProps: { danger: true },
+          cancelText: '取消',
+          content: (
+            <div>
+              <Text type="danger" strong style={{ display: 'block', marginBottom: 10 }}>
+                即将从 Shopify 删除以下主题，操作不可恢复：
+              </Text>
+              <Descriptions size="small" column={1} style={{ marginBottom: 10 }}>
+                <Descriptions.Item label="主题名称">
+                  <Text strong>{res.data.name}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="分支">{branch}</Descriptions.Item>
+                <Descriptions.Item label="theme ID">{themeId}</Descriptions.Item>
+                <Descriptions.Item label="store">{project.store}</Descriptions.Item>
+              </Descriptions>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                删除完成后将进入删除分支确认。
+              </Text>
+            </div>
+          ),
+          onOk: async () => {
+            const r = await window.api.repos.deleteTheme({ dir: project.repoPath || repo.path, themeId, store: project.store })
+            if (!r.ok) {
+              message.error({ content: `删除主题失败，已终止：${r.error}`, duration: 8 })
+              return
+            }
+            let text = `已删除线上主题「${res.data.name}」`
+            if (r.deletedProjects > 0) text += `，并清理 ${r.deletedProjects} 条本地项目`
+            message.success(text)
+            if (r.localError) message.warning({ content: `本地项目清理失败：${r.localError}`, duration: 8 })
+            resolve(openDelBranchModal())
+          },
+          onCancel: () => resolve(),
+        })
+      })()
+    })
+
+  // 执行删除：本地 + 远程；删的是当前分支时后端先切到 main/master/其它分支
+  const doDeleteBranch = async () => {
+    const { branch } = delBranchModal || {}
+    if (!branch) return
+    setDelBranchLoading(true)
+    const res = await window.api.repos.deleteBranch({ dir: repo.path, branch })
+    setDelBranchLoading(false)
+    if (!res.ok) {
+      message.error({ content: res.error || '删除分支失败', duration: 8 })
+      reload() // 可能已切走分支，刷新下拉与卡片显示
+      return
+    }
+    setDelBranchModal(null)
+    let text = `已删除分支「${branch}」（本地${res.data?.remoteDeleted ? ' + 远程' : ''}）`
+    if (res.data?.switchedTo) text += `，当前已切回 ${res.data.switchedTo}`
+    message.success(text)
+    reload()
+    // 复用主题删除后的刷新（projectAction 的 themeDeleted）：仓库状态（分支/toml/matched）+ 本地项目列表
+    onProjectAction('themeDeleted', { repoPath: repo.path })
+  }
+
+  // 主分支不提供删除；当前分支未知时禁用
+  const branchDeletable =
+    !!repo.currentBranch && !['main', 'master', 'alt'].includes(repo.currentBranch)
+
   return (
     <Card
       size="small"
@@ -2802,7 +2957,23 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
         </Space>
       }
       extra={
-        <Select
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Tooltip
+            title={
+              branchDeletable
+                ? '删除当前分支（本地 + 远程）：关联本地项目时会先询问是否连线上主题一起删；确认前有 5 秒倒计时'
+                : repo.currentBranch
+                  ? '主分支（main / master / alt）不允许删除'
+                  : '未识别到当前分支'
+            }
+          >
+            <span>
+              <Button size="small" type="text" danger icon={<DeleteOutlined />} disabled={!branchDeletable} onClick={askDeleteBranch}>
+                删除分支
+              </Button>
+            </span>
+          </Tooltip>
+          <Select
           size="small"
           showSearch
           loading={branchLoading}
@@ -2844,7 +3015,8 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
             )
           }}
           labelRender={(props) => props.value ?? props.label}
-        />
+          />
+        </div>
       }
     >
       <div style={{ position: 'relative' }}>
@@ -2964,6 +3136,43 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
           />
         ))}
       </div>
+
+      {/* 删除分支确认：展示分支信息，确认按钮 5 秒倒计时归零后才能点（防手滑） */}
+      <Modal
+        title="确认删除分支？"
+        open={!!delBranchModal}
+        onCancel={() => !delBranchLoading && setDelBranchModal(null)}
+        onOk={doDeleteBranch}
+        okText={delCountdown > 0 ? `请确认信息（${delCountdown}s）` : '确认删除'}
+        okButtonProps={{ danger: true, disabled: delCountdown > 0 || delBranchLoading, loading: delBranchLoading }}
+        cancelText="取消"
+        cancelButtonProps={{ disabled: delBranchLoading }}
+      >
+        <Text type="danger" strong style={{ display: 'block', marginBottom: 10 }}>
+          即将同时删除本地分支与远程分支，操作不可恢复：
+        </Text>
+        <Descriptions size="small" column={1} bordered style={{ marginBottom: 10 }}>
+          <Descriptions.Item label="分支">
+            <Text code>{delBranchModal?.branch}</Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="仓库">{repo.name}</Descriptions.Item>
+          <Descriptions.Item label="远程分支">
+            {delBranchModal?.remoteExists ? <Text type="danger">存在，将一并删除</Text> : <Text type="secondary">不存在（仅删本地）</Text>}
+          </Descriptions.Item>
+          <Descriptions.Item label="关联本地项目">
+            {delBranchModal?.projectCount > 0 ? (
+              <Text type="warning">{delBranchModal.projectCount} 个（线上主题是否已删见上方操作）</Text>
+            ) : (
+              <Text type="secondary">无</Text>
+            )}
+          </Descriptions.Item>
+        </Descriptions>
+        {delBranchModal?.branch === repo.currentBranch && (
+          <Text type="warning" style={{ fontSize: 12, display: 'block' }}>
+            ⚠️ 删除的是当前所在分支，删除前会自动切换到 main / master / 其他本地分支。
+          </Text>
+        )}
+      </Modal>
     </Card>
   )
 }

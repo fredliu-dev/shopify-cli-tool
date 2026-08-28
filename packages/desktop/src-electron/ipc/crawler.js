@@ -15,6 +15,7 @@ import {
 } from '../crawler-store.js'
 import { isRunning, MODULE_TYPES, openLoginWindow, runCrawler, stopRun } from '../crawler-runner.js'
 import { readTableFile } from '../crawler-table.js'
+import { listRunningRuns, removeCheckpoint } from '../crawler-checkpoint.js'
 
 export function registerCrawlerIpc() {
   /* -------- 项目 CRUD -------- */
@@ -159,6 +160,45 @@ export function registerCrawlerIpc() {
   ipcMain.handle('crawler:stop', () => {
     try {
       return stopRun()
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  /* -------- 断点继续 -------- */
+
+  // 列出项目下未完成的运行（失败/停止后可续跑），按更新时间倒序
+  ipcMain.handle('crawler:pendingRuns', async (_evt, projectId) => {
+    try {
+      return { ok: true, data: await listRunningRuns(String(projectId || '')) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 从断点继续：graph 传当前画布（用户可能修复过失败节点的配置），没传则用断点快照
+  ipcMain.handle('crawler:continue', async (_evt, opts) => {
+    try {
+      const projectId = String(opts?.id || '')
+      const resumeRunId = String(opts?.runId || '')
+      if (!projectId || !resumeRunId) return { ok: false, error: '缺少项目或运行编号，无法继续' }
+      let projectName
+      try {
+        const doc = await getCrawler(projectId)
+        projectName = doc?.name
+      } catch {
+        /* 忽略 */
+      }
+      return runCrawler({ projectId, projectName, graph: opts?.graph, resumeRunId, showWindow: !!opts?.showWindow })
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 丢弃断点（放弃续跑，清除该次运行的状态文件）
+  ipcMain.handle('crawler:discardRun', async (_evt, opts) => {
+    try {
+      return await removeCheckpoint(String(opts?.id || ''), String(opts?.runId || ''))
     } catch (err) {
       return { ok: false, error: err.message }
     }

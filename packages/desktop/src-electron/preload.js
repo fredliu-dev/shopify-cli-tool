@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('api', {
     createPull: (opts) => ipcRenderer.invoke('repos:createPull', opts),
     checkout: (opts) => ipcRenderer.invoke('repos:checkout', opts),
     createBranch: (opts) => ipcRenderer.invoke('repos:createBranch', opts),
+    // 删除分支（本地+远程；删当前分支时先自动切到 main/master/其它）
+    deleteBranch: (opts) => ipcRenderer.invoke('repos:deleteBranch', opts),
     workingTree: (opts) => ipcRenderer.invoke('repos:workingTree', opts),
     merge: (opts) => ipcRenderer.invoke('repos:merge', opts),
     cloneableTemplates: (workspaceDir) => ipcRenderer.invoke('repos:cloneableTemplates', workspaceDir),
@@ -143,6 +145,10 @@ contextBridge.exposeInMainWorld('api', {
     importGraph: () => ipcRenderer.invoke('crawler:importGraph'),
     run: (opts) => ipcRenderer.invoke('crawler:run', opts),
     stop: () => ipcRenderer.invoke('crawler:stop'),
+    // 断点继续：列出未完成运行 / 从断点续跑 / 丢弃断点
+    pendingRuns: (id) => ipcRenderer.invoke('crawler:pendingRuns', id),
+    continueRun: (opts) => ipcRenderer.invoke('crawler:continue', opts),
+    discardRun: (opts) => ipcRenderer.invoke('crawler:discardRun', opts),
     // 登录窗口（与执行窗口同一持久会话，流程外登录目标站）
     openLogin: (url) => ipcRenderer.invoke('crawler:openLogin', url),
     saveResults: (opts) => ipcRenderer.invoke('crawler:saveResults', opts),

@@ -602,6 +602,51 @@ export async function checkoutBranch(repoPath, branch) {
 }
 
 /**
+ * 删除分支：远程 `push origin --delete`（远程不存在时跳过，纯本地分支可直接删）+ 本地 `branch -D`。
+ * 先删远程后删本地——远程失败时本地保留可重试，比「本地已删、远程残留」更安全。
+ * 删的是当前分支时先自动切到其他分支（fallback 显式指定 > main > master > 其它本地分支），
+ * 切换目标经 switchedTo 返回，由调用方同步 shopify.theme.toml。main/master 主分支不允许删除。
+ * @param {string} repoPath
+ * @param {{ branch: string, deleteRemote?: boolean, fallback?: string }} opts deleteRemote 默认 true
+ * @returns {Promise<{ ok: true, remoteDeleted: boolean, switchedTo: string | null }
+ *   | { ok: false, error: string, switchedTo?: string | null, remoteDeleted?: boolean }>}
+ */
+export async function deleteBranch(repoPath, { branch, deleteRemote = true, fallback } = {}) {
+  if (!branch) return { ok: false, error: '缺少分支名' }
+  if (branch === 'main' || branch === 'master' || branch === 'alt') {
+    return { ok: false, error: `${branch} 是受保护的主分支，不允许删除` }
+  }
+  let switchedTo = null
+  const { current, branches } = await listBranches(repoPath)
+  if (current === branch) {
+    const target =
+      (fallback && branches.includes(fallback) ? fallback : null) ||
+      ['main', 'master', 'alt'].find((b) => branches.includes(b)) ||
+      branches.find((b) => b && b !== branch)
+    if (!target) return { ok: false, error: '仓库没有其他本地分支可切换，无法删除当前分支' }
+    const sw = await runGit(['checkout', target], repoPath)
+    if (sw.code !== 0) {
+      return { ok: false, error: `删除前需切到 ${target}，切换失败：${(sw.stderr || sw.stdout || '').trim()}` }
+    }
+    switchedTo = target
+  }
+  // 远程存在才删（ls-remote 查询），纯本地分支跳过；删除失败整体报错、本地不动
+  let remoteDeleted = false
+  if (deleteRemote && (await remoteBranchExists(repoPath, branch))) {
+    const r = await runGit(['push', 'origin', '--delete', branch], repoPath, { timeout: 120000 })
+    if (r.code !== 0) {
+      return { ok: false, error: `删除远程分支失败：${(r.stderr || r.stdout || '').trim()}`, switchedTo }
+    }
+    remoteDeleted = true
+  }
+  const d = await runGit(['branch', '-D', branch], repoPath)
+  if (d.code !== 0) {
+    return { ok: false, error: `删除本地分支失败：${(d.stderr || d.stdout || '').trim()}`, switchedTo, remoteDeleted }
+  }
+  return { ok: true, remoteDeleted, switchedTo }
+}
+
+/**
  * 判断 shopify.theme.toml 是否被 git 跟踪。用 `git ls-files --error-unmatch` 直接查索引：
  * 退出码 0 = 已跟踪（在索引里）；非 0 = 未跟踪（含文件不存在）。供「切换分支同步配置」判断——
  * 已跟踪时 git checkout 已切换了它，不能再删/重建（否则工作区变脏、阻塞后续合并）。

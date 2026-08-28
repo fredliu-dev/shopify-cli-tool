@@ -230,10 +230,14 @@ export function collectVariableOptions(nodes, runtimeVars) {
     const d = n.data || {}
     if (n.type === 'intercept' && d.varName) add(d.varName, '接口拦截')
     if (n.type === 'extract') for (const f of d.fields || []) if (f.name) add(f.name, '提取字段')
-    if (n.type === 'importTable' && d.varName) add(d.varName, '导入表格·整表数组')
+    // 变量名留空时运行时默认写「表格数据」（见 crawler-runner 的 importTable 分支），
+    // 这里保持同样兜底——老项目没存 varName 字段时下拉框才不会漏掉表格变量
+    if (n.type === 'importTable') add(String(d.varName || '').trim() || '表格数据', '导入表格·整表数组')
     if (n.type === 'loop') {
       add('当前项', '数据循环')
       add('当前序号', '数据循环')
+      // 配了「当前项另存为变量」的循环：嵌套时用它区分内外层的当前项
+      if (d.itemVar) add(d.itemVar, '数据循环·当前项')
     }
   }
   const walk = (path, val, depth) => {

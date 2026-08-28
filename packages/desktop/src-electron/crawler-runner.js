@@ -26,6 +26,11 @@
 // - 表格编辑：写入一列（列不存在则创建），就地建表新起一行（数据循环每换一项新起一行），
 //   表格实时推送到控制台；表格导出：统一在流程结束后导出一次整表
 //
+// 断点继续：
+// - 每个节点成功执行后、loop 每消费一项后、并发 loop 每个 worker 每消费一项后保存 checkpoint。
+// - 失败/停止时保存 checkpoint 并标记 resumable；用户可继续从失败节点重试。
+// - 并发 loop：worker 独立 checkpoint；失败时只重跑失败的 worker，其他结果保留。
+//
 // 停止机制：模块级 current 单例，stop 置 stopped、signalStop 唤醒挂起操作并 destroy 隐藏窗口——
 // 销毁后 executeJavaScript 的 promise 可能永不 settle，靠 stopPromise 赛道保证「停止」即时生效。
 import { BrowserWindow } from 'electron'
@@ -33,6 +38,15 @@ import { randomUUID } from 'node:crypto'
 import vm from 'node:vm'
 import { clickScript, diagnoseScript, extractScript, inputScript, selectorDesc, stableScript, waitScript } from './crawler-scripts.js'
 import { exportTableFile, readTableFile } from './crawler-table.js'
+import {
+  finishCheckpoint,
+  loadCheckpoint,
+  listWorkerCheckpoints,
+  newRunId,
+  removeWorkerCheckpoint,
+  saveCheckpoint,
+  saveWorkerCheckpoint,
+} from './crawler-checkpoint.js'
 
 /** 支持的模块类型（与渲染层 constants.js 的模块面板保持一致；导入校验也用它）。 */
 export const MODULE_TYPES = [
@@ -565,13 +579,141 @@ function setupNetworkCapture(ctx, interceptNodes) {
   return dbg.sendCommand('Network.enable')
 }
 
+/* -------- 断点序列化辅助 -------- */
+
+/** 序列化 loopStates（Map → 数组，items 可能很大，直接保留引用）。 */
+function serializeLoopStates(loopStates) {
+  const out = {}
+  for (const [id, st] of loopStates.entries()) {
+    out[id] = {
+      items: st.items,
+      index: st.index,
+      gen: st.gen,
+      totalItems: st.totalItems,
+      gis: st.gis,
+      outer: st.outer,
+    }
+  }
+  return out
+}
+
+/** 反序列化 loopStates。 */
+function deserializeLoopStates(raw) {
+  const map = new Map()
+  if (!raw) return map
+  for (const id of Object.keys(raw)) {
+    map.set(id, raw[id])
+  }
+  return map
+}
+
+/** 构造 checkpoint 快照。 */
+function buildCheckpoint(ctx) {
+  return {
+    status: ctx.failed ? 'failed' : ctx.stopped ? 'stopped' : 'running',
+    projectId: ctx.projectId,
+    projectName: ctx.projectName,
+    runId: ctx.runId,
+    startedAt: ctx.startedAt,
+    graph: ctx.graph,
+    failedAt: ctx.failedAt || null,
+    execution: {
+      queue: ctx.queue?.map((n) => n.id) || [],
+      visited: ctx.visited ? [...ctx.visited] : [],
+      walkGen: ctx.walkGen,
+      loopStates: serializeLoopStates(ctx.loopStates),
+      vars: ctx.vars,
+      currentRow: ctx.currentRow,
+      loop: ctx.loop,
+      forceSeqLoops: ctx.forceSeqLoops ? [...ctx.forceSeqLoops] : [],
+      completedLoops: ctx.completedLoops ? [...ctx.completedLoops] : [],
+      resumeNodeId: ctx.resumeNodeId || null,
+      // 并发 loop 续跑的 worker 集合：失败=[失败的那个]；停止=[所有留有断点的]
+      resumeWorkerIndexes: ctx.resumeWorkerIndexes || [],
+      parentLoopState: ctx.parentLoopState || null,
+    },
+    data: {
+      rows: ctx.rows,
+      table: ctx.table,
+      captures: Array.from(ctx.captures.entries()),
+    },
+  }
+}
+
+/** 立即写盘（吞错，不能影响主流程）。 */
+async function writeCpNow(ctx) {
+  try {
+    await saveCheckpoint(ctx.projectId, ctx.runId, buildCheckpoint(ctx))
+  } catch (err) {
+    ctx.log?.('warn', `保存断点失败：${err.message}`)
+  }
+}
+
+/* 断点写盘节流：循环里每项、每个节点成功都会保存，大画布（表格百行 × 接口大 JSON）时
+   每秒数十次全量 stringify + 同步写盘会把主进程拖死（实测长流程因此被系统杀掉闪退）。
+   运行中合并为至多每 300ms 一次（崩溃最多丢 300ms 进度）；终态（失败/停止）用 flush 立即
+   落盘；正常完成后先取消挂起的定时器再清理断点，防止写回已删除的文件。 */
+let cpThrottleTimer = null
+
+/** 取消挂起的节流写盘（完成清理前调用，防止复活已删除的断点文件）。 */
+function cancelPendingCp() {
+  if (cpThrottleTimer) {
+    clearTimeout(cpThrottleTimer)
+    cpThrottleTimer = null
+  }
+}
+
+/**
+ * 保存主流程 checkpoint。并发 worker 不写主断点。
+ * @param {{flush?: boolean}} opts flush=true 立即落盘（终态用）；默认 300ms 节流合并
+ */
+function saveCp(ctx, { flush = false } = {}) {
+  if (ctx.isWorker) return Promise.resolve()
+  if (flush) {
+    cancelPendingCp()
+    return writeCpNow(ctx)
+  }
+  if (cpThrottleTimer) return Promise.resolve()
+  cpThrottleTimer = setTimeout(() => {
+    cpThrottleTimer = null
+    writeCpNow(ctx)
+  }, 300)
+  return Promise.resolve()
+}
+
+/** 保存并发 worker 断点：每消费一项后调用，崩溃/失败后可从该项继续。 */
+async function saveWorkerCp(ctx, loopNodeId) {
+  if (!ctx.isWorker) return
+  try {
+    await saveWorkerCheckpoint(ctx.projectId, ctx.runId, ctx.workerIndex, {
+      status: 'running',
+      workerIndex: ctx.workerIndex,
+      loopNodeId,
+      loopState: ctx.loopStates.get(loopNodeId),
+      data: { rows: ctx.rows, table: ctx.table, vars: ctx.vars },
+    })
+  } catch {}
+}
+
+/* -------- 运行入口与断点恢复 -------- */
+
 /**
  * 执行一次爬虫任务。
- * @param {{projectId: string, projectName?: string, graph: object, showWindow?: boolean}} opts
+ * @param {{projectId: string, projectName?: string, graph: object, showWindow?: boolean, resumeRunId?: string}} opts
  * @returns {{ok: boolean, error?: string, data?: {runId: string}}}
  */
-export function runCrawler({ projectId, projectName, graph, showWindow }) {
+export async function runCrawler({ projectId, projectName, graph, showWindow, resumeRunId }) {
   if (current) return { ok: false, error: '已有爬虫任务在执行，请先停止' }
+  // 断点续跑：先加载 checkpoint，优先用断点时的画布快照——运行期间改画布会造成状态错位
+  const resuming = !!resumeRunId
+  let cp = null
+  if (resuming) {
+    cp = await loadCheckpoint(projectId, resumeRunId)
+    if (!cp || cp._broken) return { ok: false, error: '断点数据已损坏或不存在，无法继续' }
+    // 优先用调用方传入的当前画布（用户可能已修复失败节点的配置）；没传才回退断点快照。
+    // 状态按节点 id 对齐，未改画布时两者等价；删掉的节点在恢复 queue 时会被安全过滤
+    if (!graph?.nodes?.length && cp.graph?.nodes?.length) graph = cp.graph
+  }
   const nodes = graph?.nodes || []
   if (nodes.length === 0) return { ok: false, error: '画布为空，请先拖入模块节点' }
   for (const n of nodes) {
@@ -581,32 +723,42 @@ export function runCrawler({ projectId, projectName, graph, showWindow }) {
   const prepared = prepareGraph(graph)
   if (!prepared.ok) return { ok: false, error: prepared.error }
 
-  const runId = randomUUID().slice(0, 8)
+  const runId = resumeRunId || newRunId()
   const startedAt = new Date().toISOString()
   let seqCounter = 0
 
-  // rows 挂在 ctx 上：多个 extract 节点的结果顺序拼接，execNode 里也要写入。
-  // stopPromise/signalStop：stop 置位后唤醒所有挂起的 withTimeout（见 stopRun 注释）。
   const ctx = {
     projectId,
     projectName: projectName || 'crawler',
     runId,
+    startedAt,
+    graph,
     stopped: false,
     finished: false,
     failed: null,
+    failedAt: null,
     rows: [],
     win: null,
-    showWindow: !!showWindow, // 「打开窗口」选项：webpage 节点打开网址时显示执行窗口（默认隐藏跑）
-    vars: {}, // 变量作用域：表格当前行 + 提取模块命中的字段
-    captures: new Map(), // intercept 节点 id → { url, value }（CDP 捕获的接口响应）
-    interceptWaiters: new Map(), // intercept 节点 id → Set<resolve>（执行中等待命中的节点）
-    table: null, // { columns: string[], rows: object[] }
-    currentRow: null, // 表格编辑的当前写入行（数据循环每换一项重置、就地建表新起一行）
-    loop: null, // { row, total } 在循环内时随节点状态推送（画布角标）
-    loopStates: new Map(), // loop 节点 id → { items, index, gen, outer: { loop } }（数据循环跨重入的迭代状态）
-    walkGen: 0, // 遍历「代数」：新 walk / 循环重入时 +1，旧代的 loop 状态视为过期（重进即重新解析变量）
+    showWindow: !!showWindow,
+    vars: {},
+    captures: new Map(),
+    interceptWaiters: new Map(),
+    table: null,
+    currentRow: null,
+    loop: null,
+    loopStates: new Map(),
+    walkGen: 0,
     byId: prepared.byId,
     outEdges: prepared.outEdges,
+    queue: [],
+    visited: new Set(),
+    forceSeqLoops: new Set(),
+    completedLoops: new Set(),
+    resumeNodeId: null,
+    resumeWorkerIndexes: [],
+    parentLoopState: null,
+    activeLoopId: null, // 最内层活跃循环节点 id（嵌套循环换代同步用）
+    workerWins: [],
     stopPromise: null,
     signalStop: null,
   }
@@ -623,7 +775,7 @@ export function runCrawler({ projectId, projectName, graph, showWindow }) {
       level,
       nodeId: node?.id,
       nodeType: node?.type,
-      nodeLabel: node?.data?.label, // 控制台日志行的模块徽标显示节点名（用户改过名比类型名好认）
+      nodeLabel: node?.data?.label,
       message,
     })
   }
@@ -641,19 +793,41 @@ export function runCrawler({ projectId, projectName, graph, showWindow }) {
   }
   ctx.log = log
   ctx.nodeState = nodeState
-  // 变量快照推送：每次 vars 变化（提取/拦截/表格换行）广播一次，控制台「变量」Tab 实时跟进
   ctx.pushVars = () => broadcast('crawler:vars', { projectId, runId, vars: { ...ctx.vars } })
-  // 表格实时快照推送：导入表格读入、表格编辑每次写入后广播，控制台「表格」Tab 随跑随看
   ctx.pushTable = () =>
     broadcast('crawler:table', {
       projectId,
       runId,
       table: ctx.table ? { columns: [...ctx.table.columns], rows: ctx.table.rows.map((r) => ({ ...r })) } : null,
     })
-  ctx.pushVars() // 起跑先推一份空表，控制台立即进入「实时」状态
 
-  // 隐藏执行窗口：backgroundThrottling:false 关键（隐藏窗口的定时器会被 Chromium 节流，
-  // 注入脚本的轮询等待依赖它）；partition 见 CRAWLER_PARTITION 注释（持久化登录态）。
+  // 断点恢复：从 checkpoint 恢复执行状态与数据（vars 存在 execution 段）
+  if (resuming && cp) {
+    ctx.startedAt = cp.startedAt || startedAt
+    ctx.rows = cp.data?.rows || []
+    ctx.vars = cp.execution?.vars || {}
+    ctx.table = cp.data?.table || null
+    ctx.currentRow = cp.execution?.currentRow || null
+    ctx.loop = cp.execution?.loop || null
+    ctx.loopStates = deserializeLoopStates(cp.execution?.loopStates)
+    ctx.walkGen = cp.execution?.walkGen || 0
+    ctx.visited = new Set(cp.execution?.visited || [])
+    ctx.queue = (cp.execution?.queue || []).map((id) => ctx.byId.get(id)).filter(Boolean)
+    ctx.forceSeqLoops = new Set(cp.execution?.forceSeqLoops || [])
+    ctx.completedLoops = new Set(cp.execution?.completedLoops || [])
+    ctx.captures = new Map(cp.data?.captures || [])
+    ctx.failedAt = cp.failedAt || null
+    ctx.resumeNodeId = cp.execution?.resumeNodeId || null
+    ctx.resumeWorkerIndexes = cp.execution?.resumeWorkerIndexes || []
+    ctx.parentLoopState = cp.execution?.parentLoopState || null
+    // 活跃循环取恢复状态里最后一个（Map 序=创建序，嵌套时最后创建=最内层）
+    ctx.activeLoopId = [...ctx.loopStates.keys()].pop() || null
+    // 恢复首轮不递增 walkGen：loopStates 里的 gen 与保存时一致，直接沿用不被重置
+    ctx.resumeSkipGen = true
+  }
+
+  ctx.pushVars()
+
   const win = new BrowserWindow({
     show: false,
     width: 1280,
@@ -666,24 +840,22 @@ export function runCrawler({ projectId, projectName, graph, showWindow }) {
     },
   })
   ctx.win = win
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' })) // 拦 target=_blank 弹窗
-  // 隐藏窗口意外销毁（崩溃/外部 kill）时中止任务；finished 标志防止循环正常收尾时的
-  // destroy() 反向误标 stopped（destroy 触发的 closed 与收尾代码存在时序竞争）
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.on('closed', () => {
     if (current === ctx && !ctx.finished) {
       current.stopped = true
-      current.signalStop?.() // 窗口意外销毁同样要唤醒挂起的执行
+      current.signalStop?.()
     }
   })
 
-  runState('running')
-  log('info', `开始执行：共 ${nodes.length} 个节点`)
+  runState('running', { resumed: resuming })
+  log('info', resuming ? `继续执行：从断点恢复` : `开始执行：共 ${nodes.length} 个节点`)
+  if (resuming && ctx.failedAt) {
+    log('info', `断点位置：节点 ${ctx.failedAt.nodeId}${ctx.failedAt.iteration ? `（第 ${ctx.failedAt.iteration.row}/${ctx.failedAt.iteration.total} 项）` : ''}，错误：${ctx.failedAt.message}`)
+  }
 
   ;(async () => {
     try {
-      // 有接口拦截模块才挂 CDP：先 about:blank 把渲染进程拉起来（未导航的隐藏窗口其
-      // 渲染进程是惰性创建的，直接挂调试器命令无处投递，~25s 后 target 自毁），且
-      // Network.enable 完成后再开跑，防错过页面加载的首批请求
       if (nodes.some((n) => n.type === 'intercept')) {
         try {
           await win.loadURL('about:blank')
@@ -692,43 +864,82 @@ export function runCrawler({ projectId, projectName, graph, showWindow }) {
           throw new Error(`接口拦截初始化失败：${err.message}`)
         }
       }
-      if (!ctx.stopped && !ctx.failed) await walkFrom(ctx, prepared.starts)
-      // 表格导出统一收尾：无论画布上摆在哪、分支是否走到，跑完（或失败）后各导出一次整表
+
+      let entries = prepared.starts
+      // 断点恢复：并发 loop 失败优先重入 loop 节点（只重跑失败的 worker）；
+      // 其次从保存的 queue 继续；queue 空则从失败节点重试
+      if (resuming) {
+        const resumeLoop =
+          ctx.resumeWorkerIndexes.length > 0 && ctx.resumeNodeId && ctx.byId.has(ctx.resumeNodeId)
+            ? ctx.byId.get(ctx.resumeNodeId)
+            : null
+        if (resumeLoop) {
+          // 直接改写 ctx.queue：walkFrom 在 queue 非空时优先用它，不认 entries 里前置的节点
+          ctx.queue = [resumeLoop, ...ctx.queue]
+          entries = ctx.queue
+          ctx.visited.delete(resumeLoop.id)
+        } else if (ctx.queue.length) {
+          entries = ctx.queue
+        } else if (ctx.failedAt?.nodeId && ctx.byId.has(ctx.failedAt.nodeId)) {
+          entries = [ctx.byId.get(ctx.failedAt.nodeId)]
+          ctx.visited.delete(ctx.failedAt.nodeId)
+        }
+      }
+
+      if (!ctx.stopped && !ctx.failed) await walkFrom(ctx, entries)
       if (!ctx.stopped) await runExportNodes(ctx, nodes)
     } catch (err) {
       if (!ctx.failed && !ctx.stopped) ctx.failed = err.message || String(err)
     }
-    // 先置 finished 再销毁窗口：closed 事件处理器据此区分「正常收尾」与「意外销毁」
+
     ctx.finished = true
     try {
       if (!win.isDestroyed()) {
         try {
           if (win.webContents.debugger.isAttached()) win.webContents.debugger.detach()
-        } catch {
-          /* detach 失败不影响收尾 */
-        }
+        } catch {}
         win.destroy()
       }
-    } catch {
-      /* 忽略 */
-    }
-    if (current === ctx) current = null
-    const tablePayload = ctx.table ? { columns: ctx.table.columns, rows: ctx.table.rows } : undefined
-    if (ctx.stopped) {
-      runState('stopped', { rows: ctx.rows, table: tablePayload })
-      log('warn', '任务已停止')
-    } else if (ctx.failed) {
-      runState('failed', { error: ctx.failed, rows: ctx.rows, table: tablePayload })
-    } else {
-      runState('done', { rows: ctx.rows, table: tablePayload })
-      const parts = []
-      if (ctx.rows.length) parts.push(`提取 ${ctx.rows.length} 行`)
-      if (ctx.table) parts.push(`表格 ${ctx.table.rows.length} 行`)
-      log('success', `执行完成${parts.length ? `：共${parts.join('，')}` : ''}`)
+    } catch {}
+
+    // 保存最终状态
+    if (current === ctx) {
+      if (ctx.failed) {
+        ctx.failedAt = ctx.failedAt || { nodeId: ctx.resumeNodeId || 'unknown', message: ctx.failed }
+        await saveCp(ctx, { flush: true })
+        runState('failed', { error: ctx.failed, rows: ctx.rows, table: ctx.table, resumable: true })
+        log('error', `执行失败：${ctx.failed}`)
+      } else if (ctx.stopped) {
+        await saveCp(ctx, { flush: true })
+        runState('stopped', { rows: ctx.rows, table: ctx.table, resumable: true })
+        log('warn', '任务已停止')
+      } else {
+        // 先取消节流中挂起的写盘，防止在断点清理后又把 state.json 写回来
+        cancelPendingCp()
+        await finishCheckpoint(projectId, runId)
+        runState('done', { rows: ctx.rows, table: ctx.table })
+        const parts = []
+        if (ctx.rows.length) parts.push(`提取 ${ctx.rows.length} 行`)
+        if (ctx.table) parts.push(`表格 ${ctx.table.rows.length} 行`)
+        log('success', `执行完成${parts.length ? `：共${parts.join('，')}` : ''}`)
+      }
+      current = null
     }
   })()
 
   return { ok: true, data: { runId } }
+}
+
+/**
+ * 回退「刚耗尽」的活跃循环：最后一项循环体进行中被中断时消费指针已到末尾（正常完成会被
+ * pickNext delete），回退一项让断点恢复时重试该项——否则恢复会误判「已耗尽」而从头重跑。
+ */
+function rollbackExhaustedLoops(ctx) {
+  for (const st of ctx.loopStates.values()) {
+    if (st.gen === ctx.walkGen && st.index === st.items.length && st.items.length > 0) {
+      st.index = st.items.length - 1
+    }
+  }
 }
 
 /**
@@ -738,40 +949,94 @@ export function runCrawler({ projectId, projectName, graph, showWindow }) {
  * （环外节点不会被重新入队，清空 visited 不会重跑循环之前的前置流程）。
  */
 async function walkFrom(ctx, entries) {
-  const visited = new Set()
-  const queue = Array.isArray(entries) ? [...entries] : [entries]
-  ctx.walkGen++ // 新一遍 walk（含表格换行）：内层数据循环若残留上一遍的状态，重进时重新解析
-  while (queue.length && !ctx.stopped && !ctx.failed) {
+  const visited = ctx.visited
+  const queue = ctx.queue.length ? ctx.queue : (Array.isArray(entries) ? [...entries] : [entries])
+  ctx.queue = queue
+  if (ctx.resumeSkipGen) {
+    ctx.resumeSkipGen = false // 恢复首轮沿用 checkpoint 里的 walkGen/loopStates
+  } else {
+    ctx.walkGen++
+  }
+  while (queue.length && !ctx.stopped && !ctx.failed && !ctx.cancelled) {
     const node = queue.shift()
     if (!node) continue
     if (node.type === 'loop' && visited.has(node.id)) {
-      visited.clear()
-      ctx.walkGen++ // 循环重入换代：作废嵌套在内层、没跑完就跳出循环体的其他 loop 状态
       const own = ctx.loopStates.get(node.id)
-      if (own) own.gen = ctx.walkGen // 本循环自己的迭代进度要延续，不能被换代作废
+      if (!own) {
+        // 本代内已耗尽（状态被 pickNext/兜底删除）又重复入队——如 loop 节点自身出边直连
+        // 其他循环、或多条边同时指回：再执行会重新解析从头重跑，形成死循环。跳过。
+        // 外层换行重入内层不受影响：外层重入时 visited 已被 clear，内层不命中本分支
+        continue
+      }
+      visited.clear()
+      ctx.walkGen++
+      own.gen = ctx.walkGen
+      // 嵌套循环：内层换代会作废外层的代数标记，沿父链同步——否则内层结束后，
+      // 外层循环体尾节点连向外层的回连边因代数不匹配被当普通边，外层被无限重跑
+      let pid = own.outer?.parentLoopId
+      while (pid) {
+        const p = ctx.loopStates.get(pid)
+        if (!p) break
+        p.gen = ctx.walkGen
+        pid = p.outer?.parentLoopId
+      }
     }
     if (visited.has(node.id)) continue
     visited.add(node.id)
     const label = node.data?.label || node.type
     ctx.nodeState(node, 'running')
-    if (!ctx.loop) ctx.log('info', `执行「${label}」`, node) // 循环内省略开场日志，避免刷屏
+    if (!ctx.loop) ctx.log('info', `执行「${label}」`, node)
     let result
     try {
       result = await execNode(ctx, node)
     } catch (err) {
-      if (ctx.stopped) return
+      if (ctx.stopped || ctx.cancelled) {
+        // 停止也记录中断点：恢复时从这里重试。不能只清场——循环中停止时 visited 已被
+        // 回连逻辑清空过，从画布起点恢复会重跑前置模块（如重新导入表格覆盖已产出的行）。
+        // cancelled（并发 worker 被其他 worker 的失败被动唤醒）只在 worker 上出现，
+        // 不记 failedAt——它不是失败者，主进程按真失败的 worker 收集续跑集合
+        if (!ctx.cancelled) ctx.failedAt = { nodeId: node.id, message: '已停止', stopped: true }
+        rollbackExhaustedLoops(ctx)
+        return
+      }
       ctx.failed = err.message || String(err)
+      ctx.failedAt = { nodeId: node.id, message: ctx.failed, iteration: ctx.loop ? { ...ctx.loop } : null }
       ctx.nodeState(node, 'failed', { error: ctx.failed })
       ctx.log('error', `「${label}」失败：${ctx.failed}`, node)
+      rollbackExhaustedLoops(ctx)
+      await saveCp(ctx, { flush: true })
       return
     }
     ctx.nodeState(node, 'success', { summary: result.summary })
     ctx.log('success', result.summary, node)
+    if (node.type === 'loop' && !result.skipNext) {
+      // 循环消费了一项 = 进入新一轮：清空 visited 让循环体整轮重跑；换代作废旧的内层
+      // 循环状态（外层换项后内层自动从头重跑）。skipNext（空跳过/已完成跳过）没消费不动。
+      // 嵌套：换代沿父链同步外层代数——否则内层换代会作废外层的回连判定，外层被无限重跑
+      visited.clear()
+      ctx.walkGen++
+      const own = ctx.loopStates.get(node.id)
+      if (own) {
+        own.gen = ctx.walkGen
+        let pid = own.outer?.parentLoopId
+        while (pid) {
+          const p = ctx.loopStates.get(pid)
+          if (!p) break
+          p.gen = ctx.walkGen
+          pid = p.outer?.parentLoopId
+        }
+      }
+    }
+    // 节点成功执行后保存断点（loop 节点在 execNode 内部消费一项后已保存）
+    if (node.type !== 'loop') {
+      await saveCp(ctx)
+    }
     for (const next of pickNext(ctx, node, result)) {
-      // loop 节点放行重入（回连边目标）；其余节点仍按 visited 去重
       if (!visited.has(next.id) || next.type === 'loop') queue.push(next)
     }
   }
+  // 停止/被取消退出（不走上面的 catch，如 pickNext 后恰好在 while 条件处停下）：回退进行中项
+  if (ctx.stopped || ctx.cancelled) rollbackExhaustedLoops(ctx)
 }
 
 /**
@@ -780,11 +1045,17 @@ async function walkFrom(ctx, entries) {
  * 就只走回连边（下一轮），循环完则只走出边里的其余分支（循环后的后续模块）。
  * 顺序必须是「先选分支、再判回连」：回连边可能接在条件的任一分支上（是=连回循环继续、
  * 否=跳出很常见），若先按回连边短路，true 也会顺着回连边走成「否」的路线。
+ * 数据循环的「结束」出口（sourceHandle=done）：loop 节点消费项时不走它（防提前/重复入队），
+ * 循环耗尽时才从它连出到后续模块——嵌套时从内层的结束出口连到外层 = 换外层下一项。
  */
 function pickNext(ctx, node, result) {
   let outs = ctx.outEdges.get(node.id) || []
-  if (result.skipNext) return [] // 数据循环变量为空：循环体与后续模块都不走
-  if (result.nextOverride) return result.nextOverride // 并发循环收尾：父流程直接续走循环后的模块
+  if (result.skipNext) return []
+  if (result.nextOverride) return result.nextOverride
+  if (node.type === 'loop') {
+    // loop 自身消费一项后的出边不含「结束」出口：那属于循环完成后才走的边
+    outs = outs.filter((e) => e.sourceHandle !== 'done')
+  }
   if (node.type === 'condition') {
     const want = result.branch ? 'yes' : 'no'
     const chosen = outs.filter((e) => (e.sourceHandle || 'yes') === want)
@@ -794,21 +1065,31 @@ function pickNext(ctx, node, result) {
     }
     outs = chosen
   }
-  const backEdge = outs.find((e) => {
-    const t = ctx.byId.get(e.target)
-    if (t?.type !== 'loop') return false
-    const st = ctx.loopStates.get(e.target)
-    return st !== undefined && st.gen === ctx.walkGen // 过期状态不算活跃回连边（重进时重新解析）
-  })
-  if (backEdge) {
+  // 回连边逐层判定：节点的出边可能同时连回内外层多个循环（嵌套收口）。最内层还有剩余
+  // 就只回它；某层耗尽则删它的状态、恢复上下文，并把该循环「结束」出口的边并入待判定
+  // 队列——done 目标是活跃循环（嵌套：内层结束→外层）就回它换下一项，也是耗尽循环就
+  // 级联展开其结束出口，全部走完才返回剩余普通出边
+  const rest = [...outs]
+  for (;;) {
+    const backEdge = rest.find((e) => {
+      const t = ctx.byId.get(e.target)
+      if (t?.type !== 'loop') return false
+      const st = ctx.loopStates.get(e.target)
+      return st !== undefined && st.gen === ctx.walkGen
+    })
+    if (!backEdge) break
     const st = ctx.loopStates.get(backEdge.target)
     if (st.index < st.items.length) return [ctx.byId.get(backEdge.target)]
-    ctx.loop = st.outer.loop // 徽标切回外层循环（表格循环/外层数据循环）
-    ctx.currentRow = st.outer.currentRow // 表格行上下文也一并还原（循环后置的表格编辑写回当前行）
+    ctx.loop = st.outer.loop
+    ctx.currentRow = st.outer.currentRow
     ctx.loopStates.delete(backEdge.target)
-    return outs.filter((e) => e !== backEdge).map((e) => ctx.byId.get(e.target)).filter(Boolean)
+    ctx.activeLoopId = st.outer.parentLoopId || null
+    ctx.completedLoops.add(backEdge.target)
+    rest.splice(rest.indexOf(backEdge), 1)
+    // 耗尽循环的「结束」出口并入待判定（级联：done→耗尽循环→继续展开）
+    rest.push(...(ctx.outEdges.get(backEdge.target) || []).filter((e) => e.sourceHandle === 'done'))
   }
-  return outs.map((e) => ctx.byId.get(e.target)).filter(Boolean)
+  return rest.map((e) => ctx.byId.get(e.target)).filter(Boolean)
 }
 
 /**
@@ -821,10 +1102,6 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
   const items = st.items
   const n = Math.min(concurrency, items.length)
 
-  // 循环体集合：从本模块出边 DFS。条件节点不裁边（是/否都可能逐项走——分支走出循环体
-  // 属「提前结束」，与单进程语义一致：剩余项放弃，见 drive 的提示）；「尾节点」（非条件、
-  // 且回连本模块）在单进程语义里其余出边只有循环耗尽后才走（pickNext 回连短路），这些边
-  // 裁出各进程视图，目标收集为循环结束后父流程统一走一遍的入口
   const bodyIds = new Set([node.id])
   const exitIds = new Set()
   const dfs = [node.id]
@@ -833,9 +1110,14 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     const outs = ctx.outEdges.get(id) || []
     const isTail = id !== node.id && ctx.byId.get(id)?.type !== 'condition' && outs.some((e) => e.target === node.id)
     for (const e of outs) {
-      if (e.target === node.id) continue // 回连边：目标（本模块）已在集合内，不穿过
+      if (e.target === node.id) continue
+      // 「结束」出口（done）：循环完成后的走向，不属于循环体——作为出口等全部进程结束后走
+      if (e.sourceHandle === 'done') {
+        exitIds.add(e.target)
+        continue
+      }
       if (isTail && !bodyIds.has(e.target)) {
-        exitIds.add(e.target) // 尾节点的出圈边：耗尽后才走，进程内裁掉
+        exitIds.add(e.target)
         continue
       }
       if (!bodyIds.has(e.target)) {
@@ -853,8 +1135,15 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     ctx.log('info', `并发模式：${exits.length} 条跳出循环体的连线，等全部进程结束后再统一走`, node)
   }
 
-  // 各进程表格实时合并的基准 = 起循环时的父表快照（如导入表格的源行），之上叠各进程的行
-  const baseTable = ctx.table ? { columns: [...ctx.table.columns], rows: ctx.table.rows.map((r) => ({ ...r })) } : null
+  // 是否处于断点续跑模式（失败=只续失败的 worker；停止=续所有留有断点的 worker）
+  const resumeWorkerIndexes = ctx.resumeWorkerIndexes
+  // 加载 worker 断点（断点续跑用）
+  const workerCps = await listWorkerCheckpoints(ctx.projectId, ctx.runId)
+  // 基准表 = 当前父表。续跑时它来自主断点（已含各 worker 已写行），重跑 worker 空表起步、
+  // 新行直接追加——不重跑的 worker 行天然保留，重跑项的行不重复
+  const baseTable = ctx.table
+    ? { columns: [...ctx.table.columns], rows: ctx.table.rows.map((r) => ({ ...r })) }
+    : null
   const tables = new Array(n).fill(null)
   const mergeTables = () => {
     const cols = baseTable ? [...baseTable.columns] : []
@@ -876,9 +1165,13 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
   ctx.workerWins = ctx.workerWins || []
 
   const spawn = async (i) => {
-    // 轮转分配：第 i 进程拿第 i, i+n, i+2n… 项（比整块切分均衡，慢项不堵在队尾）
+    // 断点续跑：只重跑断点集合内的 worker，其余 worker 的行/表已在失败/停止时合并进主断点，不重复恢复
+    if (resumeWorkerIndexes.length > 0 && !resumeWorkerIndexes.includes(i)) return
+
     const share = items.filter((_, idx) => idx % n === i)
     const gis = share.map((_, idx) => i + idx * n)
+    const cp = resumeWorkerIndexes.includes(i) ? workerCps.find((w) => w.workerIndex === i)?.checkpoint : null
+
     const win = new BrowserWindow({
       show: false,
       width: 1280,
@@ -892,8 +1185,8 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     })
     ctx.workerWins.push(win)
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    await win.loadURL('about:blank') // 先拉起渲染进程：未导航的隐藏窗口挂 CDP 会自毁
-    // 进程 ctx：原型链继承父 ctx（项目信息/broadcast 共享），执行态字段全部自持
+    await win.loadURL('about:blank')
+
     const wc = Object.create(ctx)
     let wake
     const ownStop = new Promise((resolve) => {
@@ -902,24 +1195,40 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     Object.assign(wc, {
       win,
       finished: false,
-      vars: structuredClone(ctx.vars), // 各进程独立变量作用域（起点 = 起循环时的快照）
-      rows: [], // 提取行独立累积，结束时合并
+      isWorker: true, // 不写主断点，只写自己的 worker 断点
+      workerLoopNodeId: node.id,
+      // 状态字段必须 own 初始化：原型链继承父 ctx，父.failed 被其他 worker 设置后
+      // 本 worker 读 w.failed 会落到父值，被误判为失败者（收集续跑集合时出错）
+      failed: null,
+      cancelled: false,
+      vars: structuredClone(ctx.vars),
+      rows: cp?.data?.rows || [],
+      rowsStartLen: cp?.data?.rows?.length || 0, // 续跑时之前已并入主断点的行数，结束时只追加新行
       captures: new Map(),
       interceptWaiters: new Map(),
+      // 断点续跑不恢复 worker 表：已写行已在主断点的表里（baseTable），重跑空表起步新行追加即可
       table: null,
       currentRow: null,
       loop: null,
       loopStates: new Map(),
+      visited: new Set(),
+      queue: [],
+      completedLoops: new Set(),
       walkGen: 0,
-      outEdges: workerOutEdges, // 裁掉出圈边的出边视图
+      outEdges: workerOutEdges,
       stopPromise: Promise.race([ownStop, ctx.stopPromise]),
       signalStop: wake,
-      failWatch: wake, // 兄弟进程失败时被调用：唤醒本进程挂起中的操作尽快退出
-      showWindow: false, // 并发进程一律隐藏
-      forceSeqLoops: new Set([node.id]), // 本循环在进程内必须按单进程语义走，否则逐进程再裂变
+      // 其他 worker 失败时被动唤醒退出：标 cancelled（不算失败，进度存 running 断点可续跑）
+      failWatch: () => {
+        wc.cancelled = true
+        wake()
+      },
+      showWindow: false,
+      forceSeqLoops: new Set([node.id]),
+      workerIndex: i,
+      activeLoopId: node.id, // worker 的循环即最内层活跃循环
     })
     wc.log = (level, message, nd) => ctx.log(level, `[进程${i + 1}] ${message}`, nd)
-    // 各进程变量互不相同：快照不推送（控制台保持主流程视角），节点状态带本进程的迭代角标
     wc.pushVars = () => {}
     wc.nodeState = (nd, status, extra = {}) =>
       broadcast('crawler:node', {
@@ -936,30 +1245,31 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     }
     win.on('closed', () => {
       if (!wc.finished) {
-        ctx.stopped = true
-        ctx.signalStop?.()
+        // 窗口崩溃：标记本 worker 失败，不直接 stop 全部（父流程会处理断点）
+        wc.failed = wc.failed || '窗口意外关闭'
         for (const other of workerCtxs) other.failWatch?.()
       }
     })
-    // 种子循环状态：gen=1 对上 walkFrom 进门的第一代；totalItems/gis 保留全局总数与序号
-    wc.loopStates.set(node.id, {
-      items: share,
-      gis,
-      index: 0,
+
+    const loopState = {
+      items: cp?.loopState?.items || share,
+      gis: cp?.loopState?.gis || gis,
+      // running 快照可能停在「最后一项已消费、循环体未完成」（index=份额长度）：
+      // 夹回最后一项重试，宁可该项重跑不可漏项
+      index: Math.max(0, Math.min(cp?.loopState?.index ?? 0, share.length - 1)),
       gen: 1,
       totalItems: items.length,
       outer: { loop: null, currentRow: null },
-    })
+    }
+    wc.loopStates.set(node.id, loopState)
     workerCtxs.push(wc)
+
     if (interceptNodes.length) {
       try {
-        await setupNetworkCapture(wc, interceptNodes) // 各进程独立捕获：写各自 captures/waiters
-      } catch {
-        /* 本进程拦截初始化失败不致命：intercept 节点执行时会按超时报错 */
-      }
+        await setupNetworkCapture(wc, interceptNodes)
+      } catch {}
     }
-    // 起始页对齐父窗口：循环体一般不含「打开网页」，不导航的话进程一直停在 about:blank，
-    // 体内的等待/点击/提取全在空白页上跑（元素永远等不到）。同 partition 共享登录态
+
     const startUrl = (() => {
       try {
         return ctx.win?.webContents?.getURL?.()
@@ -978,21 +1288,51 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
 
   try {
     await Promise.all(Array.from({ length: n }, (_, i) => spawn(i)))
+
     const drive = async (wc) => {
+      if (wc.workerIndex === undefined) return // 未启动的 worker（断点续跑模式跳过的）
       try {
-        await walkFrom(wc, [node]) // 与单进程同一套语义：回连边驱动逐项
+        await walkFrom(wc, [node])
       } catch (err) {
-        wc.failed = err.message || String(err)
+        if (!wc.cancelled) wc.failed = err.message || String(err)
       }
       const remain = wc.loopStates.get(node.id)
-      if (remain && remain.index < remain.items.length && !ctx.stopped && !ctx.failed && !wc.failed) {
+      if (remain && remain.index < remain.items.length && !ctx.stopped && !ctx.failed && !wc.failed && !wc.cancelled) {
         wc.log('warn', `循环体提前结束，剩余 ${remain.items.length - remain.index} 项未执行（循环体内的分支连线走出了循环体外）`)
       }
-      if (wc.failed && !ctx.failed && !ctx.stopped) {
-        ctx.failed = wc.failed // fail-fast：置父级失败并唤醒兄弟进程
-        for (const other of workerCtxs) other.failWatch?.()
+      if (wc.cancelled && !ctx.stopped && !wc.failed && wc.loopStates.get(node.id)) {
+        // 被其他 worker 的失败被动打断且份额未跑完：不是失败者，把进行中的进度存成
+        // running 断点并纳入续跑集合——否则它剩下的项永远没人跑（数据缺失）
+        await saveWorkerCheckpoint(ctx.projectId, ctx.runId, wc.workerIndex, {
+          status: 'running',
+          workerIndex: wc.workerIndex,
+          loopNodeId: node.id,
+          loopState: wc.loopStates.get(node.id),
+          data: { rows: wc.rows, table: wc.table, vars: wc.vars },
+        })
       }
-      ctx.rows.push(...wc.rows)
+      if (!wc.failed && !wc.cancelled && !wc.loopStates.get(node.id)) {
+        // 份额已正常跑完（循环状态被耗尽删除）：清掉自己的每项快照，
+        // 停止/失败收集续跑集合时不会误含已完成者（否则会重跑最后一项造成重复行）
+        await removeWorkerCheckpoint(ctx.projectId, ctx.runId, wc.workerIndex)
+      }
+      if (wc.failed && !ctx.stopped) {
+        if (!ctx.failed) {
+          ctx.failed = wc.failed
+          for (const other of workerCtxs) other.failWatch?.()
+        }
+        // 保存失败 worker 的断点，续跑时恢复它（多个都失败时各自保存、一起续跑）
+        await saveWorkerCheckpoint(ctx.projectId, ctx.runId, wc.workerIndex, {
+          status: 'failed',
+          workerIndex: wc.workerIndex,
+          loopNodeId: node.id,
+          loopState: wc.loopStates.get(node.id),
+          data: { rows: wc.rows, table: wc.table, vars: wc.vars },
+          failedAt: { message: wc.failed },
+        })
+      }
+      // 续跑的 worker 只追加断点之后新产生的行（断点前的行已在失败时并入主断点）
+      ctx.rows.push(...wc.rows.slice(wc.rowsStartLen || 0))
     }
     await Promise.all(workerCtxs.map(drive))
   } finally {
@@ -1001,18 +1341,52 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
       wc.finished = true
       try {
         if (wc.win.webContents.debugger.isAttached()) wc.win.webContents.debugger.detach()
-      } catch {
-        /* detach 失败不影响收尾 */
-      }
+      } catch {}
       try {
         if (!wc.win.isDestroyed()) wc.win.destroy()
-      } catch {
-        /* 忽略 */
-      }
+      } catch {}
     }
   }
-  if (ctx.stopped) return { summary: `并发循环已停止（${items.length} 项 × ${n} 进程）`, nextOverride: [] }
-  if (ctx.failed) throw new Error(ctx.failed)
+
+  // 停止：标记所有留有断点的 worker，续跑时各自从自己的进度接着跑。
+  // 重新读盘：workerCps 是起跑时的快照，跑动中的每项保存只有盘上是最新的
+  if (ctx.stopped) {
+    const stoppedIdx = (await listWorkerCheckpoints(ctx.projectId, ctx.runId)).map((w) => w.workerIndex)
+    if (stoppedIdx.length) {
+      ctx.resumeWorkerIndexes = stoppedIdx
+      ctx.resumeNodeId = node.id
+      ctx.parentLoopState = { nodeId: node.id, items, totalItems: items.length, concurrency: n }
+    }
+    return { summary: `并发循环已停止（${items.length} 项 × ${n} 进程）`, nextOverride: [] }
+  }
+  if (ctx.failed) {
+    // 并发失败：续跑集合 = 真失败者们 + 被打断且份额未完的 worker（各自从自己的断点续），
+    // 已正常完成的 worker 快照已被清除、不在集合（其余数据已在主断点里）
+    const firstFailed = workerCtxs.find((w) => w.failed)
+    const resumeIdx = workerCtxs
+      .filter((w) => w.failed || (w.cancelled && w.loopStates.get(node.id)))
+      .map((w) => w.workerIndex)
+    if (firstFailed && resumeIdx.length) {
+      ctx.resumeWorkerIndexes = [...new Set(resumeIdx)]
+      ctx.resumeNodeId = node.id
+      ctx.parentLoopState = {
+        nodeId: node.id,
+        items,
+        index: firstFailed.loopStates.get(node.id)?.index || 0,
+        totalItems: items.length,
+        concurrency: n,
+      }
+      await saveCp(ctx, { flush: true })
+    }
+    throw new Error(ctx.failed)
+  }
+
+  // 成功完成：清理 worker 断点与续跑标记
+  for (let i = 0; i < n; i++) await removeWorkerCheckpoint(ctx.projectId, ctx.runId, i)
+  ctx.resumeWorkerIndexes = []
+  ctx.resumeNodeId = null
+  ctx.parentLoopState = null
+  ctx.completedLoops.add(node.id)
   const tableNote = ctx.table ? `，表格 ${ctx.table.rows.length} 行` : ''
   return { summary: `循环完成：${items.length} 项 × ${n} 进程${tableNote}`, nextOverride: exits }
 }
@@ -1027,7 +1401,7 @@ async function runExportNodes(ctx, nodes) {
         throw new Error('没有可导出的表格（流程里需要「导入表格」或「表格编辑」模块先执行）')
       }
       const r = await exportTableFile({
-        savePath: node.data?.savePath, // 必填已由 validateNode 保证；目录不存在由 exportTableFile 创建
+        savePath: node.data?.savePath,
         baseName: node.data?.baseName || ctx.projectName,
         format: node.data?.format === 'json' ? 'json' : 'csv',
         columns: ctx.table.columns,
@@ -1051,12 +1425,10 @@ async function execNode(ctx, node) {
   const checkStopped = () => {
     if (ctx.stopped) throw new Error('任务已停止')
   }
-  // 选择器值参与变量插值（循环里按行换关键词搜索这类场景）
   const sel = (s) => (s ? { ...s, value: String(interpolate(s.value ?? '', ctx.vars)) } : s)
 
   if (node.type === 'webpage') {
     const url = String(interpolate(data.url ?? '', ctx.vars))
-    // 「打开窗口」选项：首次打开网址时把执行窗口显示出来（此前含 about:blank 拦截初始化都保持隐藏）
     if (ctx.showWindow && !ctx.win.isVisible()) {
       ctx.win.show()
       ctx.win.moveTop()
@@ -1074,8 +1446,6 @@ async function execNode(ctx, node) {
     const labels = { id: 'id', class: 'class', classRegex: 'class 正则', css: 'CSS 选择器' }
     const curLabel = labels[s?.mode] || s?.mode
     ctx.log('info', `等待元素出现：${selectorDesc(s)}（最多等 ${Math.round(timeoutMs / 1000)}s）`, node)
-    // 选择器诊断：同一值把四种模式各试一遍，返回 { alts: 能命中的其他模式, none: 四种全空 }。
-    // 元素明明在页面上却等不到，多半是模式选错（id 写成 class 正则这类）——直说别让人猜
     const runDiag = async () => {
       try {
         const diag = await withTimeout(
@@ -1090,7 +1460,7 @@ async function execNode(ctx, node) {
           .map(([m]) => labels[m] || m)
         return { alts, none: Object.values(counts).every((n) => n === 0) }
       } catch {
-        return { alts: [], none: false } // 诊断失败不影响原流程
+        return { alts: [], none: false }
       }
     }
     let hinted = false
@@ -1102,7 +1472,6 @@ async function execNode(ctx, node) {
         `等待元素超时(${Math.round(timeoutMs / 1000)}s)：${selectorDesc(s)} 未出现（已穿透 shadow DOM 与 iframe 查找）`,
         (sec) => {
           ctx.log('info', `仍在等待元素：${selectorDesc(s)}（已等 ${sec}s）`, node)
-          // 等 5s 还没命中就提前探一次：模式选错的话立刻提示，不必干等到超时
           if (sec >= 5 && !hinted) {
             hinted = true
             runDiag().then(({ alts }) => {
@@ -1139,10 +1508,7 @@ async function execNode(ctx, node) {
     const target = data.target || 'first'
     const verb = CLICK_EVENTS[event] || '点击'
     ctx.log('info', `正在${verb}元素：${selectorDesc(s)}${target === 'all' ? '（全部依次）' : ''}`, node)
-    // 全部依次 = 命中数 × 120ms 间隔，硬超时放宽 30s 余量，避免批量触发被误判超时
     const budget = timeoutMs + 5000 + (target === 'all' ? 30000 : 0)
-    // 批量触发中途可能引起跳转：脚本上下文随导航销毁后 executeJavaScript 永不 settle，
-    // 与 did-navigate 赛跑——跳转先到就按「已触发并跳转」处理，等加载完继续，不干等超时报错
     let navResolve
     const onNav = () => navResolve(null)
     const navRace = new Promise((resolve) => {
@@ -1251,9 +1617,12 @@ async function execNode(ctx, node) {
     // 容错：从别处复制的变量名常带 {{}} 包裹，剥掉再解析
     const name = String(data.varName ?? '').trim().replace(/^\{\{/, '').replace(/\}\}$/, '').trim()
     let st = ctx.loopStates.get(node.id)
-    // 首次进入、上一轮已耗尽又重进、或状态属于更早的遍历代（外层循环换行/换轮）：
-    // 一律重新解析变量取最新值
-    if (!st || st.index >= st.items.length || st.gen !== ctx.walkGen) {
+    // 首次进入、或状态属于更早的遍历代（外层循环换行/换轮）：重新解析变量取最新值。
+    // 注意「index 已耗尽」不算重置条件——正常完成的 loop 在 pickNext 里被 delete，
+    // 残留的耗尽状态只出现在断点恢复（最后一项循环体进行中被中断），要沿用进度接着跑
+    // st.index 严格越界（> 长度）是异常残留，重新解析；恰好 === 长度且代数匹配是断点
+    // 恢复的「最后一项循环体进行中」（消费指针已被回退逻辑处理），沿用进度
+    if (!st || st.index > st.items.length || st.gen !== ctx.walkGen) {
       const raw = interpolate(`{{${name}}}`, ctx.vars)
       if (raw === '' || raw === null || raw === undefined) {
         throw new Error(`变量「${name}」不存在或为空，无法循环`)
@@ -1271,17 +1640,35 @@ async function execNode(ctx, node) {
       } else {
         throw new Error(`变量「${name}」不是数组也不是字符串（${typeof raw}），无法循环`)
       }
-      st = { items, index: 0, gen: ctx.walkGen, outer: { loop: ctx.loop, currentRow: ctx.currentRow } }
+      // parentLoopId：进入本循环时最内层的活跃循环——嵌套场景换代沿父链同步外层代数
+      st = {
+        items,
+        index: 0,
+        gen: ctx.walkGen,
+        outer: { loop: ctx.loop, currentRow: ctx.currentRow, parentLoopId: ctx.activeLoopId || null },
+      }
       ctx.loopStates.set(node.id, st)
       ctx.log('info', `数据循环「${name}」共 ${items.length} 项${splitNote}`, node)
     }
-    if (st.index >= st.items.length) {
+    if (st.items.length === 0) {
       // 空数组/分割后为空：循环体整段跳过（循环后的模块只能经循环体末尾的出边到达）
       ctx.loopStates.delete(node.id)
       ctx.loop = st.outer.loop
       ctx.currentRow = st.outer.currentRow
+      ctx.activeLoopId = st.outer.parentLoopId || null
       ctx.log('warn', `循环变量「${name}」为空，循环体已跳过`, node)
       return { summary: '变量为空，已跳过循环体', skipNext: true }
+    }
+    // 活跃代数下已耗尽的残留重入（pickNext 逐层判定之外的路径，如用户把后续模块直接
+    // 连回已完成的循环）：该循环已完成——恢复上下文后跳过循环体，不重跑也不越界消费。
+    // 断点恢复不受影响：保存前的回退已把 index 收回到最后一项以内
+    if (st.gen === ctx.walkGen && st.items.length > 0 && st.index >= st.items.length) {
+      ctx.loopStates.delete(node.id)
+      ctx.loop = st.outer.loop
+      ctx.currentRow = st.outer.currentRow
+      ctx.activeLoopId = st.outer.parentLoopId || null
+      ctx.log('warn', `循环「${name}」已完成，再次进入时跳过循环体`, node)
+      return { summary: '循环已完成，跳过循环体', skipNext: true }
     }
     // 并发模式：分给 N 个隐藏进程各自走循环体（见 runConcurrentLoop）。进程内重入本模块
     // 按单进程语义走（forceSeqLoops 标记），否则每个进程里会再裂变一层进程
@@ -1294,15 +1681,23 @@ async function execNode(ctx, node) {
     st.index += 1
     ctx.currentRow = null // 新一项 = 表格编辑新起一行（在表格行循环内则恢复逻辑见 outer）
     // 变量合并而非替换：外层变量继续可见；对象项的属性直接平铺成
-    // 变量（与表格行一致），任何项都可经 {{当前项}}/{{当前序号}} 引用
+    // 变量（与表格行一致），任何项都可经 {{当前项}}/{{当前序号}} 引用。
+    // itemVar：嵌套循环时 {{当前项}} 就近覆盖（只剩最内层的），各循环配了
+    // 「当前项另存为变量」就把自己的项再写一份具名变量，内层体里两层都引用得到
+    const itemVar = String(data.itemVar ?? '').trim()
     ctx.vars = {
       ...ctx.vars,
       ...(item !== null && typeof item === 'object' && !Array.isArray(item) ? item : {}),
+      ...(itemVar ? { [itemVar]: item } : {}),
       当前项: item,
       当前序号: gi + 1,
     }
     ctx.loop = { row: gi + 1, total: st.totalItems ?? st.items.length }
+    ctx.activeLoopId = node.id // 本循环成为最内层活跃循环（嵌套时内层又会在其上覆盖）
     ctx.pushVars()
+    // 断点：消费一项后立即保存（单进程存主断点；并发 worker 存自己的 worker 断点）
+    if (ctx.isWorker) await saveWorkerCp(ctx, node.id)
+    else await saveCp(ctx)
     return { summary: `第 ${gi + 1}/${st.totalItems ?? st.items.length} 项` }
   }
 

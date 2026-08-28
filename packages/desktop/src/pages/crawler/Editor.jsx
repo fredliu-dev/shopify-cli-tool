@@ -65,6 +65,8 @@ function EditorInner({ projectId, onBack }) {
   const [saveAsName, setSaveAsName] = useState('')
   // 「打开窗口」：勾选后 webpage 模块打开网址时显示执行窗口（默认隐藏跑）；偏好跨会话记住
   const [showWindow, setShowWindow] = useState(() => localStorage.getItem('crawler:showWindow') === '1')
+  // 断点续跑：上次失败/停止留下的未完成运行（null=没有可续跑的）
+  const [pendingRun, setPendingRun] = useState(null)
 
   const viewportRef = useRef(EMPTY_VIEWPORT)
   const loadedViewportRef = useRef(null) // 初始 viewport（RF defaultViewport 只在挂载时生效）
@@ -155,6 +157,46 @@ function EditorInner({ projectId, onBack }) {
     await window.api.crawler.stop()
   }
 
+  /* -------- 断点续跑 -------- */
+  // 查询未完成运行：进编辑器时 + 每次运行结束（失败/停止都会留断点）刷新
+  const refreshPending = useCallback(async () => {
+    try {
+      const res = await window.api.crawler.pendingRuns(projectId)
+      setPendingRun(res.ok ? res.data?.[0] || null : null)
+    } catch {
+      setPendingRun(null)
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    refreshPending()
+  }, [refreshPending])
+
+  // 继续上次：传当前画布（用户可能已修复失败节点的配置），主进程按节点 id 对齐断点进度
+  const continueRun = async () => {
+    if (!pendingRun) return
+    setLogs([])
+    setNodes((nds) =>
+      nds.map((n) => ({ ...n, data: { ...n.data, status: undefined, summary: undefined, error: undefined, iteration: undefined } })),
+    )
+    const graph = { nodes: cleanNodes(stateRef.current.nodes), edges: cleanEdges(stateRef.current.edges), viewport: viewportRef.current }
+    const res = await window.api.crawler.continueRun({ id: projectId, runId: pendingRun.runId, graph, showWindow })
+    if (!res.ok) return message.error(res.error || '继续失败')
+    setRunning(true)
+  }
+
+  // 放弃断点：清除该次运行的进度文件，回到全新运行
+  const discardPending = async () => {
+    if (!pendingRun) return
+    const res = await window.api.crawler.discardRun({ id: projectId, runId: pendingRun.runId })
+    if (res.ok) {
+      setPendingRun(null)
+      message.success('已清除断点')
+    } else {
+      message.error(res.error || '清除失败')
+    }
+  }
+
   useEffect(() => {
     const offLog = window.api.crawler.onLog((p) => {
       if (p.projectId !== projectId) return
@@ -175,24 +217,29 @@ function EditorInner({ projectId, onBack }) {
     })
     const offRun = window.api.crawler.onRun((p) => {
       if (p.projectId !== projectId) return
-      if (p.status !== 'running') {
-        setRunning(false)
-        // 停止/失败时正在执行的节点不会再收到自己的终态事件，清掉转圈残留——
-        // 否则画布上节点永远亮着蓝呼吸灯，看着像「还在等」
-        setNodes((nds) =>
-          nds.map((n) => (n.data.status === 'running' ? { ...n, data: { ...n.data, status: undefined } } : n)),
-        )
-        if (Array.isArray(p.rows)) setRows(p.rows)
-        if (p.table) setTable(p.table)
-        if (p.status === 'failed') message.error(`执行失败：${p.error || '未知错误'}`)
-        else if (p.status === 'stopped') message.warning('任务已停止')
-        else if (p.status === 'done') {
-          const parts = []
-          if (p.rows?.length) parts.push(`提取 ${p.rows.length} 行`)
-          if (p.table?.rows?.length) parts.push(`表格 ${p.table.rows.length} 行`)
-          message.success(`执行完成${parts.length ? `，${parts.join('，')}` : ''}`)
-        }
+      if (p.status === 'running') {
+        setRunning(true)
+        return
       }
+      setRunning(false)
+      // 停止/失败时正在执行的节点不会再收到自己的终态事件，清掉转圈残留——
+      // 否则画布上节点永远亮着蓝呼吸灯，看着像「还在等」
+      setNodes((nds) =>
+        nds.map((n) => (n.data.status === 'running' ? { ...n, data: { ...n.data, status: undefined } } : n)),
+      )
+      if (Array.isArray(p.rows)) setRows(p.rows)
+      if (p.table) setTable(p.table)
+      if (p.status === 'failed') message.error(`执行失败：${p.error || '未知错误'}`)
+      else if (p.status === 'stopped') message.warning('任务已停止')
+      else if (p.status === 'done') {
+        const parts = []
+        if (p.rows?.length) parts.push(`提取 ${p.rows.length} 行`)
+        if (p.table?.rows?.length) parts.push(`表格 ${p.table.rows.length} 行`)
+        message.success(`执行完成${parts.length ? `，${parts.join('，')}` : ''}`)
+      }
+      // 失败/停止留有断点可续跑；完成则断点已清除
+      if (p.status === 'done') setPendingRun(null)
+      else refreshPending()
     })
     // 变量快照：主进程每次变量变化全量推（渲染层直接整体替换，无需合并）
     const offVars = window.api.crawler.onVars((p) => {
@@ -211,7 +258,7 @@ function EditorInner({ projectId, onBack }) {
       offVars()
       offTable()
     }
-  }, [projectId])
+  }, [projectId, refreshPending])
 
   /* -------- 画布交互 -------- */
   const onAddNode = useCallback((type, position) => {
@@ -268,13 +315,20 @@ function EditorInner({ projectId, onBack }) {
     setTimeout(() => fitView({ padding: 0.15, duration: 300 }), 60)
   }, [nodes, edges, setNodes, fitView])
 
-  // 逻辑判断节点的连线带上「是/否」标签（sourceHandle 由 React Flow 从连接点自动带出）；
+  // 逻辑判断节点的连线带上「是/否」标签、数据循环的「结束」出口连线带「结束」标签
+  // （sourceHandle 由 React Flow 从连接点自动带出）；
   // type: 'crawler' = 自定义连线（悬停 ✕ 删除），与加载路径保持一致
   const onConnect = useCallback(
     (params) => {
       const src = stateRef.current.nodes.find((n) => n.id === params.source)
       const label =
-        src?.type === 'condition' ? (params.sourceHandle === 'no' ? '否' : '是') : undefined
+        src?.type === 'condition'
+          ? params.sourceHandle === 'no'
+            ? '否'
+            : '是'
+          : src?.type === 'loop' && params.sourceHandle === 'done'
+            ? '结束'
+            : undefined
       setEdges((eds) =>
         addEdge(
           label
@@ -412,6 +466,21 @@ function EditorInner({ projectId, onBack }) {
           placeholder="项目名称"
         />
         {running && <Tag color="processing" style={{ borderRadius: 999 }}>运行中</Tag>}
+        {!running && pendingRun && (
+          <Tooltip title={`上次运行${pendingRun.status === 'failed' ? '失败' : '被停止'}留有断点，点「继续上次」从断点处接着跑（点 ✕ 放弃断点）`}>
+            <Tag
+              color="warning"
+              closable
+              style={{ borderRadius: 999, cursor: 'default' }}
+              onClose={(e) => {
+                e.preventDefault()
+                discardPending()
+              }}
+            >
+              有未完成任务
+            </Tag>
+          </Tooltip>
+        )}
         <div style={{ flex: 1 }} />
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
           <span
@@ -466,22 +535,36 @@ function EditorInner({ projectId, onBack }) {
               停止
             </Button>
           ) : (
-            <Tooltip
-              title={invalidCount > 0 ? `还有 ${invalidCount} 个模块必填项未配置完整（画布上红色闪烁的节点），补全后可运行` : undefined}
-            >
-              {/* span 包一层：antd Button disabled 不触发 Tooltip */}
-              <span>
-                <Button
-                  type="primary"
-                  icon={<CaretRightOutlined />}
-                  onClick={run}
-                  disabled={invalidCount > 0}
-                  style={{ borderRadius: 8, boxShadow: '0 4px 14px rgba(10,132,255,0.35)' }}
-                >
-                  运行
-                </Button>
-              </span>
-            </Tooltip>
+            <>
+              {pendingRun && (
+                <Tooltip title="从上次失败/停止的断点处继续执行：已完成的模块与数据项不重跑，并发循环只重跑失败的进程">
+                  <Button
+                    type="primary"
+                    icon={<CaretRightOutlined />}
+                    onClick={continueRun}
+                    style={{ borderRadius: 8, boxShadow: '0 4px 14px rgba(255,159,10,0.4)', background: '#ff9f0a' }}
+                  >
+                    继续上次
+                  </Button>
+                </Tooltip>
+              )}
+              <Tooltip
+                title={invalidCount > 0 ? `还有 ${invalidCount} 个模块必填项未配置完整（画布上红色闪烁的节点），补全后可运行` : pendingRun ? '从头开始一次全新运行（不影响上次断点，可稍后续跑）' : undefined}
+              >
+                {/* span 包一层：antd Button disabled 不触发 Tooltip */}
+                <span>
+                  <Button
+                    type={pendingRun ? 'default' : 'primary'}
+                    icon={<CaretRightOutlined />}
+                    onClick={run}
+                    disabled={invalidCount > 0}
+                    style={{ borderRadius: 8, ...(pendingRun ? {} : { boxShadow: '0 4px 14px rgba(10,132,255,0.35)' }) }}
+                  >
+                    运行
+                  </Button>
+                </span>
+              </Tooltip>
+            </>
           )}
         </Space>
       </div>

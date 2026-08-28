@@ -427,6 +427,20 @@ export function registerReposIpc() {
     }
   })
 
+  // 删除分支（本地 + 远程，远程不存在时跳过）。删当前分支时先自动切到 main/master/其它本地分支，
+  // 切换成功后同样同步 toml（与 checkout 一致：目标分支无项目则清配置）。
+  ipcMain.handle('repos:deleteBranch', async (_evt, { dir, branch }) => {
+    const { deleteBranch, syncConfigForBranch } = await load()
+    try {
+      const res = await deleteBranch(dir, { branch, deleteRemote: true })
+      if (!res.ok) return res
+      if (res.switchedTo) await syncConfigForBranch(dir, res.switchedTo)
+      return { ok: true, data: { remoteDeleted: res.remoteDeleted, switchedTo: res.switchedTo || null } }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
   // 工作区未提交文件列表（合并前脏检查）
   ipcMain.handle('repos:workingTree', async (_evt, { dir }) => {
     const { workingTreeFiles } = await load()

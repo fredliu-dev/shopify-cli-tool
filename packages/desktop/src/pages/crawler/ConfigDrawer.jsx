@@ -321,7 +321,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
             )}
             <Form.Item label="写入变量名" style={{ marginBottom: 12 }}>
               <Input
-                value={data.varName}
+                value={data.varName || ''}
                 onChange={(e) => patch({ varName: e.target.value })}
                 placeholder="表格数据"
                 maxLength={30}
@@ -354,6 +354,14 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
                 maxLength={20}
               />
             </Form.Item>
+            <Form.Item label="当前项另存为变量（嵌套循环用）" style={{ marginBottom: 12 }}>
+              <Input
+                value={data.itemVar || ''}
+                onChange={(e) => patch({ itemVar: e.target.value })}
+                placeholder="选填，如 外层项 / 内层项"
+                maxLength={30}
+              />
+            </Form.Item>
             <Form.Item label="并发进程数" style={{ marginBottom: 12 }}>
               <InputNumber
                 min={1}
@@ -369,8 +377,12 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
               变量是数组时直接遍历（分割符不生效）；是字符串时按分割符拆分后遍历（
               {'\\n'} 表示换行，空片段自动丢弃）。每一轮把当前项写入 {'{{当前项}}'}、
               序号写入 {'{{当前序号}}'}（从 1 起），对象项的字段也直接作为变量可用。
-              连线方式：循环体最后一个模块连回本模块 = 继续下一项；循环完后再从它连出
-              到后续模块 = 循环结束后继续执行。并发大于 1 时同时起对应数量的隐藏浏览器
+              <b>循环嵌套时 {'{{当前项}}'} 是就近的（最内层）</b>——要同时引用两层循环的项，
+              给每个循环填上面的「另存为变量」（如外层填 <b>外层项</b>、内层填 <b>内层项</b>），
+              之后 {'{{外层项.字段}}'}、{'{{内层项.字段}}'} 在数据处理和任何模块里都能分开选。
+              连线方式：循环体最后一个模块连回本模块<b>上方「下一项」出口</b> = 继续下一项；
+              循环全部结束后从本模块<b>下方橙色「结束」出口</b>连出——嵌套时连到外层循环 =
+              换外层下一项，或连到其他后续模块继续执行。并发大于 1 时同时起对应数量的隐藏浏览器
               进程，数据项轮流分给各进程同时跑循环体（各进程变量、表格行独立，互不影响；
               登录态共享；{'{{当前序号}}'} 仍是全局序号），跑完自动合并提取结果与表格，
               任一进程出错则整次运行失败；循环体内连到循环体外的连线会等全部进程结束后再走。

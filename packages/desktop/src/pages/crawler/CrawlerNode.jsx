@@ -55,6 +55,26 @@ function BranchHandles() {
   )
 }
 
+/** 数据循环的双 source 连接点：上「下一项」（循环体末尾连回这里 = 继续下一项）/
+ *  下「结束」（橙色，循环全部结束后才走一次——从它连出到循环后的后续模块或外层循环）。 */
+function LoopHandles({ color }) {
+  const labelStyle = {
+    position: 'absolute',
+    right: 16,
+    fontSize: 10,
+    lineHeight: '14px',
+    color: 'rgba(255,255,255,0.5)',
+  }
+  return (
+    <>
+      <span style={{ ...labelStyle, top: 'calc(30% - 7px)' }}>下一项</span>
+      <span style={{ ...labelStyle, bottom: 'calc(30% - 7px)' }}>结束</span>
+      <Handle type="source" id="next" position={Position.Right} style={{ top: '30%', ...HANDLE_BASE, background: color }} />
+      <Handle type="source" id="done" position={Position.Right} style={{ top: '70%', ...HANDLE_BASE, background: '#ff9f0a' }} />
+    </>
+  )
+}
+
 export default function CrawlerNode({ id, data, type, selected }) {
   const meta = MODULES[type] || MODULES.webpage
   const Icon = meta.icon
@@ -185,6 +205,8 @@ export default function CrawlerNode({ id, data, type, selected }) {
       </div>
       {type === 'condition' ? (
         <BranchHandles />
+      ) : type === 'loop' ? (
+        <LoopHandles color={meta.color} />
       ) : (
         <Handle type="source" position={Position.Right} style={{ ...HANDLE_BASE, background: meta.color }} />
       )}
