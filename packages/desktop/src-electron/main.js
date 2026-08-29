@@ -13,11 +13,47 @@ import { registerDingtalkIpc } from './ipc/dingtalk.js'
 import { registerTapdIpc } from './ipc/tapd.js'
 import { registerSystemIpc } from './ipc/system.js'
 import { registerCrawlerIpc } from './ipc/crawler.js'
+import { dlog, dmem } from './debuglog.js'
 
 // macOS Dock 标签、菜单栏应用名都取自 app.getName()：dev 下裸 electron 进程默认名是 "Electron"，
 // 打包后由 Info.plist 的 productName 改回 "Shopify Toolbox"。dev 下显式 setName 让两者一致；
 // 副作用：userData 目录从 Application Support/Electron 变为 Shopify Toolbox（与打包态一致）。
 app.setName('Shopify Toolbox')
+
+/* -------- 闪退排查：进程级异常钩子（日志落盘见 debuglog.js，崩溃后仍可查） -------- */
+
+dlog('app', `主进程启动：version=${app.getVersion()} electron=${process.versions.electron} node=${process.versions.node} platform=${process.platform}`)
+
+// 未捕获异常：记录后不退出（保留现场让用户截图/反馈；原生崩溃/被系统强杀仍会闪退，
+// 那类情况日志里不会有任何收尾行，本身就是判据）
+process.on('uncaughtException', (err) => {
+  dmem('app', '未捕获异常时 ')
+  dlog('app', `未捕获异常：${err.stack || `${err.name}: ${err.message}`}`)
+})
+
+process.on('unhandledRejection', (reason) => {
+  dlog('app', `未处理的 Promise 拒绝：${reason instanceof Error ? reason.stack : String(reason)}`)
+})
+
+// 渲染进程崩溃/被杀（reason=oom 说明渲染层内存爆了；clean-exit 则是页面自己退出）
+app.on('render-process-gone', (_evt, webContents, details) => {
+  let url = ''
+  try {
+    url = webContents.getURL()
+  } catch {
+    /* 已销毁 */
+  }
+  dlog('app', `渲染进程异常退出：url=${url} reason=${details.reason} exitCode=${details.exitCode}`)
+})
+
+// GPU/网络服务等子进程退出（Chromium 内部崩溃也可能连带整个应用闪退）
+app.on('child-process-gone', (_evt, details) => {
+  dlog('app', `子进程异常退出：type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`)
+})
+
+app.on('before-quit', () => {
+  dlog('app', '应用正常退出（before-quit）')
+})
 
 // TAPD 富文本图片走自定义协议由主进程代理（见 ipc/tapd.js）。
 // 必须在 app ready 前注册为特权 scheme，<img> 才能像 https 一样加载（standard 解析 host、stream 支持流式）。

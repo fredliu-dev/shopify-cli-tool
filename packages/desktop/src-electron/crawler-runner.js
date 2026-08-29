@@ -36,6 +36,7 @@
 import { BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
 import vm from 'node:vm'
+import { dlog, dmem } from './debuglog.js'
 import { clickScript, diagnoseScript, extractScript, inputScript, selectorDesc, stableScript, waitScript } from './crawler-scripts.js'
 import { exportTableFile, readTableFile } from './crawler-table.js'
 import {
@@ -79,6 +80,9 @@ function broadcast(channel, payload) {
     }
   }
 }
+
+/** 诊断日志标签（落盘）：带上 runId，并发 worker 再带进程号——闪退后按运行串联日志。 */
+const runTag = (ctx) => `crawler:${ctx.runId}${ctx.isWorker ? `:w${(ctx.workerIndex ?? 0) + 1}` : ''}`
 
 /* -------- 运行前校验（权威校验在主进程，渲染层只做必填轻提示） -------- */
 
@@ -361,6 +365,7 @@ export function isRunning() {
 /** 停止当前任务（无任务也返回 ok）。 */
 export function stopRun() {
   if (!current) return { ok: true }
+  dlog('crawler', `用户停止任务：run=${current.runId} project=${current.projectId}`)
   current.stopped = true
   current.signalStop?.() // 唤醒所有挂起的节点执行（销毁窗口后 executeJavaScript 可能永不 settle）
   try {
@@ -549,6 +554,8 @@ function setupNetworkCapture(ctx, interceptNodes) {
           } catch {
             return // 响应体已回收/非 http 等场景：静默跳过，等下一个命中的请求
           }
+          // 诊断：响应体积与未收尾请求数（pending 只增不减 = 泄漏，长跑会把内存拖爆）
+          dlog('crawler:cdp', `捕获响应：${bodyText.length}B 命中节点=${targets.length} 待回收请求=${pending.size} url=${info.url}`)
           let value
           try {
             value = JSON.parse(bodyText)
@@ -642,10 +649,14 @@ function buildCheckpoint(ctx) {
 
 /** 立即写盘（吞错，不能影响主流程）。 */
 async function writeCpNow(ctx) {
+  const t0 = Date.now()
   try {
-    await saveCheckpoint(ctx.projectId, ctx.runId, buildCheckpoint(ctx))
+    const r = await saveCheckpoint(ctx.projectId, ctx.runId, buildCheckpoint(ctx))
+    // 诊断：断点体积/耗时（历史上同步大 JSON 写盘曾把主进程拖死被系统杀掉闪退）
+    dlog(runTag(ctx), `断点写盘：${r.bytes}B 耗时=${Date.now() - t0}ms`)
   } catch (err) {
     ctx.log?.('warn', `保存断点失败：${err.message}`)
+    dlog(runTag(ctx), `断点写盘失败（耗时 ${Date.now() - t0}ms）：${err.stack || err.message}`)
   }
 }
 
@@ -684,15 +695,19 @@ function saveCp(ctx, { flush = false } = {}) {
 /** 保存并发 worker 断点：每消费一项后调用，崩溃/失败后可从该项继续。 */
 async function saveWorkerCp(ctx, loopNodeId) {
   if (!ctx.isWorker) return
+  const t0 = Date.now()
   try {
-    await saveWorkerCheckpoint(ctx.projectId, ctx.runId, ctx.workerIndex, {
+    const r = await saveWorkerCheckpoint(ctx.projectId, ctx.runId, ctx.workerIndex, {
       status: 'running',
       workerIndex: ctx.workerIndex,
       loopNodeId,
       loopState: ctx.loopStates.get(loopNodeId),
       data: { rows: ctx.rows, table: ctx.table, vars: ctx.vars },
     })
-  } catch {}
+    dlog(runTag(ctx), `worker 断点写盘：${r.bytes}B 耗时=${Date.now() - t0}ms`)
+  } catch (err) {
+    dlog(runTag(ctx), `worker 断点写盘失败（耗时 ${Date.now() - t0}ms）：${err.stack || err.message}`)
+  }
 }
 
 /* -------- 运行入口与断点恢复 -------- */
@@ -725,6 +740,8 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
 
   const runId = resumeRunId || newRunId()
   const startedAt = new Date().toISOString()
+  const startMs = Date.now()
+  const tag = `crawler:${runId}`
   let seqCounter = 0
 
   const ctx = {
@@ -847,12 +864,37 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
       current.signalStop?.()
     }
   })
+  // 诊断：执行窗口渲染进程崩溃（reason=oom = 页面内存爆了）——closed 只能看出窗口没了
+  win.webContents.on('render-process-gone', (_evt, details) => {
+    dlog(tag, `执行窗口渲染进程异常退出：reason=${details.reason} exitCode=${details.exitCode}`)
+  })
 
   runState('running', { resumed: resuming })
   log('info', resuming ? `继续执行：从断点恢复` : `开始执行：共 ${nodes.length} 个节点`)
   if (resuming && ctx.failedAt) {
     log('info', `断点位置：节点 ${ctx.failedAt.nodeId}${ctx.failedAt.iteration ? `（第 ${ctx.failedAt.iteration.row}/${ctx.failedAt.iteration.total} 项）` : ''}，错误：${ctx.failedAt.message}`)
   }
+
+  // 诊断：运行起跑信息 + 30s 内存采样（闪退排查——被系统 OOM 杀掉时 rss 增长趋势可见）
+  dlog(
+    tag,
+    `开始执行：project=${projectId}(${ctx.projectName}) 续跑=${resuming} 节点=${nodes.length} 连线=${(graph.edges || []).length} 接口拦截=${nodes.filter((n) => n.type === 'intercept').length} 个`,
+  )
+  dmem(tag, '起跑 ')
+  const memTimer = setInterval(() => {
+    dmem(tag, '')
+    let varsBytes = -1
+    try {
+      varsBytes = JSON.stringify(ctx.vars).length
+    } catch {
+      /* 变量不可序列化：跳过体积只记数量 */
+    }
+    dlog(
+      tag,
+      `采样：rows=${ctx.rows.length} 表格行=${ctx.table?.rows?.length ?? 0} 捕获=${ctx.captures.size} 变量数=${Object.keys(ctx.vars).length} 变量体积=${varsBytes}B`,
+    )
+  }, 30000)
+  memTimer.unref?.()
 
   ;(async () => {
     try {
@@ -891,6 +933,14 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
     } catch (err) {
       if (!ctx.failed && !ctx.stopped) ctx.failed = err.message || String(err)
     }
+
+    // 诊断：收尾行（闪退场景日志里没有这行 = 主流程未走完即被杀）+ 停掉内存采样
+    clearInterval(memTimer)
+    dlog(
+      tag,
+      `执行结束：${ctx.failed ? `失败：${ctx.failed}` : ctx.stopped ? '已停止' : '成功'} rows=${ctx.rows.length} 表格行=${ctx.table?.rows?.length ?? 0} 耗时=${Math.round((Date.now() - startMs) / 1000)}s`,
+    )
+    dmem(tag, '结束时 ')
 
     ctx.finished = true
     try {
@@ -986,11 +1036,18 @@ async function walkFrom(ctx, entries) {
     const label = node.data?.label || node.type
     ctx.nodeState(node, 'running')
     if (!ctx.loop) ctx.log('info', `执行「${label}」`, node)
+    // 诊断面包屑：闪退后日志最后一行「节点开始」= 崩溃发生在该节点执行中
+    const nodeStart = Date.now()
+    dlog(
+      runTag(ctx),
+      `节点开始 ${node.type}「${label}」id=${node.id}${ctx.loop ? ` 第${ctx.loop.row}/${ctx.loop.total}项` : ''}`,
+    )
     let result
     try {
       result = await execNode(ctx, node)
     } catch (err) {
       if (ctx.stopped || ctx.cancelled) {
+        dlog(runTag(ctx), `节点中断（停止/取消）${node.type}「${label}」耗时=${Date.now() - nodeStart}ms：${err.message}`)
         // 停止也记录中断点：恢复时从这里重试。不能只清场——循环中停止时 visited 已被
         // 回连逻辑清空过，从画布起点恢复会重跑前置模块（如重新导入表格覆盖已产出的行）。
         // cancelled（并发 worker 被其他 worker 的失败被动唤醒）只在 worker 上出现，
@@ -1003,12 +1060,14 @@ async function walkFrom(ctx, entries) {
       ctx.failedAt = { nodeId: node.id, message: ctx.failed, iteration: ctx.loop ? { ...ctx.loop } : null }
       ctx.nodeState(node, 'failed', { error: ctx.failed })
       ctx.log('error', `「${label}」失败：${ctx.failed}`, node)
+      dlog(runTag(ctx), `节点失败 ${node.type}「${label}」耗时=${Date.now() - nodeStart}ms：${err.stack || err.message}`)
       rollbackExhaustedLoops(ctx)
       await saveCp(ctx, { flush: true })
       return
     }
     ctx.nodeState(node, 'success', { summary: result.summary })
     ctx.log('success', result.summary, node)
+    dlog(runTag(ctx), `节点结束 ${node.type}「${label}」耗时=${Date.now() - nodeStart}ms`)
     if (node.type === 'loop' && !result.skipNext) {
       // 循环消费了一项 = 进入新一轮：清空 visited 让循环体整轮重跑；换代作废旧的内层
       // 循环状态（外层换项后内层自动从头重跑）。skipNext（空跳过/已完成跳过）没消费不动。
@@ -1160,6 +1219,7 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
   }
 
   ctx.log('info', `并发数据循环「${name}」：${items.length} 项分给 ${n} 个进程同时执行`, node)
+  dlog(runTag(ctx), `并发循环「${name}」启动：${items.length} 项 × ${n} 进程，续跑集合=[${resumeWorkerIndexes.join(',') || '无'}]`)
   const interceptNodes = [...bodyIds].map((id) => ctx.byId.get(id)).filter((nd) => nd.type === 'intercept')
   const workerCtxs = []
   ctx.workerWins = ctx.workerWins || []
@@ -1171,6 +1231,7 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     const share = items.filter((_, idx) => idx % n === i)
     const gis = share.map((_, idx) => i + idx * n)
     const cp = resumeWorkerIndexes.includes(i) ? workerCps.find((w) => w.workerIndex === i)?.checkpoint : null
+    dlog(runTag(ctx), `并发进程 ${i + 1}/${n} 启动：份额 ${share.length} 项（断点=${cp ? '有' : '无'}）`)
 
     const win = new BrowserWindow({
       show: false,
@@ -1185,6 +1246,10 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     })
     ctx.workerWins.push(win)
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    // 诊断：worker 窗口渲染进程崩溃单独记录（closed 只能看出窗口没了）
+    win.webContents.on('render-process-gone', (_evt, details) => {
+      dlog(runTag(ctx), `并发进程 ${i + 1} 渲染进程异常退出：reason=${details.reason} exitCode=${details.exitCode}`)
+    })
     await win.loadURL('about:blank')
 
     const wc = Object.create(ctx)
@@ -1336,6 +1401,7 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     }
     await Promise.all(workerCtxs.map(drive))
   } finally {
+    dlog(runTag(ctx), `并发循环收尾：失败=${ctx.failed || '无'} 已停止=${!!ctx.stopped}`)
     mergeTables()
     for (const wc of workerCtxs) {
       wc.finished = true

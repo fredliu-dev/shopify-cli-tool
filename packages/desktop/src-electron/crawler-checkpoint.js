@@ -49,8 +49,9 @@ export async function saveCheckpoint(projectId, runId, checkpoint) {
     updatedAt: new Date().toISOString(),
     ...checkpoint,
   }
-  writeFileSync(file, JSON.stringify(payload, replacer, 2), 'utf8')
-  return { ok: true, path: file }
+  const text = JSON.stringify(payload, replacer, 2)
+  writeFileSync(file, text, 'utf8')
+  return { ok: true, path: file, bytes: Buffer.byteLength(text) }
 }
 
 /**
@@ -115,8 +116,9 @@ export async function saveWorkerCheckpoint(projectId, runId, workerIndex, checkp
   const dir = join(await runDir(projectId, runId), 'workers')
   mkdirSync(dir, { recursive: true })
   const file = join(dir, `worker-${workerIndex}.json`)
-  writeFileSync(file, JSON.stringify(checkpoint, replacer, 2), 'utf8')
-  return { ok: true, path: file }
+  const text = JSON.stringify(checkpoint, replacer, 2)
+  writeFileSync(file, text, 'utf8')
+  return { ok: true, path: file, bytes: Buffer.byteLength(text) }
 }
 
 /** 加载 worker 断点。 */
