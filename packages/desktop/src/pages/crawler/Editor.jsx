@@ -30,6 +30,8 @@ import { INK, MAT } from './theme.js'
 
 const AUTOSAVE_DELAY = 1200
 const MAX_LOGS = 500
+// 循环聚合行的明细条数上限（只保留最近 N 条，防超长循环把内存撑爆）
+const MAX_LOOP_DETAILS = 2000
 const EMPTY_VIEWPORT = { x: 0, y: 0, zoom: 1 }
 
 /** 保存前剥离运行态字段（status/summary/error/iteration 是主进程推送的临时高亮，不落盘）。 */
@@ -200,6 +202,27 @@ function EditorInner({ projectId, onBack }) {
   useEffect(() => {
     const offLog = window.api.crawler.onLog((p) => {
       if (p.projectId !== projectId) return
+      // 循环聚合日志：不追加新行，覆盖更新已有聚合行（按 aggKey 定位），明细留在行内
+      // details 里（点击聚合行弹窗查看）。首次出现时创建聚合行。
+      if (p.aggKey) {
+        setLogs((prev) => {
+          const idx = prev.findIndex((l) => l.aggKey === p.aggKey)
+          // 心跳（bare）：循环节点每消费一项主动发来的框状态，只刷新进度/当前项，不追加明细
+          if (p.bare) {
+            if (idx === -1) return [...prev, { ...p, details: [] }]
+            const row = prev[idx]
+            return [...prev.slice(0, idx), { ...row, ts: p.ts, agg: { ...row.agg, ...p.agg } }, ...prev.slice(idx + 1)]
+          }
+          const detail = { seq: p.seq, ts: p.ts, level: p.level, nodeType: p.nodeType, nodeLabel: p.nodeLabel, message: p.message }
+          if (idx === -1) return [...prev, { ...p, details: [detail] }]
+          const row = prev[idx]
+          const details = [...row.details, detail]
+          const trimmed = details.length > MAX_LOOP_DETAILS ? details.slice(details.length - MAX_LOOP_DETAILS) : details
+          const updated = { ...row, ts: p.ts, level: p.level, agg: { ...row.agg, ...p.agg }, details: trimmed }
+          return [...prev.slice(0, idx), updated, ...prev.slice(idx + 1)]
+        })
+        return
+      }
       setLogs((prev) => {
         const next = [...prev, p]
         return next.length > MAX_LOGS ? next.slice(next.length - MAX_LOGS) : next

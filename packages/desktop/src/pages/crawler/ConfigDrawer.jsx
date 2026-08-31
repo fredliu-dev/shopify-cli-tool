@@ -148,10 +148,12 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
         {node.type === 'webpage' && (
           <>
             <Form.Item label="网址 URL" required style={{ marginBottom: 14 }}>
-              <Input
+              <VariableInput
                 value={data.url}
-                onChange={(e) => patch({ url: e.target.value })}
-                placeholder="https://example.com/list"
+                onChange={(v) => patch({ url: v })}
+                options={variableOptions}
+                mode="expr"
+                placeholder="https://example.com/list，可从下拉选变量拼接到光标处，如 https://x.com/{{表格项.URL}}"
               />
             </Form.Item>
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -163,8 +165,21 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
         {node.type === 'wait' && (
           <>
             <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} />
+            <Form.Item label="等待模式" style={{ marginTop: 14, marginBottom: 12 }}>
+              <Radio.Group
+                size="small"
+                optionType="button"
+                buttonStyle="solid"
+                options={[
+                  { label: '出现', value: 'appear' },
+                  { label: '消失', value: 'gone' },
+                ]}
+                value={data.waitMode || 'appear'}
+                onChange={(e) => patch({ waitMode: e.target.value })}
+              />
+            </Form.Item>
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 10 }}>
-              等页面里出现该元素后才继续执行后面的模块（常用于等列表渲染完成）。
+              等页面里该元素出现（或勾「消失」：等 loading 遮罩/弹窗关闭后再继续）后才执行后面的模块。
             </Text>
           </>
         )}
@@ -192,8 +207,21 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
                 onChange={(e) => patch({ target: e.target.value })}
               />
             </Form.Item>
+            {(data.target || 'first') === 'all' && (
+              <Form.Item label="触发间隔（秒）" style={{ marginBottom: 12 }} extra="依次触发每个元素后等待多久再点下一个，留给页面动画/请求走完">
+                <InputNumber
+                  min={0}
+                  max={60}
+                  step={0.1}
+                  value={data.gapMs != null ? data.gapMs / 1000 : 0.12}
+                  onChange={(v) => patch({ gapMs: v == null ? undefined : Math.round(v * 1000) })}
+                  style={{ width: 160 }}
+                  addonAfter="秒"
+                />
+              </Form.Item>
+            )}
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4, lineHeight: 1.7 }}>
-              匹配到多个元素时：仅触发第一个，或按页面顺序依次触发全部（每个间隔约 0.1 秒）。回车会先聚焦元素再按键；
+              匹配到多个元素时：仅触发第一个，或按页面顺序依次触发全部（间隔可在上方配置，默认 0.12 秒）。回车会先聚焦元素再按键；
               点击/双击/回车可能引起页面跳转，会自动等加载完成，超时时间兼作触发与等待跳转的上限。
             </Text>
           </>
@@ -238,6 +266,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
             </Button>
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 12, lineHeight: 1.7 }}>
               每个字段独立匹配所有命中元素：同一字段命中 N 个元素即产出 N 行；行数按各字段命中数的最大值对齐，缺失留空。
+              写入变量时：命中 1 个存值本身，命中多个存数组（如 {'{{tag}}'} 为 ['a','b']，可在数据处理里 join / 循环遍历）。
             </Text>
           </>
         )}
@@ -411,10 +440,33 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
                 style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12 }}
               />
             </Form.Item>
+            {(() => {
+              // 结果另存为新变量（可选）：留空 = return 结果覆盖原变量；填写 = 写入新变量。
+              // 同名冲突校验：命中别的来源（静态声明/别的节点/运行快照）才报红；
+              // 本节点自己声明过的（下拉里带 nodeId=自己 或纯运行时条目）不算冲突
+              const out = String(data.outputVar ?? '').trim().replace(/^\{\{/, '').replace(/\}\}$/, '').trim()
+              const bad =
+                !!out && variableOptions.some((o) => o.value === out && o.nodeId !== node.id && !o.runtime)
+              return (
+                <Form.Item
+                  label="结果另存为新变量"
+                  style={{ marginBottom: 12 }}
+                  validateStatus={bad ? 'error' : undefined}
+                  help={bad ? `变量「${out}」已存在，不能覆盖已有变量，请换一个名字` : '留空则结果覆盖原变量；填写则写入这个新变量，原变量不变'}
+                >
+                  <Input
+                    value={data.outputVar}
+                    onChange={(e) => patch({ outputVar: e.target.value })}
+                    placeholder="可选，如 处理结果；不能与已有变量同名"
+                    maxLength={40}
+                  />
+                </Form.Item>
+              )
+            })()}
             <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
               代码在主进程沙箱里执行：旧值用 <code>value</code> 取，别的变量用 <code>vars.变量名</code> 取；
-              <code>return</code> 的结果（对象/数组/数字/文本都行）作为该变量的新值，深层路径（如 接口数据.data.list）会写回原位置。
-              可用 JSON / Math / Date 等，<code>console.log</code> 会打进运行日志；支持 async/await，超过 5 秒按超时失败。
+              <code>return</code> 的结果（对象/数组/数字/文本都行）默认作为该变量的新值，深层路径（如 接口数据.data.list）会写回原位置；
+              配了「结果另存为新变量」时结果写入新变量、原变量保持不变。可用 JSON / Math / Date 等，<code>console.log</code> 会打进运行日志；支持 async/await，超过 5 秒按超时失败。
             </Text>
           </>
         )}

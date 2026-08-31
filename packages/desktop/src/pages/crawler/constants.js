@@ -239,7 +239,11 @@ export function collectVariableOptions(nodes, runtimeVars) {
       // 配了「当前项另存为变量」的循环：嵌套时用它区分内外层的当前项
       if (d.itemVar) add(d.itemVar, '数据循环·当前项')
     }
+    // 数据处理配了「结果另存为新变量」：处理结果会写入它（原变量不变），下拉里可选
+    if (n.type === 'dataProcess' && d.outputVar) add(String(d.outputVar).trim(), '数据处理·结果变量')
   }
+  // 静态声明（画布上配出来的）先落 map，之后 runtime 快照新增的才是纯运行时条目
+  const staticKeys = new Set(notes.keys())
   const walk = (path, val, depth) => {
     if (val === null || val === undefined || notes.size > 200) return
     if (Array.isArray(val)) {
@@ -256,7 +260,20 @@ export function collectVariableOptions(nodes, runtimeVars) {
   if (runtimeVars && typeof runtimeVars === 'object') {
     for (const [k, v] of Object.entries(runtimeVars)) walk(k, v, 0)
   }
-  return [...notes.entries()].map(([value, note]) => ({ value, label: note ? `${value}（${note}）` : value }))
+  const opts = [...notes.entries()].map(([value, note]) => ({
+    value,
+    label: note ? `${value}（${note}）` : value,
+    // runtime: true = 只在运行快照里出现（静态画布没声明过），同名校验时对本节点自己
+    // 写入的结果变量不误报；nodeId = 声明该结果变量的数据处理节点（自己声明的不算冲突）
+    runtime: staticKeys.has(value) ? undefined : true,
+  }))
+  for (const n of nodes || []) {
+    if (n.type === 'dataProcess' && n.data?.outputVar) {
+      const hit = opts.find((o) => o.value === String(n.data.outputVar).trim())
+      if (hit && hit.nodeId === undefined) hit.nodeId = n.id
+    }
+  }
+  return opts
 }
 
 /**

@@ -50,14 +50,17 @@ const HELPERS = `
 `
 
 /**
- * 等待元素出现：一次性检查（同步返回布尔，页内不等待）。轮询由主进程 pollPage 驱动——
+ * 等待元素出现/消失：一次性检查（同步返回布尔，页内不等待）。轮询由主进程 pollPage 驱动——
  * 登录校验等页面跳转会杀死页内长驻脚本（executeJavaScript 随之永不 settle，整段等待僵死），
  * 改成单次检查后跳转最多损失一轮，跳回原页面后下一轮照常命中。
+ * mode='gone' 等元素消失（loading 遮罩/弹窗关闭）：页面上查不到该元素即达成。
  */
-export function waitScript(selector) {
+export function waitScript(selector, mode) {
   return `(() => {${HELPERS}
     const spec = ${JSON.stringify(selector)}
-    return !!findEl(spec)
+    const gone = ${mode === 'gone'}
+    const found = !!findEl(spec)
+    return gone ? !found : found
   })()`
 }
 
@@ -95,15 +98,17 @@ export function selectorDesc(spec) {
 /**
  * 触发元素事件：短轮询查找（复用 timeoutMs 上限）后按 event 逐个触发。
  * event 与渲染层 CLICK_EVENTS 对应：click/dblclick/enter/focus/blur/hover。
- * target：first 仅第一个命中；all 按页面顺序全部依次（间隔 ~120ms 让页面来得及响应）。
+ * target：first 仅第一个命中；all 按页面顺序全部依次（间隔 gapMs，默认 120ms
+ * 让页面来得及响应；轮播/购物车批量勾选这类要页面动画走完的场景可调大）。
  * 解析为触发的元素个数（主进程摘要用）。兼容旧数据：event 缺省 click、target 缺省 first。
  */
-export function clickScript(selector, event, target, timeoutMs) {
+export function clickScript(selector, event, target, timeoutMs, gapMs) {
   return `(() => {${HELPERS}
     const spec = ${JSON.stringify(selector)}
     const event = ${JSON.stringify(event || 'click')}
     const target = ${JSON.stringify(target || 'first')}
     const timeoutMs = ${Number(timeoutMs) || 5000}
+    const gapMs = ${Number(gapMs) >= 0 ? Number(gapMs) : 120}
     const mouse = { bubbles: true, cancelable: true, view: window }
     const fire = (el) => {
       if (event === 'focus') { el.scrollIntoView?.({ block: 'center' }); el.focus?.(); return }
@@ -148,7 +153,7 @@ export function clickScript(selector, event, target, timeoutMs) {
       const run = async (els) => {
         for (let i = 0; i < els.length; i++) {
           fire(els[i])
-          if (i < els.length - 1) await new Promise((r) => setTimeout(r, 120))
+          if (i < els.length - 1 && gapMs > 0) await new Promise((r) => setTimeout(r, gapMs))
         }
         resolve(els.length)
       }
@@ -202,7 +207,9 @@ export function inputScript(selector, text, timeoutMs) {
  * 提取数据（一次性，页内不等待）：每个字段独立 findAll，行数取各字段命中最大值，第 i 行
  * 取各字段第 i 个命中（缺失 null）——同一选择器命中 N 个元素自然产出 N 行。全部字段
  * 0 命中返回 null（主进程 pollPage 在超时内反复注入重试，页面跳转后新页面同样能提取）。
- * @returns {string} 脚本：求值为 {rows: Array<Object>, fields: string[]} | null
+ * cols 额外带回各字段的全部命中（顺序）：主进程据此注入变量——单命中给值本身，多命中
+ * 给数组（此前变量只拿首行，多标签/多元素场景后面的全丢）。
+ * @returns {string} 脚本：求值为 {rows: Array<Object>, fields: string[], cols: Array<{name, hits}>} | null
  */
 export function extractScript(fields) {
   return `(() => {${HELPERS}
@@ -219,6 +226,6 @@ export function extractScript(fields) {
     const rowCount = Math.max(1, ...cols.map((c) => c.hits.length))
     const rows = Array.from({ length: rowCount }, (_, i) =>
       Object.fromEntries(cols.map((c) => [c.name, c.hits[i] ?? null])))
-    return { rows, fields: cols.map((c) => c.name) }
+    return { rows, fields: cols.map((c) => c.name), cols }
   })()`
 }

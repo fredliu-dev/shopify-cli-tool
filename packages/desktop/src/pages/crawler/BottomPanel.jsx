@@ -12,6 +12,8 @@ import {
   DownOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
+  LoadingOutlined,
+  CheckCircleFilled,
   RightOutlined,
   UpOutlined,
 } from '@ant-design/icons'
@@ -66,11 +68,170 @@ const fmtTs = (ts) => {
 }
 
 /**
- * 日志列表：行结构 = 时间 → 级别徽标 → 模块徽标（图标+节点名，模块色）→ 正文。
+ * 单条日志行：时间 → 级别徽标 → 模块徽标（图标+节点名，模块色）→ 正文。
  * warn/error/success 整行淡染；与日志关联的模块由主进程随日志推送 nodeType/nodeLabel。
+ * 循环明细弹窗里的行也复用本渲染。
  */
-function LogList({ logs }) {
+function LogRow({ l }) {
+  const lv = LEVEL_META[l.level] || LEVEL_META.info
+  const meta = MODULES[l.nodeType]
+  const Icon = meta?.icon
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '2px 8px', borderRadius: 6, background: lv.bg }}>
+      <span style={{ fontSize: 11, fontFamily: MONO, color: INK[3], flexShrink: 0 }}>{fmtTs(l.ts)}</span>
+      <span
+        style={{ flexShrink: 0, width: 36, textAlign: 'center', fontSize: 10.5, lineHeight: '16px', borderRadius: 4, color: lv.color, background: lv.chipBg }}
+      >
+        {lv.text}
+      </span>
+      {meta && (
+        <span
+          title={l.nodeLabel || meta.name}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            flexShrink: 0,
+            maxWidth: 150,
+            padding: '0 7px',
+            fontSize: 10.5,
+            lineHeight: '16px',
+            borderRadius: 4,
+            color: meta.color,
+            background: `${meta.color}1a`,
+          }}
+        >
+          {Icon && <Icon style={{ fontSize: 10 }} />}
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {l.nodeLabel || meta.name}
+          </span>
+        </span>
+      )}
+      <span style={{ color: lv.msg, wordBreak: 'break-all' }}>{l.message}</span>
+    </div>
+  )
+}
+
+/**
+ * 循环聚合行：环状转圈（运行中）+ 当前循环项数据，覆盖更新不往下叠；完成后变绿勾。
+ * 点击打开弹窗查看本循环的逐条明细日志。
+ */
+function LoopAggRow({ l, running, onClick }) {
+  const meta = MODULES.loop
+  const Icon = meta?.icon
+  const done = l.agg?.done || !running
+  return (
+    <div
+      onClick={onClick}
+      title="点击查看本循环的逐条日志"
+      style={{
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+        padding: '3px 8px',
+        borderRadius: 6,
+        cursor: 'pointer',
+        background: 'rgba(255,255,255,0.035)',
+      }}
+    >
+      <span style={{ fontSize: 11, fontFamily: MONO, color: INK[3], flexShrink: 0 }}>{fmtTs(l.ts)}</span>
+      {done ? (
+        <CheckCircleFilled style={{ fontSize: 12, color: STATUS.success, flexShrink: 0 }} />
+      ) : (
+        <LoadingOutlined spin style={{ fontSize: 12, color: STATUS.running, flexShrink: 0 }} />
+      )}
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          flexShrink: 0,
+          maxWidth: 150,
+          padding: '0 7px',
+          fontSize: 10.5,
+          lineHeight: '16px',
+          borderRadius: 4,
+          color: meta.color,
+          background: `${meta.color}1a`,
+        }}
+      >
+        {Icon && <Icon style={{ fontSize: 10 }} />}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {l.agg?.label || '数据循环'}
+        </span>
+      </span>
+      {l.agg?.iteration && (
+        <span style={{ flexShrink: 0, fontSize: 11, fontFamily: MONO, color: INK[2] }}>
+          {l.agg.iteration.row}/{l.agg.iteration.total}
+        </span>
+      )}
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontFamily: MONO,
+          fontSize: 11.5,
+          color: 'rgba(255,255,255,0.72)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {l.agg?.item || ''}
+      </span>
+      <span style={{ flexShrink: 0, fontSize: 10.5, color: INK[3] }}>{l.details?.length || 0} 条</span>
+      <RightOutlined style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', flexShrink: 0 }} />
+    </div>
+  )
+}
+
+/** 循环明细弹窗：逐条展示聚合行里攒下的日志（超上限时只保留最近 2000 条）。 */
+function LoopDetailModal({ row, running, onClose }) {
+  const bodyRef = useRef(null)
+  const details = row.details || []
+  // 新明细自动滚到底（用户往上翻历史时不打扰）
+  useEffect(() => {
+    const el = bodyRef.current
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [details.length])
+  const done = row.agg?.done || !running
+  return (
+    <Modal
+      open
+      onCancel={onClose}
+      footer={null}
+      width={760}
+      title={
+        <span style={{ fontSize: 14, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          {done ? (
+            <CheckCircleFilled style={{ fontSize: 13, color: STATUS.success }} />
+          ) : (
+            <LoadingOutlined spin style={{ fontSize: 13, color: STATUS.running }} />
+          )}
+          循环「{row.agg?.label || '数据循环'}」逐条日志 · {details.length} 条
+        </span>
+      }
+      styles={{ body: { height: '64vh', overflow: 'hidden', paddingTop: 4 } }}
+    >
+      <div ref={bodyRef} style={{ height: '100%', overflowY: 'auto', padding: '4px 8px', fontSize: 12, lineHeight: 1.7 }}>
+        {details.length === 0 && <Text type="secondary">暂无明细</Text>}
+        {details.map((d) => (
+          <LogRow key={d.seq} l={d} />
+        ))}
+      </div>
+    </Modal>
+  )
+}
+
+/**
+ * 日志列表：普通行逐条排；循环聚合行按 aggKey 去重、覆盖更新（转圈环 + 当前项数据）。
+ * running=false 时所有聚合行的转圈停住（运行结束统一收口）。
+ */
+function LogList({ logs, running }) {
   const boxRef = useRef(null)
+  const [viewingKey, setViewingKey] = useState(null)
   // 新日志自动滚到底（用户往上翻历史时不打扰：距底 <80px 才跟随）
   useEffect(() => {
     const el = boxRef.current
@@ -79,51 +240,19 @@ function LogList({ logs }) {
     }
   }, [logs])
 
+  const viewing = viewingKey ? logs.find((l) => l.aggKey === viewingKey) : null
+
   return (
-    <div ref={boxRef} style={{ height: '100%', overflowY: 'auto', padding: '6px 10px 10px', fontSize: 12, lineHeight: 1.7 }}>
+    <div style={{ height: '100%', overflowY: 'auto', padding: '6px 10px 10px', fontSize: 12, lineHeight: 1.7 }} ref={boxRef}>
       {logs.length === 0 && <Text type="secondary">运行日志会实时输出到这里</Text>}
-      {logs.map((l) => {
-        const lv = LEVEL_META[l.level] || LEVEL_META.info
-        const meta = MODULES[l.nodeType]
-        const Icon = meta?.icon
-        return (
-          <div
-            key={l.seq}
-            style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '2px 8px', borderRadius: 6, background: lv.bg }}
-          >
-            <span style={{ fontSize: 11, fontFamily: MONO, color: INK[3], flexShrink: 0 }}>{fmtTs(l.ts)}</span>
-            <span
-              style={{ flexShrink: 0, width: 36, textAlign: 'center', fontSize: 10.5, lineHeight: '16px', borderRadius: 4, color: lv.color, background: lv.chipBg }}
-            >
-              {lv.text}
-            </span>
-            {meta && (
-              <span
-                title={l.nodeLabel || meta.name}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  flexShrink: 0,
-                  maxWidth: 150,
-                  padding: '0 7px',
-                  fontSize: 10.5,
-                  lineHeight: '16px',
-                  borderRadius: 4,
-                  color: meta.color,
-                  background: `${meta.color}1a`,
-                }}
-              >
-                {Icon && <Icon style={{ fontSize: 10 }} />}
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {l.nodeLabel || meta.name}
-                </span>
-              </span>
-            )}
-            <span style={{ color: lv.msg, wordBreak: 'break-all' }}>{l.message}</span>
-          </div>
-        )
-      })}
+      {logs.map((l) =>
+        l.aggKey ? (
+          <LoopAggRow key={l.aggKey} l={l} running={running} onClick={() => setViewingKey(l.aggKey)} />
+        ) : (
+          <LogRow key={l.seq} l={l} />
+        ),
+      )}
+      {viewing && <LoopDetailModal row={viewing} running={running} onClose={() => setViewingKey(null)} />}
     </div>
   )
 }
@@ -469,7 +598,7 @@ export default function BottomPanel({
                     )}
                   </span>
                 ),
-                children: <LogList logs={logs} />,
+                children: <LogList logs={logs} running={running} />,
               },
               {
                 key: 'results',
@@ -511,7 +640,7 @@ export default function BottomPanel({
                     <ResultsPanel
                       rows={table?.rows || []}
                       columns={table?.columns}
-                      emptyText="表格数据实时显示在这里：「导入表格」的整表 +「表格编辑」写入的行列（没有导入表格时表格编辑会自动建表新行）"
+                      emptyText="表格数据实时显示在这里：「导入表格」的整表；循环遍历表格行时「表格编辑」直接写当前行，其余场景自动建表新行"
                     />
                   </div>
                 ),

@@ -103,6 +103,9 @@ function validateNode(node) {
   if (node.type === 'webpage') {
     const url = (node.data?.url || '').trim()
     if (!url) return `${label}：未填写网址`
+    // 含 {{变量}} 的 URL（如 https://x.com/{{表格项.URL}}）运行时才插值，静态校验放行，
+    // 最终形态在运行时校验（见执行处的 http 前缀兜底）
+    if (/\{\{[^{}]+\}\}/.test(url)) return null
     if (!/^https?:\/\//i.test(url)) return `${label}：网址必须以 http:// 或 https:// 开头`
     return null
   }
@@ -212,17 +215,28 @@ async function runUserJs(ctx, code, value, vars, label) {
       return v // 出现克隆不了的值类型（正常不会）：降级为引用，功能不受影响
     }
   }
-  const sandbox = {
-    value: copy(value),
-    vars: copy(vars),
-    // vm 新 realm 自带全部 ECMAScript 内建（Promise/JSON/Math…），缺的是 Node 宿主全局：
-    // 定时器（await sleep 类代码）与 fetch 补进来，console 转投运行日志
-    setTimeout, clearTimeout, setInterval, clearInterval, fetch,
-    console: { log: (...args) => ctx.log('info', `[${label}] ${args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')}`) },
+  // 上下文按「一个执行流」复用（挂在 ctx 的自有属性上；断点序列化只挑字段不会带上它）。
+  // 此前每次调用 vm.runInNewContext 新建 realm（含克隆的 value/vars 副本），
+  // 嵌套数据循环数千次调用时旧 realm 被超时/停止反应链滞留无法回收，主进程堆
+  // 以 ~120KB/次线性增长直至 V8 OOM → node::OnFatalError → abort，整个应用闪退。
+  // 复用后每次调用只覆盖 value/vars/console 三个全局属性，旧副本即可回收。
+  // 语义变化：同一执行流内不同模块的用户代码经 globalThis 遗留的全局变量互相可见
+  //（正常代码均以 return 传递数据，不受影响）。
+  // 并发 worker 用 Object.create(ctx) 原型继承——必须判「自有属性」而非真值：否则
+  // 所有 worker 共享父 ctx 的同一个 realm，用户代码 await 恢复后 value/vars 可能已被
+  // 别的 worker 覆盖（并发打标读写串流）。worker 各建各的，同流内顺序复用不变
+  if (!Object.prototype.hasOwnProperty.call(ctx, 'userVm')) {
+    ctx.userVm = vm.createContext({
+      setTimeout, clearTimeout, setInterval, clearInterval, fetch,
+      console: { log: () => {} },
+    })
   }
+  ctx.userVm.value = copy(value)
+  ctx.userVm.vars = copy(vars)
+  ctx.userVm.console = { log: (...args) => ctx.log('info', `[${label}] ${args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')}`) }
   let pending
   try {
-    pending = vm.runInNewContext(`(async () => {\n${code}\n})()`, sandbox, { timeout: 5000 })
+    pending = vm.runInContext(`(async () => {\n${code}\n})()`, ctx.userVm, { timeout: 5000 })
   } catch (err) {
     throw new Error(`「${label}」代码执行出错：${err.message}`)
   }
@@ -231,6 +245,13 @@ async function runUserJs(ctx, code, value, vars, label) {
   } catch (err) {
     throw new Error(`「${label}」${err.message}`)
   }
+}
+
+/** 循环聚合日志里「当前循环项」的预览：对象/数组 JSON 化，超长截断。 */
+function fmtItemPreview(v) {
+  if (v === null || v === undefined) return ''
+  const s = typeof v === 'object' ? JSON.stringify(v) : String(v)
+  return s.length > 80 ? `${s.slice(0, 80)}…` : s
 }
 
 /** 插值成字符串时对象的呈现方式（String(obj) 会是 [object Object]，没意义）。 */
@@ -287,6 +308,80 @@ function compare(l, op, r) {
 }
 
 /* -------- 画布结构预处理 -------- */
+
+/**
+ * 找出连线形成的环（Tarjan 强连通分量，size≥2）：控制台「循环框」的聚合单位。
+ * 用户流程里「点击翻页 → 接口拦截 → 数据循环 → 提取 → 判断 → 回到翻页」这类大回路
+ * 是一个环——环内所有模块的日志都聚合到同一个循环框里，而不是只聚合数据循环节点。
+ * @returns {Map<string, string>} 节点 id → 环 id（不在任何环里的节点无条目）。环 id
+ *   用环内节点排序后的第一个 id（确定性：同一张图两次运行得到相同的框 key）
+ */
+function buildCycleMap(graph) {
+  const nodes = graph.nodes || []
+  const edges = (graph.edges || []).filter((e) => e.source !== e.target)
+  const ids = nodes.map((n) => n.id)
+  const index = new Map(ids.map((id, i) => [id, i]))
+  const adj = ids.map(() => [])
+  for (const e of edges) {
+    const s = index.get(e.source)
+    const t = index.get(e.target)
+    if (s !== undefined && t !== undefined) adj[s].push(t)
+  }
+  // Tarjan 迭代实现（节点数千级以内，递归也安全，但迭代免栈深顾虑）
+  const low = new Array(ids.length).fill(0)
+  const num = new Array(ids.length).fill(0)
+  const onStack = new Array(ids.length).fill(false)
+  const stack = []
+  const sccs = []
+  let counter = 0
+  for (let root = 0; root < ids.length; root++) {
+    if (num[root]) continue
+    const work = [[root, 0]]
+    while (work.length) {
+      const frame = work[work.length - 1]
+      const v = frame[0]
+      if (frame[1] === 0) {
+        counter++
+        num[v] = low[v] = counter
+        stack.push(v)
+        onStack[v] = true
+      }
+      let advanced = false
+      while (frame[1] < adj[v].length) {
+        const w = adj[v][frame[1]]
+        frame[1]++
+        if (!num[w]) {
+          work.push([w, 0])
+          advanced = true
+          break
+        }
+        if (onStack[w] && num[w] < low[v]) low[v] = num[w]
+      }
+      if (advanced) continue
+      if (low[v] === num[v]) {
+        const comp = []
+        for (;;) {
+          const w = stack.pop()
+          onStack[w] = false
+          comp.push(w)
+          if (w === v) break
+        }
+        if (comp.length >= 2) sccs.push(comp)
+      }
+      work.pop()
+      if (work.length) {
+        const parent = work[work.length - 1][0]
+        if (low[v] < low[parent]) low[parent] = low[v]
+      }
+    }
+  }
+  const cycleOf = new Map()
+  for (const comp of sccs) {
+    const key = 'cyc:' + comp.map((i) => ids[i]).sort()[0]
+    for (const i of comp) cycleOf.set(ids[i], key)
+  }
+  return cycleOf
+}
 
 /**
  * 建邻接表与起点集合：出边按目标节点 y 排序（多分支时确定性），入度 0 为起点。
@@ -356,6 +451,7 @@ export function openLoginWindow(url) {
 }
 
 let current = null
+let reusableWin = null // showWindow 运行结束后留下的执行窗口：下次运行直接复用
 
 /** 是否有任务在执行。 */
 export function isRunning() {
@@ -368,6 +464,8 @@ export function stopRun() {
   dlog('crawler', `用户停止任务：run=${current.runId} project=${current.projectId}`)
   current.stopped = true
   current.signalStop?.() // 唤醒所有挂起的节点执行（销毁窗口后 executeJavaScript 可能永不 settle）
+  // 停止即销毁执行窗口（用户主动叫停，保留窗口无意义）；顺手清掉复用指针防野引用
+  reusableWin = null
   try {
     if (current.win && !current.win.isDestroyed()) current.win.destroy()
   } catch {
@@ -445,13 +543,18 @@ async function pollPage(ctx, makeScript, timeoutMs, timeoutError, slowLog = null
   let clean = 0 // 正常执行（无论是否命中）的轮数
   let nextSlow = 5000
   for (;;) {
-    if (ctx.stopped) throw new Error('任务已停止')
+    // 终止信号：停止或并发 worker 被动取消（其他进程失败时的 failWatch 唤醒）。
+    // 此前只查 ctx.stopped：worker 被取消时 stopPromise 已解析但 stopped=false，
+    // withTimeout 每轮立即抛错被当「页面跳转」吞掉，且睡眠 race 被已解析的
+    // stopPromise 瞬时跳过 → 零间隔死循环，每轮真实调一次 executeJavaScript，
+    // 每秒上万次 IPC 洪水把事件循环饿死——应用卡死闪退（日志特征：12 万+轮页面检查）
+    if (ctx.stopped || ctx.cancelled) throw new Error('任务已停止')
     let result = null
     try {
       result = await withTimeout(ctx, ctx.win.webContents.executeJavaScript(makeScript(), true), 3000, '页面检查')
       clean++
     } catch (err) {
-      if (ctx.stopped) throw new Error('任务已停止')
+      if (ctx.stopped || ctx.cancelled) throw new Error('任务已停止')
       errs++
       /* 页面正在跳转/上下文刚被销毁：当成本轮未命中，稍后在新页面重试 */
     }
@@ -484,7 +587,9 @@ async function waitPageStable(ctx, budgetMs = 5000) {
   const deadline = Date.now() + budgetMs
   let last = null
   while (Date.now() < deadline) {
-    if (ctx.stopped) return
+    // 同 pollPage：取消（并发 worker 被动唤醒）也是终止信号，避免已解析的 stopPromise
+    // 跳过睡眠 race 造成零间隔刷轮
+    if (ctx.stopped || ctx.cancelled) return
     let sig = null
     try {
       sig = await withTimeout(ctx, ctx.win.webContents.executeJavaScript(stableScript(), true), 2000, '页面稳定检查')
@@ -599,6 +704,7 @@ function serializeLoopStates(loopStates) {
       totalItems: st.totalItems,
       gis: st.gis,
       outer: st.outer,
+      tableBacked: st.tableBacked || false,
     }
   }
   return out
@@ -631,6 +737,11 @@ function buildCheckpoint(ctx) {
       loopStates: serializeLoopStates(ctx.loopStates),
       vars: ctx.vars,
       currentRow: ctx.currentRow,
+      // 导入表格行循环的进度追踪（表格编辑写当前行所需）
+      tableVarName: ctx.tableVarName || null,
+      currentTableRowIndex: ctx.currentTableRowIndex ?? null,
+      // 数据处理「结果另存为新变量」的声明记录：断点恢复后循环内重复执行不再误判为冲突
+      declaredOutputs: ctx.declaredOutputs || null,
       loop: ctx.loop,
       forceSeqLoops: ctx.forceSeqLoops ? [...ctx.forceSeqLoops] : [],
       completedLoops: ctx.completedLoops ? [...ctx.completedLoops] : [],
@@ -762,6 +873,12 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
     interceptWaiters: new Map(),
     table: null,
     currentRow: null,
+    // 导入表格的「行循环」追踪：tableVarName/tableRowsRef 由导入表格模块写入；
+    // currentTableRowIndex 是当前循环项对应的表格行下标——循环内「表格编辑」据此
+    // 把列写进原表格的当前行，而不是追加新行（没有导入表格时仍走新建行逻辑）
+    tableVarName: null,
+    tableRowsRef: null,
+    currentTableRowIndex: null,
     loop: null,
     loopStates: new Map(),
     walkGen: 0,
@@ -775,6 +892,7 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
     resumeWorkerIndexes: [],
     parentLoopState: null,
     activeLoopId: null, // 最内层活跃循环节点 id（嵌套循环换代同步用）
+    cycleOf: buildCycleMap(graph), // 节点 id → 连线环 id（控制台循环框的聚合单位，见 buildCycleMap）
     workerWins: [],
     stopPromise: null,
     signalStop: null,
@@ -784,8 +902,9 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
   })
   current = ctx
 
-  const log = (level, message, node) => {
-    broadcast('crawler:log', {
+  const log = (level, message, node, srcCtx) => {
+    const sc = srcCtx || ctx
+    const base = {
       projectId, runId,
       seq: seqCounter++,
       ts: Date.now(),
@@ -794,8 +913,76 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
       nodeType: node?.type,
       nodeLabel: node?.data?.label,
       message,
+    }
+    // 聚合单位 = 连线环（见 buildCycleMap）：模块间连线形成的回路（如 翻页点击 → 接口
+    // 拦截 → 数据循环 → 提取 → 判断 → 回到翻页点击）里的所有日志都聚合到同一个循环框，
+    // 覆盖更新不往下叠，明细留在条目里点击弹窗查看。环外模块照常逐条成行。
+    // warn/error 重要事件仍额外发一条独立行——错误徽标与失败原因不被折叠进明细里。
+    const cycKey = node?.id ? sc.cycleOf?.get(node.id) : null
+    if (cycKey) {
+      // 框的进度跟随环内最内层活跃数据循环；环里非循环段执行时（如点翻页、等接口）
+      // 不带 label/iteration——前端覆盖合并不传的字段，框保持上一次的显示
+      const activeLoopNode = sc.activeLoopId ? sc.byId?.get(sc.activeLoopId) : null
+      broadcast('crawler:log', {
+        ...base,
+        aggKey: sc.isWorker ? `${cycKey}:w${sc.workerIndex}` : cycKey,
+        agg: {
+          ...(activeLoopNode ? { label: activeLoopNode.data?.label } : {}),
+          ...(sc.loop ? { iteration: { ...sc.loop } } : {}),
+          ...(sc.activeLoopId ? { item: fmtItemPreview(sc.vars?.['当前项']) } : {}),
+          done: false,
+        },
+      })
+      if (level === 'warn' || level === 'error') broadcast('crawler:log', { ...base, seq: seqCounter++ })
+      return
+    }
+    broadcast('crawler:log', base)
+  }
+  // 循环结束（耗尽/跳过）：把聚合行标记为完成（前端停转圈、显示完成态）。
+  // 仅作用于「不在连线环里」的数据循环——环内的循环耗尽只是本轮结束，外环还会
+  // 继续转（如翻页后重新拦截再循环），环框的收口由运行结束时前端统一处理
+  const endLoopAgg = (sc, loopNodeId) => {
+    if (sc.cycleOf?.get(loopNodeId)) return
+    const loopNode = sc.byId?.get(loopNodeId)
+    broadcast('crawler:log', {
+      projectId, runId,
+      seq: seqCounter++,
+      ts: Date.now(),
+      level: 'success',
+      nodeId: loopNodeId,
+      nodeType: 'loop',
+      nodeLabel: loopNode?.data?.label,
+      message: '循环完成',
+      aggKey: sc.isWorker ? `${loopNodeId}:w${sc.workerIndex}` : loopNodeId,
+      agg: { label: loopNode?.data?.label || '数据循环', done: true },
     })
   }
+  ctx.endLoopAgg = endLoopAgg
+  // 循环框心跳：循环节点每消费一项就主动广播自己的聚合状态（bare 事件，前端不追加
+  // 明细、只刷新框）。在连线环里的循环心跳刷新「环框」（进度/当前项跟着本循环走）；
+  // 环外的循环刷自己的节点框——两种情况都保证从第一项起就必有框并随迭代跳动
+  const loopHeartbeat = (sc, node) => {
+    const key = sc.cycleOf?.get(node.id) || node.id
+    broadcast('crawler:log', {
+      projectId, runId,
+      seq: seqCounter++,
+      ts: Date.now(),
+      level: 'info',
+      nodeId: node.id,
+      nodeType: 'loop',
+      nodeLabel: node.data?.label,
+      message: '',
+      bare: true,
+      aggKey: sc.isWorker ? `${key}:w${sc.workerIndex}` : key,
+      agg: {
+        label: node.data?.label || '数据循环',
+        iteration: { ...sc.loop },
+        item: fmtItemPreview(sc.vars?.['当前项']),
+        done: false,
+      },
+    })
+  }
+  ctx.loopHeartbeat = loopHeartbeat
   const nodeState = (node, status, extra = {}) => {
     broadcast('crawler:node', {
       projectId, runId,
@@ -825,6 +1012,14 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
     ctx.vars = cp.execution?.vars || {}
     ctx.table = cp.data?.table || null
     ctx.currentRow = cp.execution?.currentRow || null
+    // 恢复行循环追踪：tableRowsRef 指向恢复后的 vars 里的同源数组（引用判据，
+    // 重解析循环时判定 items 是否就是导入表格的行）
+    ctx.tableVarName = cp.execution?.tableVarName || null
+    ctx.currentTableRowIndex = cp.execution?.currentTableRowIndex ?? null
+    if (ctx.tableVarName && Array.isArray(ctx.vars[ctx.tableVarName])) {
+      ctx.tableRowsRef = ctx.vars[ctx.tableVarName]
+    }
+    ctx.declaredOutputs = cp.execution?.declaredOutputs || null
     ctx.loop = cp.execution?.loop || null
     ctx.loopStates = deserializeLoopStates(cp.execution?.loopStates)
     ctx.walkGen = cp.execution?.walkGen || 0
@@ -845,19 +1040,27 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
 
   ctx.pushVars()
 
-  const win = new BrowserWindow({
-    show: false,
-    width: 1280,
-    height: 800,
-    webPreferences: {
-      partition: CRAWLER_PARTITION,
-      backgroundThrottling: false,
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  })
+  // 复用上次 showWindow 结束后留下的执行窗口（用户还没手动关）：直接接着用，避免
+  // 销毁重建的闪烁。上次的 closed 钩子随旧 ctx 失效（current 已换人），重新挂
+  let win = null
+  if (reusableWin && !reusableWin.isDestroyed()) {
+    win = reusableWin
+  } else {
+    win = new BrowserWindow({
+      show: false,
+      width: 1280,
+      height: 800,
+      webPreferences: {
+        partition: CRAWLER_PARTITION,
+        backgroundThrottling: false,
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    })
+    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  }
+  reusableWin = null
   ctx.win = win
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.on('closed', () => {
     if (current === ctx && !ctx.finished) {
       current.stopped = true
@@ -948,7 +1151,10 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
         try {
           if (win.webContents.debugger.isAttached()) win.webContents.debugger.detach()
         } catch {}
-        win.destroy()
+        // showWindow 开着时流程结束不关窗口：留着让用户核对页面/结果，关掉即销毁
+        //（用户手动关窗在 finished 后不再触发停止）。下次运行会复用还开着的窗口
+        if (!ctx.showWindow) win.destroy()
+        else reusableWin = win
       }
     } catch {}
 
@@ -1141,9 +1347,12 @@ function pickNext(ctx, node, result) {
     if (st.index < st.items.length) return [ctx.byId.get(backEdge.target)]
     ctx.loop = st.outer.loop
     ctx.currentRow = st.outer.currentRow
+    ctx.currentTableRowIndex = st.outer.currentTableRowIndex ?? null
     ctx.loopStates.delete(backEdge.target)
     ctx.activeLoopId = st.outer.parentLoopId || null
     ctx.completedLoops.add(backEdge.target)
+    // 本循环完成：聚合日志行标记完成态（前端停转圈）
+    ctx.endLoopAgg?.(ctx, backEdge.target)
     rest.splice(rest.indexOf(backEdge), 1)
     // 耗尽循环的「结束」出口并入待判定（级联：done→耗尽循环→继续展开）
     rest.push(...(ctx.outEdges.get(backEdge.target) || []).filter((e) => e.sourceHandle === 'done'))
@@ -1237,6 +1446,10 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
       show: false,
       width: 1280,
       height: 800,
+      title: `爬虫执行窗口 · 进程 ${i + 1}/${n}`,
+      // 多窗口错开摆位，避免完全叠在一起看不出「开了多个」
+      x: 60 + (i % 6) * 40,
+      y: 60 + (i % 6) * 40,
       webPreferences: {
         partition: CRAWLER_PARTITION,
         backgroundThrottling: false,
@@ -1274,6 +1487,7 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
       // 断点续跑不恢复 worker 表：已写行已在主断点的表里（baseTable），重跑空表起步新行追加即可
       table: null,
       currentRow: null,
+      currentTableRowIndex: null,
       loop: null,
       loopStates: new Map(),
       visited: new Set(),
@@ -1288,13 +1502,20 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
         wc.cancelled = true
         wake()
       },
-      showWindow: false,
+      // worker 窗口跟随主开关显示：勾了「打开窗口」时每个进程一个窗口，各自在
+      // 自己的窗口里跑（打开网页 = 同窗口路由跳转）；此前硬编码 false，勾了开关
+      // 也只有主 ctx 的第一个窗口显示，worker 全程隐藏
+      showWindow: !!ctx.showWindow,
       forceSeqLoops: new Set([node.id]),
       workerIndex: i,
       activeLoopId: node.id, // worker 的循环即最内层活跃循环
     })
-    wc.log = (level, message, nd) => ctx.log(level, `[进程${i + 1}] ${message}`, nd)
-    wc.pushVars = () => {}
+    // worker 日志走父 ctx.log（裸 log 闭包只存在于 run 函数作用域，模块级函数里引用
+    // 会 ReferenceError: log is not defined——多进程跑数据处理时 console.log 转发即触发）
+    wc.log = (level, message, nd) => ctx.log(level, `[进程${i + 1}] ${message}`, nd, wc)
+    // worker 变量实时推前端（推自己的快照，不碰主 ctx.vars）：控制台「变量」Tab 在并发
+    // 期间照常随提取/接口拦截更新。循环结束后统一合并回主流程（见 finally 里的 mergeVars）
+    wc.pushVars = () => broadcast('crawler:vars', { projectId: ctx.projectId, runId: ctx.runId, vars: { ...wc.vars } })
     wc.nodeState = (nd, status, extra = {}) =>
       broadcast('crawler:node', {
         projectId: ctx.projectId,
@@ -1403,13 +1624,22 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
   } finally {
     dlog(runTag(ctx), `并发循环收尾：失败=${ctx.failed || '无'} 已停止=${!!ctx.stopped}`)
     mergeTables()
+    // worker 变量合并回主流程再推一次：并发期间 worker 各自持有克隆的变量副本，循环
+    // 里新写入的变量（如提取数据产出的 tag）只存在于 worker 上——不合并的话循环
+    // 结束后主流程后续模块引用不到，控制台的最终变量快照里也看不到
+    for (const wc of workerCtxs) {
+      if (wc.vars) ctx.vars = { ...ctx.vars, ...wc.vars }
+    }
+    ctx.pushVars()
     for (const wc of workerCtxs) {
       wc.finished = true
       try {
         if (wc.win.webContents.debugger.isAttached()) wc.win.webContents.debugger.detach()
       } catch {}
+      // showWindow 开着时 worker 窗口同样保留（与主窗口一致，供核对各进程最后的页面），
+      // 用户手动关即销毁（finished 后 closed 钩子不再触发 failWatch）；没开开关照常收掉
       try {
-        if (!wc.win.isDestroyed()) wc.win.destroy()
+        if (!wc.win.isDestroyed() && !ctx.showWindow) wc.win.destroy()
       } catch {}
     }
   }
@@ -1495,6 +1725,10 @@ async function execNode(ctx, node) {
 
   if (node.type === 'webpage') {
     const url = String(interpolate(data.url ?? '', ctx.vars))
+    // 变量拼接的 URL 插值后兜底校验：变量为空/不存在时给出明确报错，而不是让
+    // loadURL 抛难懂的底层错误
+    if (!url) throw new Error(`网址为空：请检查 URL 里拼接的变量是否已赋值（当前配置：${data.url}）`)
+    if (!/^https?:\/\//i.test(url)) throw new Error(`网址必须以 http:// 或 https:// 开头，实际得到：${url.slice(0, 120)}`)
     if (ctx.showWindow && !ctx.win.isVisible()) {
       ctx.win.show()
       ctx.win.moveTop()
@@ -1509,9 +1743,12 @@ async function execNode(ctx, node) {
   if (node.type === 'wait') {
     const s = sel(data.selector)
     const timeoutMs = s?.timeoutMs || 10000
+    // 等待模式：appear（默认）等元素出现；gone 等元素消失（loading 遮罩/保存中的
+    // toast 关闭后再继续，避免后续提取/点击打到还在转圈的页面）
+    const waitMode = data.waitMode === 'gone' ? 'gone' : 'appear'
     const labels = { id: 'id', class: 'class', classRegex: 'class 正则', css: 'CSS 选择器' }
     const curLabel = labels[s?.mode] || s?.mode
-    ctx.log('info', `等待元素出现：${selectorDesc(s)}（最多等 ${Math.round(timeoutMs / 1000)}s）`, node)
+    ctx.log('info', `等待元素${waitMode === 'gone' ? '消失' : '出现'}：${selectorDesc(s)}（最多等 ${Math.round(timeoutMs / 1000)}s）`, node)
     const runDiag = async () => {
       try {
         const diag = await withTimeout(
@@ -1533,12 +1770,12 @@ async function execNode(ctx, node) {
     try {
       await pollPage(
         ctx,
-        () => waitScript(s),
+        () => waitScript(s, waitMode),
         timeoutMs,
-        `等待元素超时(${Math.round(timeoutMs / 1000)}s)：${selectorDesc(s)} 未出现（已穿透 shadow DOM 与 iframe 查找）`,
+        `等待元素超时(${Math.round(timeoutMs / 1000)}s)：${selectorDesc(s)} 未${waitMode === 'gone' ? '消失' : '出现'}（已穿透 shadow DOM 与 iframe 查找）`,
         (sec) => {
-          ctx.log('info', `仍在等待元素：${selectorDesc(s)}（已等 ${sec}s）`, node)
-          if (sec >= 5 && !hinted) {
+          ctx.log('info', `仍在等待元素${waitMode === 'gone' ? '消失' : ''}：${selectorDesc(s)}（已等 ${sec}s）`, node)
+          if (sec >= 5 && !hinted && waitMode === 'appear') {
             hinted = true
             runDiag().then(({ alts }) => {
               if (alts.length && !ctx.stopped) {
@@ -1553,6 +1790,19 @@ async function execNode(ctx, node) {
         },
       )
     } catch (err) {
+      // 等消失模式超时：提示是元素一直还在（选择器本身能命中，只是页面没关闭它），
+      // 诊断建议和出现模式相反
+      if (waitMode === 'gone') {
+        if (ctx.stopped) throw err
+        const { alts, none } = await runDiag()
+        let hint = ''
+        if (alts.length || (s?.mode && !none)) {
+          hint = `。诊断：该元素仍能被当前选择器命中——页面迟迟没有关闭/隐藏它，可延长超时或确认等待目标`
+        } else if (none) {
+          hint = `。诊断：四种模式都匹配不到该值——选择器可能配错了（元素从未出现过，等消失等于瞬间达成不该超时）`
+        }
+        throw new Error(err.message + hint)
+      }
       if (ctx.stopped || !s?.value || !String(err.message || '').startsWith('等待元素超时')) throw err
       const { alts, none } = await runDiag()
       let hint = ''
@@ -1564,7 +1814,7 @@ async function execNode(ctx, node) {
       throw new Error(err.message + hint)
     }
     checkStopped()
-    return { summary: `元素已出现：${s.value}` }
+    return { summary: `元素已${waitMode === 'gone' ? '消失' : '出现'}：${s.value}` }
   }
 
   if (node.type === 'click') {
@@ -1572,9 +1822,12 @@ async function execNode(ctx, node) {
     const timeoutMs = s?.timeoutMs || 5000
     const event = data.event || 'click'
     const target = data.target || 'first'
+    // 逐个触发时的间隔：页面动画/请求要时间走完的场景调大（默认 0.12s）。总预算按
+    //「元素数上限 × 间隔」放宽，否则间隔一大 withTimeout 会提前掐断还没点完的序列
+    const gapMs = Math.max(0, Number(data.gapMs ?? 120))
     const verb = CLICK_EVENTS[event] || '点击'
-    ctx.log('info', `正在${verb}元素：${selectorDesc(s)}${target === 'all' ? '（全部依次）' : ''}`, node)
-    const budget = timeoutMs + 5000 + (target === 'all' ? 30000 : 0)
+    ctx.log('info', `正在${verb}元素：${selectorDesc(s)}${target === 'all' ? `（全部依次，间隔 ${(gapMs / 1000).toFixed(gapMs % 1000 ? 2 : 0)}s）` : ''}`, node)
+    const budget = timeoutMs + 5000 + (target === 'all' ? 30000 + gapMs * 500 : 0)
     let navResolve
     const onNav = () => navResolve(null)
     const navRace = new Promise((resolve) => {
@@ -1586,7 +1839,7 @@ async function execNode(ctx, node) {
     try {
       const fired = await withTimeout(
         ctx,
-        Promise.race([wc.executeJavaScript(clickScript(s, event, target, timeoutMs), true), navRace]),
+        Promise.race([wc.executeJavaScript(clickScript(s, event, target, timeoutMs, gapMs), true), navRace]),
         budget,
         `触发事件（${verb}）`,
       )
@@ -1639,9 +1892,16 @@ async function execNode(ctx, node) {
     checkStopped()
     if (res.rows?.length) {
       ctx.rows.push(...res.rows)
-      // 首条命中的字段注入变量作用域，供后续 逻辑判断/表格编辑/网址 引用
-      Object.assign(ctx.vars, res.rows[0])
+      // 变量注入按字段全量命中：单命中 → 值本身；多命中 → 数组（页面挂多个标签/多条
+      // 目时 {{tag}} 拿到全部，而不是只有首个）；0 命中 → null（与旧行为一致）
+      const multi = []
+      for (const c of res.cols || []) {
+        ctx.vars[c.name] = c.hits.length > 1 ? c.hits : (c.hits[0] ?? null)
+        if (c.hits.length > 1) multi.push(c.name)
+      }
       ctx.pushVars()
+      const suffix = multi.length ? `；多命中字段为数组：${multi.map((n) => `{{${n}}}`).join('、')}` : ''
+      return { summary: `提取到 ${res.rows.length} 行（字段：${(res.fields || []).join('、')}）${suffix}` }
     }
     return { summary: `提取到 ${res.rows.length} 行（字段：${(res.fields || []).join('、')}）` }
   }
@@ -1707,11 +1967,14 @@ async function execNode(ctx, node) {
         throw new Error(`变量「${name}」不是数组也不是字符串（${typeof raw}），无法循环`)
       }
       // parentLoopId：进入本循环时最内层的活跃循环——嵌套场景换代沿父链同步外层代数
+      // tableBacked：items 就是导入表格的行（引用判据）——本循环按行下标与表格行对齐，
+      // 循环内「表格编辑」写当前行而非新建行
       st = {
         items,
         index: 0,
         gen: ctx.walkGen,
-        outer: { loop: ctx.loop, currentRow: ctx.currentRow, parentLoopId: ctx.activeLoopId || null },
+        tableBacked: !ctx.isWorker && Array.isArray(raw) && raw === ctx.tableRowsRef,
+        outer: { loop: ctx.loop, currentRow: ctx.currentRow, currentTableRowIndex: ctx.currentTableRowIndex, parentLoopId: ctx.activeLoopId || null },
       }
       ctx.loopStates.set(node.id, st)
       ctx.log('info', `数据循环「${name}」共 ${items.length} 项${splitNote}`, node)
@@ -1721,7 +1984,9 @@ async function execNode(ctx, node) {
       ctx.loopStates.delete(node.id)
       ctx.loop = st.outer.loop
       ctx.currentRow = st.outer.currentRow
+      ctx.currentTableRowIndex = st.outer.currentTableRowIndex ?? null
       ctx.activeLoopId = st.outer.parentLoopId || null
+      ctx.endLoopAgg?.(ctx, node.id)
       ctx.log('warn', `循环变量「${name}」为空，循环体已跳过`, node)
       return { summary: '变量为空，已跳过循环体', skipNext: true }
     }
@@ -1732,7 +1997,9 @@ async function execNode(ctx, node) {
       ctx.loopStates.delete(node.id)
       ctx.loop = st.outer.loop
       ctx.currentRow = st.outer.currentRow
+      ctx.currentTableRowIndex = st.outer.currentTableRowIndex ?? null
       ctx.activeLoopId = st.outer.parentLoopId || null
+      ctx.endLoopAgg?.(ctx, node.id)
       ctx.log('warn', `循环「${name}」已完成，再次进入时跳过循环体`, node)
       return { summary: '循环已完成，跳过循环体', skipNext: true }
     }
@@ -1746,6 +2013,9 @@ async function execNode(ctx, node) {
     const gi = st.gis ? st.gis[st.index] : st.index // 并发份额轮转分配，st.index 不再是全局位置
     st.index += 1
     ctx.currentRow = null // 新一项 = 表格编辑新起一行（在表格行循环内则恢复逻辑见 outer）
+    // 本循环直接遍历导入表格的行：表格编辑对齐到当前项的表格行；否则沿用外层行循环
+    // 的行下标（嵌套非表格循环不冲掉外层的行指向）
+    ctx.currentTableRowIndex = st.tableBacked ? gi : (st.outer.currentTableRowIndex ?? null)
     // 变量合并而非替换：外层变量继续可见；对象项的属性直接平铺成
     // 变量（与表格行一致），任何项都可经 {{当前项}}/{{当前序号}} 引用。
     // itemVar：嵌套循环时 {{当前项}} 就近覆盖（只剩最内层的），各循环配了
@@ -1760,6 +2030,7 @@ async function execNode(ctx, node) {
     }
     ctx.loop = { row: gi + 1, total: st.totalItems ?? st.items.length }
     ctx.activeLoopId = node.id // 本循环成为最内层活跃循环（嵌套时内层又会在其上覆盖）
+    ctx.loopHeartbeat?.(ctx, node) // 循环框心跳：确保本循环的框存在并随迭代刷新
     ctx.pushVars()
     // 断点：消费一项后立即保存（单进程存主断点；并发 worker 存自己的 worker 断点）
     if (ctx.isWorker) await saveWorkerCp(ctx, node.id)
@@ -1772,12 +2043,30 @@ async function execNode(ctx, node) {
     const name = String(data.varName ?? '').trim().replace(/^\{\{/, '').replace(/\}\}$/, '').trim()
     const old = lookupVar(ctx.vars, name)
     if (old === undefined) throw new Error(`变量「${name}」不存在，请检查前面的模块是否已写入`)
+    // 结果另存为新变量：填写后处理结果不覆盖原变量，写入这个新变量（留空走原覆盖逻辑）。
+    // 声明校验：新变量不能与任何已有变量同名——避免悄悄覆盖别的模块的产出。同一模块
+    // 在循环体里重复执行时只校验首次（自己上轮写入的变量不算冲突，断点恢复同样豁免）
+    const outName = String(data.outputVar ?? '').trim().replace(/^\{\{/, '').replace(/\}\}$/, '').trim()
+    if (outName) {
+      if ((ctx.declaredOutputs?.[node.id] || null) !== outName) {
+        if (lookupVar(ctx.vars, outName) !== undefined) {
+          throw new Error(`结果变量「${outName}」已存在，请换一个名字（不能覆盖已有变量）`)
+        }
+        if (!ctx.declaredOutputs) ctx.declaredOutputs = {}
+        ctx.declaredOutputs[node.id] = outName
+      }
+    }
     const result = await runUserJs(ctx, String(data.code ?? ''), old, ctx.vars, label)
     if (result === undefined) throw new Error(`「${label}」的代码没有 return 结果，变量保持原值`)
-    setVar(ctx.vars, name, result)
-    ctx.pushVars()
     // 摘要截断：大数组/大 JSON 不刷屏
     const shown = (result !== null && typeof result === 'object' ? JSON.stringify(result) : String(result ?? '')).slice(0, 60)
+    if (outName) {
+      ctx.vars = { ...ctx.vars, [outName]: result }
+      ctx.pushVars()
+      return { summary: `新变量 {{${outName}}} = ${shown}${shown.length >= 60 ? '…' : ''}` }
+    }
+    setVar(ctx.vars, name, result)
+    ctx.pushVars()
     return { summary: `{{${name}}} = ${shown}${shown.length >= 60 ? '…' : ''}` }
   }
 
@@ -1793,9 +2082,13 @@ async function execNode(ctx, node) {
     ctx.table = { columns: [...columns], rows }
     ctx.pushTable() // 读入即推：控制台「表格」Tab 先看到原始表，编辑列随后追加
     // 整表写入数组变量（每行一个对象），不隐式循环——要逐行走就把「数据循环」指到该变量
-    const varName = String(data.varName ?? '').trim() || '表格数据'
+    const varName = String(data.varName ?? '').trim().replace(/^\{\{/, '').replace(/\}\}$/, '').trim() || '表格数据'
     // 行对象拷贝一份：后续表格编辑改 ctx.table 的行不会污染循环数据源
     ctx.vars = { ...ctx.vars, [varName]: rows.map((r) => ({ ...r })) }
+    // 记录「表格行源」：后续「数据循环」遍历该变量时（引用判据），循环内「表格编辑」
+    // 把列写进当前项对应的原表格行，而不是追加新行
+    ctx.tableVarName = varName
+    ctx.tableRowsRef = ctx.vars[varName]
     ctx.pushVars()
     return { summary: `已导入 ${rows.length} 行 → {{${varName}}}` }
   }
@@ -1817,7 +2110,10 @@ async function execNode(ctx, node) {
     const raw = interpolate(data.value ?? '', ctx.vars)
     const value = raw !== null && typeof raw === 'object' ? JSON.stringify(raw) : (raw ?? '')
     // 就地建表、新起一行：直线流程里连续多个表格编辑写同一行；数据循环每换一项新起
-    // 一行（loop 节点消费项时清空 currentRow）
+    // 一行（loop 节点消费项时清空 currentRow）。例外：循环遍历的是导入表格的行时，
+    // currentTableRowIndex 指向当前项的原表格行——编辑直接落到该行（不新建行）
+    const tIdx = ctx.currentTableRowIndex
+    if (tIdx != null && ctx.table?.rows[tIdx]) ctx.currentRow = ctx.table.rows[tIdx]
     if (!ctx.currentRow) {
       if (!ctx.table) ctx.table = { columns: [], rows: [] }
       ctx.currentRow = {}
