@@ -7,10 +7,12 @@ import {
   createCrawler,
   deleteCrawler,
   getCrawler,
+  getCommonLib,
   listCrawlers,
   renameCrawler,
   saveCrawler,
   saveCrawlerAs,
+  saveCommonLib,
   validateGraph,
 } from '../crawler-store.js'
 import { isRunning, MODULE_TYPES, openLoginWindow, runCrawler, stopRun } from '../crawler-runner.js'
@@ -75,6 +77,24 @@ export function registerCrawlerIpc() {
     try {
       if (isRunning()) stopRun() // 删除时若在跑先停（单任务模型下无法精确匹配项目，直接停）
       return await deleteCrawler(id)
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  /* -------- 公共资源库（跨项目共享的元素/网址） -------- */
+
+  ipcMain.handle('crawler:getCommon', async () => {
+    try {
+      return { ok: true, data: await getCommonLib() }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  ipcMain.handle('crawler:saveCommon', async (_evt, data) => {
+    try {
+      return await saveCommonLib(data)
     } catch (err) {
       return { ok: false, error: err.message }
     }

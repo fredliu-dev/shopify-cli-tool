@@ -15,6 +15,7 @@ import {
   ApartmentOutlined,
   ArrowLeftOutlined,
   CaretRightOutlined,
+  DatabaseOutlined,
   LoginOutlined,
   DownloadOutlined,
   SaveOutlined,
@@ -24,6 +25,7 @@ import { ReactFlowProvider, addEdge, useEdgesState, useNodesState, useReactFlow 
 import ModulePanel from './ModulePanel.jsx'
 import FlowCanvas from './FlowCanvas.jsx'
 import ConfigDrawer from './ConfigDrawer.jsx'
+import CommonLibModal from './CommonLibModal.jsx'
 import BottomPanel from './BottomPanel.jsx'
 import { MODULES, collectVariableOptions, requiredMissing } from './constants.js'
 import { INK, MAT } from './theme.js'
@@ -69,6 +71,9 @@ function EditorInner({ projectId, onBack }) {
   const [showWindow, setShowWindow] = useState(() => localStorage.getItem('crawler:showWindow') === '1')
   // 断点续跑：上次失败/停止留下的未完成运行（null=没有可续跑的）
   const [pendingRun, setPendingRun] = useState(null)
+  // 公共资源库（跨项目共享的元素/网址）：进编辑器加载一次，弹窗保存后刷新，抽屉下拉消费
+  const [commonLib, setCommonLib] = useState({ elements: [], urls: [] })
+  const [commonOpen, setCommonOpen] = useState(false)
 
   const viewportRef = useRef(EMPTY_VIEWPORT)
   const loadedViewportRef = useRef(null) // 初始 viewport（RF defaultViewport 只在挂载时生效）
@@ -83,6 +88,13 @@ function EditorInner({ projectId, onBack }) {
   useEffect(() => {
     let alive = true
     ; (async () => {
+      // 公共资源库与项目并行加载（失败静默降级为空库，不挡画布）
+      window.api.crawler
+        .getCommon()
+        .then((res) => {
+          if (alive && res.ok) setCommonLib({ elements: res.data.elements || [], urls: res.data.urls || [] })
+        })
+        .catch(() => {})
       const res = await window.api.crawler.get(projectId)
       if (!alive) return
       if (!res.ok) {
@@ -535,6 +547,11 @@ function EditorInner({ projectId, onBack }) {
           <Button icon={<DownloadOutlined />} onClick={doExport}>
             导出画布
           </Button>
+          <Tooltip title="公共资源：跨项目共享的元素与网址，保存后各模块配置里可直接选用">
+            <Button icon={<DatabaseOutlined />} onClick={() => setCommonOpen(true)}>
+              公共资源
+            </Button>
+          </Tooltip>
           <Tooltip title="按执行方向分层重排节点（起点最左、后继逐层向右），回环连线自动从下方绕行，流程一目了然">
             <Button icon={<ApartmentOutlined />} onClick={arrange}>
               整理布局
@@ -614,6 +631,7 @@ function EditorInner({ projectId, onBack }) {
           onClose={() => setSelectedId(null)}
           onDataPatch={onDataPatch}
           variableOptions={variableOptions}
+          commonLib={commonLib}
         />
       </div>
 
@@ -636,6 +654,13 @@ function EditorInner({ projectId, onBack }) {
           setPanelHeight(h)
           setPanelMode('normal') // 从最大化拖拽：切回常规档并承接当前像素高度
         }}
+      />
+
+      <CommonLibModal
+        open={commonOpen}
+        lib={commonLib}
+        onClose={() => setCommonOpen(false)}
+        onSaved={(next) => setCommonLib(next || { elements: [], urls: [] })}
       />
 
       <Modal

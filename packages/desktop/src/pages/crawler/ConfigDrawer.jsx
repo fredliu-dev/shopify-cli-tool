@@ -1,11 +1,26 @@
 // 右侧配置抽屉：按模块类型渲染表单，onChange 实时写回 node.data（受控，无确定按钮）。
 // extract 的多字段编辑：字段卡片列表，可增删；每字段 = 名称 + 选择器 + 提取方式（text/href/attr）。
 import React from 'react'
-import { App, Button, Drawer, Form, Input, InputNumber, Popconfirm, Radio, Select, Space, Tag, Typography } from 'antd'
+import {
+  App,
+  AutoComplete,
+  Button,
+  Checkbox,
+  Drawer,
+  Form,
+  Input,
+  InputNumber,
+  Popconfirm,
+  Radio,
+  Select,
+  Space,
+  Tag,
+  Typography,
+} from 'antd'
 import { DeleteOutlined, FolderOpenOutlined, PlusOutlined } from '@ant-design/icons'
 import SelectorInput from './SelectorInput.jsx'
 import VariableInput from './VariableInput.jsx'
-import { CLICK_EVENTS, CLICK_TARGETS, CONDITION_OPS, MODULES, isUnaryOp } from './constants.js'
+import { CLICK_EVENTS, CLICK_TARGETS, CONDITION_OPS, KEY_EVENTS, KEY_MODIFIERS, MODULES, isUnaryOp } from './constants.js'
 import { INK, MAT, iconChip } from './theme.js'
 
 /** 抽屉内嵌卡片（字段卡 / 文件摘要卡）：统一材质，radius 12。 */
@@ -25,7 +40,7 @@ const EXTRACT_TYPES = [
   { value: 'attr', label: '属性' },
 ]
 
-function FieldCard({ field, index, onChange, onRemove }) {
+function FieldCard({ field, index, onChange, onRemove, commonElements = [] }) {
   const patch = (fields) => onChange(index, { ...field, ...fields })
   const patchSelector = (s) => patch({ selector: s })
   return (
@@ -45,7 +60,7 @@ function FieldCard({ field, index, onChange, onRemove }) {
           <Button size="small" type="text" danger icon={<DeleteOutlined />} />
         </Popconfirm>
       </div>
-      <SelectorInput value={field.selector} onChange={patchSelector} timeoutLabel="查找超时" />
+      <SelectorInput value={field.selector} onChange={patchSelector} timeoutLabel="查找超时" commonElements={commonElements} />
       <div style={{ marginTop: 10 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
           提取内容
@@ -73,13 +88,16 @@ function FieldCard({ field, index, onChange, onRemove }) {
   )
 }
 
-export default function ConfigDrawer({ node, open, onClose, onDataPatch, variableOptions = [] }) {
+export default function ConfigDrawer({ node, open, onClose, onDataPatch, variableOptions = [], commonLib = {} }) {
   const { message } = App.useApp()
   if (!node) return null
   const meta = MODULES[node.type]
   const Icon = meta.icon
   const data = node.data || {}
   const patch = (fields) => onDataPatch(node.id, fields)
+  // 公共资源库：元素给所有带选择器的模块下拉选用，网址给「打开网页」选用
+  const commonElements = commonLib.elements || []
+  const commonUrls = commonLib.urls || []
 
   // 选表格文件：主进程弹框并解析（格式错误当场报），节点只存路径+行列摘要，运行时重读最新内容
   const pickTableFile = async () => {
@@ -147,6 +165,25 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
 
         {node.type === 'webpage' && (
           <>
+            {commonUrls.length > 0 && (
+              <Form.Item label="从公共网址选择" style={{ marginBottom: 12 }}>
+                <Select
+                  size="small"
+                  placeholder="选公共网址填入（也可直接手填/拼接变量）"
+                  value={null}
+                  options={commonUrls.map((u) => ({
+                    value: u.id,
+                    label: `${u.name}（${u.value.length > 40 ? u.value.slice(0, 40) + '…' : u.value}）`,
+                  }))}
+                  onChange={(id) => {
+                    const hit = commonUrls.find((u) => u.id === id)
+                    if (hit) patch({ url: hit.value })
+                  }}
+                  allowClear
+                  onClear={() => patch({ url: '' })}
+                />
+              </Form.Item>
+            )}
             <Form.Item label="网址 URL" required style={{ marginBottom: 14 }}>
               <VariableInput
                 value={data.url}
@@ -164,7 +201,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
 
         {node.type === 'wait' && (
           <>
-            <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} />
+            <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} commonElements={commonElements} />
             <Form.Item label="等待模式" style={{ marginTop: 14, marginBottom: 12 }}>
               <Radio.Group
                 size="small"
@@ -186,7 +223,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
 
         {node.type === 'click' && (
           <>
-            <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} />
+            <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} commonElements={commonElements} />
             <Form.Item label="触发事件" style={{ marginTop: 14, marginBottom: 12 }}>
               <Radio.Group
                 size="small"
@@ -229,7 +266,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
 
         {node.type === 'input' && (
           <>
-            <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} />
+            <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} commonElements={commonElements} />
             <Form.Item label="输入内容" required style={{ marginTop: 14, marginBottom: 0 }}>
               <Input.TextArea
                 value={data.text}
@@ -239,6 +276,46 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
                 maxLength={2000}
               />
             </Form.Item>
+          </>
+        )}
+
+        {node.type === 'keyboard' && (
+          <>
+            <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} commonElements={commonElements} />
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', margin: '8px 0 14px', lineHeight: 1.6 }}>
+              选择器留空 = 按键发给当前聚焦的元素（如上一步输入框）；填写 = 先自动聚焦该元素再按键
+            </Text>
+            <Form.Item label="按键" required style={{ marginBottom: 12 }}>
+              <AutoComplete
+                value={data.key || 'Enter'}
+                onChange={(v) => patch({ key: v })}
+                options={KEY_EVENTS}
+                style={{ width: 220 }}
+                placeholder="选择或输入键名（如 F5）"
+                filterOption={(input, option) => String(option.value).toLowerCase().includes(String(input).toLowerCase())}
+              />
+            </Form.Item>
+            <Form.Item label="修饰键（可与按键组合）" style={{ marginBottom: 12 }}>
+              <Checkbox.Group
+                options={KEY_MODIFIERS}
+                value={Array.isArray(data.modifiers) ? data.modifiers : []}
+                onChange={(vals) => patch({ modifiers: vals })}
+              />
+            </Form.Item>
+            <Form.Item label="重复次数" style={{ marginBottom: 14 }} extra="连按多次，如方向键连按 3 次移动三项">
+              <InputNumber
+                min={1}
+                max={20}
+                value={Number(data.repeat) || 1}
+                onChange={(v) => patch({ repeat: v || 1 })}
+                style={{ width: 140 }}
+                addonAfter="次"
+              />
+            </Form.Item>
+            <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
+              发送的是浏览器原生键盘事件（区别于「元素事件」里的合成回车）：回车能触发表单提交/搜索、
+              Backspace 能删除字符、Tab 能移动焦点，与真实击键行为一致。
+            </Text>
           </>
         )}
 
@@ -259,7 +336,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
               提取字段
             </Text>
             {(data.fields || []).map((f, i) => (
-              <FieldCard key={i} field={f} index={i} onChange={patchField} onRemove={removeField} />
+              <FieldCard key={i} field={f} index={i} onChange={patchField} onRemove={removeField} commonElements={commonElements} />
             ))}
             <Button type="dashed" block icon={<PlusOutlined />} onClick={addField}>
               添加字段
@@ -267,6 +344,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 12, lineHeight: 1.7 }}>
               每个字段独立匹配所有命中元素：同一字段命中 N 个元素即产出 N 行；行数按各字段命中数的最大值对齐，缺失留空。
               写入变量时：命中 1 个存值本身，命中多个存数组（如 {'{{tag}}'} 为 ['a','b']，可在数据处理里 join / 循环遍历）。
+              超时内一个都没命中不算错误：字段变量置为空数组 []、结果 0 行，流程继续（可用数据处理判 length 分流）。
             </Text>
           </>
         )}
@@ -495,13 +573,15 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
                   value={data.right}
                   onChange={(v) => patch({ right: v })}
                   options={variableOptions}
-                  placeholder="下拉选变量（自动带 {{}}），或输入数字/文本"
+                  placeholder="下拉选变量（自动带 {{}}），或输入文本/数字/[]（空数组）等字面量"
                 />
               </Form.Item>
             )}
             <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
-              双方都是数字时按数值比较，否则按文本比较。从节点右侧「是」「否」两个连接点分别连线到
-              后续模块，走哪条由判断结果决定，未连接的分支到那里结束。
+              双方都是数字时按数值比较，否则按文本比较；数组/对象按 JSON 文本比较——右值不必选现存变量，
+              可直接填固定值：文本、数字、<code>[]</code>（空数组）、<code>["a","b"]</code> 这类 JSON 写法都行
+              （如「{'{{提取结果}}'} 等于 []」判断提取是否为空）；「为空/不为空」对空数组、空对象同样成立。
+              从节点右侧「是」「否」两个连接点分别连线到后续模块，走哪条由判断结果决定，未连接的分支到那里结束。
             </Text>
           </>
         )}

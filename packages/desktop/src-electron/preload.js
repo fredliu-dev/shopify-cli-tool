@@ -126,10 +126,29 @@ contextBridge.exposeInMainWorld('api', {
     transitions: (opts) => ipcRenderer.invoke('tapd:transitions', opts),
     lastSteps: (opts) => ipcRenderer.invoke('tapd:lastSteps', opts),
     updateStatus: (opts) => ipcRenderer.invoke('tapd:updateStatus', opts),
+    // 编辑工单字段：{ type, workspaceId, id, fields }（fields 键为 TAPD 字段名，core 白名单过滤）
+    update: (opts) => ipcRenderer.invoke('tapd:update', opts),
     members: (opts) => ipcRenderer.invoke('tapd:members', opts),
     comments: (opts) => ipcRenderer.invoke('tapd:comments', opts),
     addComment: (opts) => ipcRenderer.invoke('tapd:addComment', opts),
     updateComment: (opts) => ipcRenderer.invoke('tapd:updateComment', opts),
+    // 实时同步（主进程增量轮询）：start 建立基线（全量加载成功后）/ pause-resume 随页面与
+    // 窗口可见性启停 / stop 页面卸载停表；onChanged 推增量工单 { workspaceId, items:[{type,item}], at }，
+    // onSync 推调度状态（连续失败自动暂停等）。返回值均为取消订阅函数
+    syncStart: (opts) => ipcRenderer.invoke('tapd:syncStart', opts),
+    syncPause: () => ipcRenderer.invoke('tapd:syncPause'),
+    syncResume: () => ipcRenderer.invoke('tapd:syncResume'),
+    syncStop: () => ipcRenderer.invoke('tapd:syncStop'),
+    onChanged: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('tapd:changed', listener)
+      return () => ipcRenderer.removeListener('tapd:changed', listener)
+    },
+    onSync: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('tapd:sync', listener)
+      return () => ipcRenderer.removeListener('tapd:sync', listener)
+    },
   },
   // 爬虫工作流（主窗口左侧栏切换页）：项目 CRUD / 画布导入导出 / 运行控制 / 结果导出。
   // 推送事件按 projectId 过滤自己的项目（同 repos:depGraphProgress 按 dir 过滤）。
@@ -143,6 +162,9 @@ contextBridge.exposeInMainWorld('api', {
     delete: (id) => ipcRenderer.invoke('crawler:delete', id),
     exportGraph: (id) => ipcRenderer.invoke('crawler:exportGraph', id),
     importGraph: () => ipcRenderer.invoke('crawler:importGraph'),
+    // 公共资源库（跨项目共享的元素选择器/网址）：{ elements:[{id,name,mode,value}], urls:[{id,name,value}] }
+    getCommon: () => ipcRenderer.invoke('crawler:getCommon'),
+    saveCommon: (data) => ipcRenderer.invoke('crawler:saveCommon', data),
     run: (opts) => ipcRenderer.invoke('crawler:run', opts),
     stop: () => ipcRenderer.invoke('crawler:stop'),
     // 断点继续：列出未完成运行 / 从断点续跑 / 丢弃断点

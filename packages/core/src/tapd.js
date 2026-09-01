@@ -316,6 +316,41 @@ export async function resolveWorkItemRef(input, { workspaceId, auth } = {}) {
     throw new Error('未找到该工单（可能不在所属项目内，或当前令牌无权限查看）')
 }
 
+/* ---------------- 实时同步（增量轮询） ---------------- */
+
+/**
+ * epoch 毫秒 → TAPD 接口时间串（北京时间 'YYYY-MM-DD HH:mm:ss'，UTC+8）。
+ * TAPD 的 modified 过滤与返回时间都是该格式（无时区后缀），字符串比较即时间比较；
+ * 用「时间戳 + 8h 后取 ISO 串」换算，避免依赖宿主机时区设置。
+ * @param {number} [ms] 默认当前时间
+ * @returns {string}
+ */
+export function tapdTimeFromMs(ms = Date.now()) {
+    return new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ')
+}
+
+/**
+ * 增量拉取某类工单中「修改时间 >= since」的记录（实时同步轮询专用，单页小量）。
+ * TAPD 列表接口的参数名支持带操作符（modified>=xxx），只返回变动过的少数几条，
+ * 单次请求即可完成一轮探测；不翻页、不拉 count——超过 limit 条时由调度器推进水线
+ * 后下一轮补齐。返回条目与 listWorkItems 同构（带 _url 派生字段）。
+ * @param {'story'|'bug'|'task'} type
+ * @param {{ workspaceId: string, since?: string, limit?: number, auth?: object }} opts
+ *   since 为 TAPD 北京时间串（tapdTimeFromMs 生成），缺省时等同全量首页
+ * @returns {Promise<Array<object>>}
+ */
+export async function fetchChangedWorkItems(type, { workspaceId, since, limit = 50, auth } = {}) {
+    const meta = WORK_ITEM_META[type]
+    if (!meta) throw new Error(`未知的工单类型：${type}`)
+    if (!workspaceId) throw new Error('请先选择 TAPD 项目（workspace_id）')
+    const params = { workspace_id: workspaceId, limit, page: 1 }
+    if (since) params['modified>='] = since
+    const json = await tapdRequest(meta.api, { params, auth })
+    return (Array.isArray(json?.data) ? json.data : [])
+        .map(unwrapEntity)
+        .map((it) => ({ ...it, _url: meta.url(workspaceId, it.id) }))
+}
+
 /* ---------------- 状态映射 / 流转 ---------------- */
 
 /**
@@ -520,6 +555,53 @@ export async function updateWorkItemStatus(type, { workspaceId, id, status, extr
     await tapdRequest(meta.api, { method: 'POST', form, auth })
     clearTapdCache(`list:${workspaceId}`)
     return { id, status }
+}
+
+// 编辑工单允许下发的字段（开放文档声明的可编辑字段白名单，防止把内部字段发给 API）；
+// custom_field_* 是各项目自定义字段（开放文档明确更新接口支持）
+const EDITABLE_FIELDS = new Set([
+    'name',
+    'title',
+    'description',
+    'owner',
+    'cc',
+    'priority',
+    'priority_label',
+    'begin',
+    'due',
+    'deadline',
+    'developer',
+    'iteration_id',
+    'version',
+    'module',
+    'label',
+    'current_user',
+])
+const isEditableKey = (k) => EDITABLE_FIELDS.has(k) || /^custom_field_/.test(k)
+
+/**
+ * 编辑工单字段：POST /stories|/bugs|/tasks（id + workspace_id + 任意可改字段，一次一条）。
+ * 与流转状态同一端点；空值字段跳过（开放 API 对空串行为不明确，不支持清空日期类字段）。
+ * 成功后清掉该 workspace 全部列表缓存（下次 tapd:list 强制重新拉取）。
+ * @param {'story'|'bug'|'task'} type
+ * @param {{ workspaceId: string, id: string, fields: object, auth?: object }} opts
+ * @returns {Promise<{ id: string, fields: object }>}
+ */
+export async function updateWorkItem(type, { workspaceId, id, fields, auth } = {}) {
+    const meta = WORK_ITEM_META[type]
+    if (!meta) throw new Error(`未知的工单类型：${type}`)
+    if (!id) throw new Error('缺少工单 id')
+    const patch = {}
+    for (const [k, v] of Object.entries(fields || {})) {
+        if (!isEditableKey(k)) continue
+        const s = String(v ?? '').trim()
+        if (s) patch[k] = s
+    }
+    if (!Object.keys(patch).length) throw new Error('没有可更新的字段')
+    const form = cleanParams({ workspace_id: workspaceId, id, ...patch })
+    await tapdRequest(meta.api, { method: 'POST', form, auth })
+    clearTapdCache(`list:${workspaceId}`)
+    return { id, fields: patch }
 }
 
 /* ---------------- 缓存（deps.js 同款：版本号 + savedAt + LRU） ---------------- */

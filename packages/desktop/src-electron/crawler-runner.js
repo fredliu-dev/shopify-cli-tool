@@ -55,6 +55,7 @@ export const MODULE_TYPES = [
   'wait',
   'click',
   'input',
+  'keyboard',
   'extract',
   'intercept',
   'importTable',
@@ -114,6 +115,16 @@ function validateNode(node) {
     const re = checkRegex(node.data.selector)
     if (re) return re
     if (!node.data?.text) return `${label}：未填写要输入的文本`
+    return null
+  }
+  if (node.type === 'keyboard') {
+    // 键盘模块：按键必选；选择器可选（留空发给当前聚焦元素），填了才做 class 正则合法性检查
+    if (!String(node.data?.key ?? '').trim()) return `${label}：未选择按键`
+    const s = node.data?.selector
+    if (isSelectorOk(s)) {
+      const re = checkRegex(s)
+      if (re) return re
+    }
     return null
   }
   if (node.type === 'extract') {
@@ -286,12 +297,34 @@ const CONDITION_OPS = {
 const UNARY_OPS = ['empty', 'notEmpty']
 const isNumeric = (v) => typeof v === 'number' || /^-?\d+(\.\d+)?$/.test(String(v ?? '').trim())
 
-/** 条件比较：双方均为数字（或数字字面量）时按数值比较，否则按字符串。 */
+/**
+ * 比较口径归一：对象/数组转 JSON 文本。String([]) 是 ''、对象是 [object Object]，
+ * 没法与右值字面量比较；转 JSON 后，右值直接写 []（空数组）、["a","b"]、{"a":1}
+ * 这类 JSON 写法即可与变量值（整串 {{变量}} 引用保留原始类型）对得上，不必非选现存变量。
+ */
+const normOperand = (v) => {
+  if (v === undefined || v === null) return ''
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+
+/**
+ * 语义空判断（仅「为空/不为空」用）：空串/纯空白/空数组/无键对象都算空——
+ * 提取无结果时变量是 []，口径必须与旧版 String([]) === '' 一致；空对象同理按空算。
+ */
+const isSemanticallyEmpty = (v) => {
+  if (v === undefined || v === null) return true
+  if (Array.isArray(v)) return v.length === 0
+  if (typeof v === 'object') return Object.keys(v).length === 0
+  return String(v).trim() === ''
+}
+
+/** 条件比较：为空/不为空按语义空；双方均为数字（或数字字面量）按数值，数组/对象按 JSON 文本，其余按字符串。 */
 function compare(l, op, r) {
-  const ls = l === undefined || l === null ? '' : String(l)
-  const rs = r === undefined || r === null ? '' : String(r)
-  if (op === 'empty') return ls.trim() === ''
-  if (op === 'notEmpty') return ls.trim() !== ''
+  if (op === 'empty') return isSemanticallyEmpty(l)
+  if (op === 'notEmpty') return !isSemanticallyEmpty(l)
+  const ls = normOperand(l)
+  const rs = normOperand(r)
   if (op === 'includes') return ls.includes(rs)
   if (op === 'excludes') return !ls.includes(rs)
   if (op === 'eq' || op === 'neq') {
@@ -1874,7 +1907,42 @@ async function execNode(ctx, node) {
     const timeoutMs = s?.timeoutMs || 5000
     await withTimeout(ctx, wc.executeJavaScript(inputScript(s, text, timeoutMs), true), timeoutMs + 5000, '输入文本')
     checkStopped()
-    return { summary: `已在 ${s.value} 输入「${text}」` }
+    // 输入内容放前面：摘要只有一行放不下时，截断掉的是选择器尾部而不是输入值
+    return { summary: `已输入「${text}」→ ${s.value}` }
+  }
+
+  if (node.type === 'keyboard') {
+    const s = data.selector?.value ? sel(data.selector) : null
+    const timeoutMs = s?.timeoutMs || 5000
+    // 填了选择器先聚焦目标元素（复用元素事件的聚焦逻辑，穿透 shadow DOM/iframe），
+    // 原生按键才会落在它身上；留空 = 发给当前聚焦元素（如上一步输入的输入框）
+    if (s) {
+      await withTimeout(ctx, wc.executeJavaScript(clickScript(s, 'focus', 'first', timeoutMs), true), timeoutMs + 5000, '键盘模块聚焦元素')
+      checkStopped()
+    }
+    const key = String(data.key || 'Enter').trim()
+    const mods = Array.isArray(data.modifiers) ? data.modifiers.filter(Boolean) : []
+    const times = Math.min(Math.max(Number(data.repeat) || 1, 1), 20)
+    // 原生键盘事件（sendInputEvent，渲染层收到的是受信任输入）：回车触发表单提交、
+    // Backspace 删字符、Tab 移焦点等浏览器默认行为都生效——合成 KeyboardEvent 做不到
+    const press = () => {
+      wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers: mods })
+      wc.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers: mods })
+    }
+    for (let i = 0; i < times; i += 1) {
+      press()
+      if (i < times - 1) await new Promise((r) => setTimeout(r, 80))
+    }
+    checkStopped()
+    // 回车/空格可能提交表单引起跳转：留 500ms 导航窗口（无跳转 waitPossibleNavigation 只等 500ms）
+    let navNote = ''
+    if (key === 'Enter' || key === 'Space') {
+      const didNav = await waitPossibleNavigation(ctx.win, timeoutMs)
+      if (didNav) navNote = `，已跳转 ${wc.getURL()}`
+    }
+    const modLabel = mods.map((m) => ({ ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Cmd' })[m] || m).join('+')
+    const scope = s ? `→ ${s.value}` : '→ 当前聚焦元素'
+    return { summary: `已按 ${modLabel ? `${modLabel}+` : ''}${key}${times > 1 ? ` ×${times}` : ''} ${scope}${navNote}` }
   }
 
   if (node.type === 'extract') {
@@ -1882,13 +1950,25 @@ async function execNode(ctx, node) {
     const timeoutMs = data.timeoutMs || 5000
     // 翻页/跳转后先等 DOM 稳定再提取，避免抓到上一页还没卸载的旧数据
     await waitPageStable(ctx)
-    const res = await pollPage(
-      ctx,
-      () => extractScript(fields),
-      timeoutMs,
-      `提取失败：所有字段的选择器在 ${Math.round(timeoutMs / 1000)}s 内均未命中元素`,
-      (sec) => ctx.log('info', `字段尚未命中，继续等待提取（已等 ${sec}s）`, node),
-    )
+    // 超时不报错（软提取）：页面没有目标元素属正常业务分支（详情页无标签、空列表），
+    // 返回空数组继续流程，下游 {{字段}} 拿到 []，数据处理可判 length 分流
+    let res = null
+    try {
+      res = await pollPage(
+        ctx,
+        () => extractScript(fields),
+        timeoutMs,
+        '提取失败',
+        (sec) => ctx.log('info', `字段尚未命中，继续等待提取（已等 ${sec}s）`, node),
+      )
+    } catch (err) {
+      if (ctx.stopped || ctx.cancelled || !String(err.message || '').startsWith('提取失败')) throw err
+      const names = fields.map((f) => f.name || f.selector?.value || '未命名')
+      for (const n of names) ctx.vars[n] = []
+      ctx.pushVars()
+      ctx.log('warn', `未提取到数据（${Math.round(timeoutMs / 1000)}s 内无命中）：字段变量置为空数组`, node)
+      return { summary: `提取到 0 行（字段：${names.join('、')} 均未命中，已返回空数组）` }
+    }
     checkStopped()
     if (res.rows?.length) {
       ctx.rows.push(...res.rows)
@@ -1897,11 +1977,15 @@ async function execNode(ctx, node) {
       const multi = []
       for (const c of res.cols || []) {
         ctx.vars[c.name] = c.hits.length > 1 ? c.hits : (c.hits[0] ?? null)
+      }
+      const fieldNames = []
+      for (const c of res.cols || []) {
+        fieldNames.push(c.name)
         if (c.hits.length > 1) multi.push(c.name)
       }
       ctx.pushVars()
       const suffix = multi.length ? `；多命中字段为数组：${multi.map((n) => `{{${n}}}`).join('、')}` : ''
-      return { summary: `提取到 ${res.rows.length} 行（字段：${(res.fields || []).join('、')}）${suffix}` }
+      return { summary: `提取到 ${res.rows.length} 行（字段：${(res.fields || fieldNames).join('、')}）${suffix}` }
     }
     return { summary: `提取到 ${res.rows.length} 行（字段：${(res.fields || []).join('、')}）` }
   }
@@ -2098,9 +2182,10 @@ async function execNode(ctx, node) {
     const rv = interpolate(data.right ?? '', ctx.vars)
     const branch = compare(lv, data.op, rv)
     const opLabel = CONDITION_OPS[data.op] || data.op
+    // 日志里数组/对象显示 JSON 文本（String([]) 是空串，看不出比的是什么）
     const desc = UNARY_OPS.includes(data.op)
       ? `「${data.left}」${opLabel}`
-      : `「${lv}」${opLabel}「${rv}」`
+      : `「${varToString(lv)}」${opLabel}「${varToString(rv)}」`
     return { summary: `${desc} → ${branch ? '是' : '否'}`, branch }
   }
 

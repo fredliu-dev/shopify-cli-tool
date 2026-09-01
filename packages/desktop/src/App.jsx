@@ -12,7 +12,6 @@ import {
   ProjectOutlined,
   SettingOutlined,
   TeamOutlined,
-  UserOutlined,
 } from '@ant-design/icons'
 import { version } from '../package.json'
 import Repos from './pages/Repos.jsx'
@@ -61,21 +60,26 @@ const PAGES = [
   { key: 'crawler', icon: <DeploymentUnitOutlined />, label: '爬虫工作流' },
 ]
 
-// 左侧栏导航 tab（按参考图）：纯图标、无背景色块，选中仅变主色、悬停提亮；
-// 原生 button + appearance 重置 + 各状态强制透明背景，彻底压掉 UA/残留样式
+// 左侧栏导航（毛玻璃质感）：图标按钮圆角方块，悬停浮起 + 浅底、选中主色底 +
+// 内描边；激活项由一条带光晕的指示条贴着侧栏左缘滑动（transform 过渡）
 const NAV_STYLE = `
 .shell-nav-btn { border: none; background: transparent; padding: 0; cursor: pointer;
   appearance: none; -webkit-appearance: none; outline: none;
-  width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;
-  font-size: 22px; color: rgba(255,255,255,0.5); transition: color 0.2s; }
+  width: 52px; height: 52px; border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 23px; color: rgba(255,255,255,0.52);
+  transition: color .2s, background .2s, box-shadow .2s, transform .2s; }
 .shell-nav-btn:hover, .shell-nav-btn:focus, .shell-nav-btn:active,
-.shell-nav-btn:focus-visible { background: transparent; box-shadow: none; }
-.shell-nav-btn:hover { color: rgba(255,255,255,0.85); }
-.shell-nav-btn:focus-visible { color: rgba(255,255,255,0.85); }
-.shell-nav-btn.is-active { color: #ffa940; }
+.shell-nav-btn:focus-visible { box-shadow: none; }
+.shell-nav-btn:hover { color: rgba(255,255,255,0.92); background: rgba(255,255,255,0.06); transform: translateY(-1px); }
+.shell-nav-btn:focus-visible { color: rgba(255,255,255,0.92); }
+.shell-nav-btn:active { transform: scale(0.95); }
+.shell-nav-btn.is-active { color: #ffa940; background: rgba(250,140,22,0.14); box-shadow: inset 0 0 0 1px rgba(250,140,22,0.30); }
+.shell-avatar { transition: transform .2s, filter .2s; }
+.shell-avatar:hover { transform: scale(1.07); filter: brightness(1.15); }
 `
 
-// 彩色光晕：毛玻璃卡片 blur 后透出的色彩来源（iOS 控制中心式背景），本地项目页沿用
+// 彩色光晕：毛玻璃卡片 blur 后透出的色彩来源（iOS 控制中心式背景），铺满主窗口整窗
 const GLOW_BACKGROUND =
   'radial-gradient(circle at 12% 18%, rgba(22,119,255,0.14), transparent 38%), radial-gradient(circle at 88% 12%, rgba(114,46,241,0.12), transparent 36%), radial-gradient(circle at 78% 88%, rgba(19,194,194,0.10), transparent 40%)'
 
@@ -87,6 +91,8 @@ function MainShell() {
   const [visited, setVisited] = useState({ repos: true })
   // 头像「更多」菜单的动作（弹窗等）都活在本地项目页里，页面挂载时注册 { run(key), editorLabel }
   const [menuApi, setMenuApi] = useState(null)
+  // 激活页索引：驱动侧栏左缘滑动指示条的位移
+  const NAV_IDX = Math.max(0, PAGES.findIndex((p) => p.key === page))
 
   const switchTo = (key) => {
     setPage(key)
@@ -122,58 +128,80 @@ function MainShell() {
   ]
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: '#0d0d0f' }}>
+    <div
+      style={{
+        display: 'flex',
+        height: '100vh',
+        // 光晕背景铺满整窗（含左侧栏）：侧栏透明，整条能与内容区融为一体；
+        // 工单/爬虫页自身不铺底，光晕从页面透出
+        background: '#0d0d0f',
+        backgroundImage: GLOW_BACKGROUND,
+        backgroundAttachment: 'fixed',
+      }}
+    >
       <style>{NAV_STYLE}</style>
       <aside
         style={{
           width: 64,
           flexShrink: 0,
-          position: 'relative',
-          borderRight: '1px solid rgba(255,255,255,0.08)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          padding: '14px 0 12px',
+          background: 'transparent',
+          borderRight: '1px solid rgba(255,255,255,0.06)',
         }}
       >
         {/* 左上角用户头像：点击展开「更多」菜单（管理类弹窗 + 下载最新版本）。
-            无彩色底（中性灰），整条侧栏不出现任何背景色 */}
-        <div style={{ position: 'absolute', top: 12, left: 0, right: 0, display: 'flex', justifyContent: 'center' }}>
-          <Dropdown
-            placement="bottomLeft"
-            trigger={['click']}
-            menu={{ items: menuItems, onClick: ({ key }) => menuApi?.run?.(key) }}
-          >
-            <Tooltip title="更多操作" placement="right">
-              <Avatar
-                size={34}
-                icon={<UserOutlined style={{ fontSize: 17 }} />}
-                style={{ cursor: 'pointer', background: 'rgba(255,255,255,0.08)' }}
-              />
-            </Tooltip>
-          </Dropdown>
-        </div>
-        <div
+            彩色渐变占位图（无图标），悬停放大提亮 */}
+        <Dropdown
+          placement="bottomLeft"
+          trigger={['click']}
+          menu={{ items: menuItems, onClick: ({ key }) => menuApi?.run?.(key) }}
+        >
+          <Tooltip title="更多操作" placement="right">
+            <Avatar
+              size={36}
+              className="shell-avatar"
+              style={{
+                cursor: 'pointer',
+                background: 'linear-gradient(135deg, #1677ff 0%, #722ed1 48%, #fa8c16 100%)',
+                boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.22), 0 2px 8px rgba(0,0,0,0.35)',
+              }}
+            />
+          </Tooltip>
+        </Dropdown>
+        <span style={{ width: 24, height: 1, background: 'rgba(255,255,255,0.10)', marginTop: 12 }} />
+
+        {/* 页面导航：垂直居中占满剩余空间；指示条贴侧栏左缘，随激活项平滑滑动 */}
+        <nav
           style={{
-            position: 'absolute',
-            top: 54,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            width: 26,
-            height: 1,
-            background: 'rgba(255,255,255,0.12)',
-          }}
-        />
-        {/* 三个页面 tab：相对整条侧栏（非头像以下剩余空间）绝对定位垂直居中 */}
-        <div
-          style={{
-            position: 'absolute',
-            top: '50%',
-            left: 0,
-            right: 0,
-            transform: 'translateY(-50%)',
+            flex: 1,
+            position: 'relative',
+            width: '100%',
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
-            gap: 8,
+            justifyContent: 'center',
+            gap: 10,
           }}
         >
+          <span
+            aria-hidden
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: '50%',
+              width: 3,
+              height: 20,
+              borderRadius: '0 3px 3px 0',
+              background: 'linear-gradient(180deg, #ffb84d, #fa8c16)',
+              boxShadow: '0 0 8px rgba(250,140,22,0.55)',
+              // 按钮高 52 + 间距 10 → 步长 62；自身 -50% 居中后再按激活索引平移
+              transform: `translateY(calc(-50% + ${(NAV_IDX - 1) * 62}px))`,
+              transition: 'transform .3s cubic-bezier(.4,0,.2,1)',
+            }}
+          />
           {PAGES.map((p) => (
             <Tooltip key={p.key} title={p.label} placement="right">
               <button
@@ -185,10 +213,25 @@ function MainShell() {
               </button>
             </Tooltip>
           ))}
-        </div>
+        </nav>
+
+        {/* 底部版本号：低调展示，悬停 Tooltip 看完整信息 */}
+        <Tooltip title={`Shopify 工具箱 v${version}`} placement="right">
+          <span
+            style={{
+              fontSize: 10,
+              color: 'rgba(255,255,255,0.28)',
+              letterSpacing: 0.5,
+              userSelect: 'none',
+              cursor: 'default',
+            }}
+          >
+            v{version}
+          </span>
+        </Tooltip>
       </aside>
 
-      {/* 内容区：本地项目页整页滚动 + 光晕背景；TAPD / 爬虫页高度撑满、内部自管滚动 */}
+      {/* 内容区：光晕背景已铺满整窗（本地项目页整页滚动）；TAPD / 爬虫页高度撑满、内部自管滚动 */}
       <main style={{ flex: 1, minWidth: 0, height: '100vh' }}>
         <div
           style={{
@@ -196,15 +239,14 @@ function MainShell() {
             overflowY: 'auto',
             padding: 20,
             display: page === 'repos' ? 'block' : 'none',
-            backgroundImage: GLOW_BACKGROUND,
-            backgroundAttachment: 'fixed',
           }}
         >
           <Repos registerMenu={setMenuApi} />
         </div>
         {visited.tapd && (
           <div style={{ height: '100%', display: page === 'tapd' ? 'block' : 'none' }}>
-            <TapdPage />
+            {/* active 驱动 TAPD 页的实时同步启停（切走即暂停轮询） */}
+            <TapdPage active={page === 'tapd'} />
           </div>
         )}
         {visited.crawler && (

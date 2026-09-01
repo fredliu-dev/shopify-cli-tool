@@ -1,7 +1,9 @@
 // 选择器共用表单块：匹配方式（class/id/class 正则/CSS 选择器）+ 值 + 超时。
 // wait/click/input/extract 四种模块的配置抽屉复用；语义与注入脚本 findAll 一致。
+// commonElements：公共资源库的元素条目——下拉选用即把 mode/value 拷进本节点
+//（保存一份快照，之后改公共库不影响已配置的节点，运行时与手填完全一致）。
 import React from 'react'
-import { Form, Input, InputNumber, Radio, Typography } from 'antd'
+import { Form, Input, InputNumber, Radio, Select, Typography } from 'antd'
 import { SELECTOR_MODES } from './constants.js'
 import { MAT } from './theme.js'
 
@@ -11,8 +13,9 @@ const { Text } = Typography
  * @param {object} props
  * @param {string} props.name Label/超时等表单字段挂载在父 Form 的 data 下，selector 子对象用嵌套 name
  * @param {number} props.defaultTimeout 默认超时（抽取等无 selector.timeoutMs 的模块用独立字段）
+ * @param {Array} props.commonElements 公共资源库元素 [{id,name,mode,value}]，空数组不显示下拉
  */
-export default function SelectorInput({ value, onChange, timeoutLabel = '超时时间（毫秒）' }) {
+export default function SelectorInput({ value, onChange, timeoutLabel = '超时时间（毫秒）', commonElements = [] }) {
   const sel = value || { mode: 'class', value: '', timeoutMs: 10000 }
   const patch = (fields) => onChange({ ...sel, ...fields })
   const mode = SELECTOR_MODES.find((m) => m.value === sel.mode)?.label || sel.mode
@@ -28,6 +31,24 @@ export default function SelectorInput({ value, onChange, timeoutLabel = '超时�
       <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 10 }}>
         元素选择器
       </Text>
+      {commonElements.length > 0 && (
+        <Select
+          size="small"
+          placeholder="从公共元素选择（填入后仍可手改）"
+          value={null}
+          options={commonElements.map((e) => ({
+            value: e.id,
+            label: `${e.name}（${SELECTOR_MODES.find((m) => m.value === e.mode)?.label || e.mode}：${
+              e.value.length > 30 ? e.value.slice(0, 30) + '…' : e.value
+            }）`,
+          }))}
+          onChange={(id) => {
+            const hit = commonElements.find((e) => e.id === id)
+            if (hit) patch({ mode: hit.mode, value: hit.value })
+          }}
+          style={{ width: '100%', marginBottom: 10 }}
+        />
+      )}
       <Radio.Group
         size="small"
         optionType="button"

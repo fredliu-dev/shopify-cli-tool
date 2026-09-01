@@ -170,6 +170,74 @@ async function probeTapdLogin() {
   return true
 }
 
+/* ---------------- 实时同步（增量轮询）调度器 ---------------- */
+
+// 水线增量轮询：渲染层全量加载完成后 tapd:syncStart 建立基线（水线=加载开始前 1 分钟），
+// 之后自适应间隔轮询 modified>=水线 的少量变更（每轮 3 类各 1 次小请求），
+// 有变更经 'tapd:changed' 推给渲染层做行级 upsert；无变更逐轮退避（30s → 5min 封顶），
+// 连续失败 5 次自动暂停并通知（渲染层展示「点击重试」）。轮询全在主进程，渲染层零开销。
+const SYNC_TYPES = ['story', 'bug', 'task']
+const SYNC_BASE_MS = 30_000
+const SYNC_MAX_MS = 5 * 60_000
+const SYNC_MAX_FAILURES = 5
+const sync = { ws: '', waterline: '', timer: null, running: false, paused: true, failures: 0, idleRounds: 0 }
+
+// 下一轮间隔：连续失败指数退避优先，空闲轮数退避其次（有人改单时始终 30s 快速感知）
+const syncIntervalMs = () => Math.min(SYNC_BASE_MS * 2 ** Math.max(sync.failures, sync.idleRounds), SYNC_MAX_MS)
+
+// 广播给全部窗口（当前只有主窗口，keep-all 语义简单可靠）
+const syncNotify = (channel, payload) => {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, payload)
+  }
+}
+
+const syncSchedule = () => {
+  if (sync.timer) {
+    clearTimeout(sync.timer)
+    sync.timer = null
+  }
+  if (!sync.ws || sync.paused) return
+  sync.timer = setTimeout(syncTick, syncIntervalMs())
+}
+
+// 单轮探测：三类串行（页间 120ms 防限流，同列表翻页口径）；水线只进不退，
+// '>= 水线' 的边界条目会重复送达，但行级 upsert 幂等，无害
+async function syncTick() {
+  if (sync.running || !sync.ws || sync.paused) return
+  sync.running = true
+  try {
+    const { fetchChangedWorkItems } = await load()
+    const items = []
+    let maxMod = sync.waterline
+    for (let i = 0; i < SYNC_TYPES.length; i += 1) {
+      const batch = await fetchChangedWorkItems(SYNC_TYPES[i], { workspaceId: sync.ws, since: sync.waterline })
+      batch.forEach((item) => items.push({ type: SYNC_TYPES[i], item }))
+      for (const it of batch) if (String(it.modified || '') > maxMod) maxMod = String(it.modified)
+      if (i < SYNC_TYPES.length - 1) await new Promise((r) => setTimeout(r, 120))
+    }
+    sync.failures = 0
+    sync.waterline = maxMod
+    if (items.length) {
+      sync.idleRounds = 0
+      syncNotify('tapd:changed', { ok: true, workspaceId: sync.ws, items, at: Date.now() })
+    } else {
+      sync.idleRounds += 1
+    }
+  } catch (err) {
+    sync.failures += 1
+    console.log(`[tapd-sync] poll failed x${sync.failures}:`, err?.message)
+    if (sync.failures >= SYNC_MAX_FAILURES) {
+      // 连续失败自动暂停（令牌过期/网络断开等）：停表 + 通知渲染层亮「重试」标，避免后台空转
+      sync.paused = true
+      syncNotify('tapd:sync', { ok: false, paused: true, error: err?.message, at: Date.now() })
+    }
+  } finally {
+    sync.running = false
+    syncSchedule()
+  }
+}
+
 /**
  * tapd 域 IPC handlers：配置 CRUD、工单列表（cache-first）、状态映射/流转、独立窗口。
  * 数据与凭据落 userDataDir()/tapd.json；列表/元信息缓存落 tapd-cache.json（流转成功后失效）。
@@ -515,6 +583,16 @@ export function registerTapdIpc() {
     }
   })
 
+  // 编辑工单字段（标题/处理人/优先级/起止时间/描述等，core 白名单过滤 + 清列表缓存）
+  ipcMain.handle('tapd:update', async (_evt, { type, workspaceId, id, fields } = {}) => {
+    const { updateWorkItem } = await load()
+    try {
+      return { ok: true, data: await updateWorkItem(type, { workspaceId, id, fields }) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
   // 项目成员（流转选处理人的候选；有缓存）
   ipcMain.handle('tapd:members', async (_evt, { workspaceId } = {}) => {
     const { listWorkspaceMembers, loadTapdCache, saveTapdCache } = await load()
@@ -559,4 +637,54 @@ export function registerTapdIpc() {
       return { ok: false, error: err.message }
     }
   })
+
+  /* ---- 实时同步控制（渲染层按「页面激活 + 窗口可见」启停，见 Tapd.jsx） ---- */
+
+  // 建立/校准基线并启动轮询：全量加载成功后调用。workspace 变化时重置水线
+  // （sinceMs = 渲染层本轮加载开始前 1 分钟，重叠覆盖加载期间发生的变更）；同 ws 保持原水线续跑
+  ipcMain.handle('tapd:syncStart', async (_evt, { workspaceId, sinceMs } = {}) => {
+    if (!workspaceId) return { ok: false, error: '缺少 workspaceId' }
+    if (sync.ws !== workspaceId) {
+      const { tapdTimeFromMs } = await load()
+      sync.ws = workspaceId
+      sync.waterline = tapdTimeFromMs(Number.isFinite(sinceMs) ? sinceMs : Date.now())
+      sync.failures = 0
+      sync.idleRounds = 0
+    }
+    sync.paused = false
+    syncSchedule()
+    return { ok: true }
+  })
+
+  // 暂停（页面切走 / 窗口隐藏）：停表即零请求
+  ipcMain.handle('tapd:syncPause', () => {
+    sync.paused = true
+    syncSchedule()
+    return { ok: true }
+  })
+
+  // 恢复（页面切回 / 窗口重新可见）：清退避状态并立即补拉一轮
+  ipcMain.handle('tapd:syncResume', () => {
+    if (!sync.ws) return { ok: true, started: false } // 未启动过：静默忽略，等首次 load 后 syncStart
+    sync.paused = false
+    sync.failures = 0
+    sync.idleRounds = 0
+    syncSchedule()
+    return { ok: true, started: true }
+  })
+
+  // 彻底停止（页面卸载 / workspace 清空）
+  ipcMain.handle('tapd:syncStop', () => {
+    sync.paused = true
+    sync.ws = ''
+    sync.waterline = ''
+    syncSchedule()
+    return { ok: true }
+  })
+
+  // 当前调度状态（渲染层诊断用）
+  ipcMain.handle('tapd:syncStatus', () => ({
+    ok: true,
+    data: { ws: sync.ws, paused: sync.paused, running: sync.running, failures: sync.failures },
+  }))
 }

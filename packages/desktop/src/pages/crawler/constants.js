@@ -6,6 +6,7 @@ import {
   ClockCircleOutlined,
   AimOutlined,
   EditOutlined,
+  KeyOutlined,
   TableOutlined,
   ImportOutlined,
   RetweetOutlined,
@@ -38,6 +39,35 @@ export const CLICK_EVENTS = [
 export const CLICK_TARGETS = [
   { value: 'first', label: '仅第一个' },
   { value: 'all', label: '全部依次' },
+]
+
+/**
+ * 键盘模块可按的键：value 是 Electron sendInputEvent 的 keyCode（Chromium DomKey 口径，
+ * 主进程原生下发）；下拉之外也允许手输任意键名（如 F5、a）。
+ */
+export const KEY_EVENTS = [
+  { value: 'Enter', label: '回车 Enter' },
+  { value: 'Tab', label: 'Tab' },
+  { value: 'Escape', label: 'Esc' },
+  { value: 'Backspace', label: '退格 Backspace' },
+  { value: 'Delete', label: '删除 Delete' },
+  { value: 'Space', label: '空格' },
+  { value: 'ArrowUp', label: '↑ 上' },
+  { value: 'ArrowDown', label: '↓ 下' },
+  { value: 'ArrowLeft', label: '← 左' },
+  { value: 'ArrowRight', label: '→ 右' },
+  { value: 'Home', label: 'Home' },
+  { value: 'End', label: 'End' },
+  { value: 'PageUp', label: 'PageUp' },
+  { value: 'PageDown', label: 'PageDown' },
+]
+
+/** 键盘模块修饰键（sendInputEvent 的 modifiers 字段口径，可组合）。 */
+export const KEY_MODIFIERS = [
+  { value: 'ctrl', label: 'Ctrl' },
+  { value: 'alt', label: 'Alt' },
+  { value: 'shift', label: 'Shift' },
+  { value: 'meta', label: 'Cmd' },
 ]
 
 /** 逻辑判断的比较方式（值与主进程 crawler-runner.js 的 CONDITION_OPS 一致；unary 表示无右值）。 */
@@ -105,6 +135,22 @@ export const MODULES = {
     desc: '向输入框填入文本（搜索框、表单）',
     defaultData: () => ({ label: '输入文本', selector: defaultSelector(5000), text: '' }),
     summary: (d) => `${selectorDesc(d.selector) || '未配置元素'}${d.text ? ` ← 「${d.text}」` : ''}`,
+  },
+  keyboard: {
+    type: 'keyboard',
+    name: '键盘按键',
+    icon: KeyOutlined,
+    color: '#98989d',
+    desc: '向页面发送原生键盘按键（回车/Tab/方向键…），可选先聚焦某元素，支持修饰键组合与连按',
+    defaultData: () => ({ label: '键盘按键', key: 'Enter', modifiers: [], repeat: 1, selector: defaultSelector(5000) }),
+    summary: (d) => {
+      const mods = (Array.isArray(d.modifiers) ? d.modifiers : [])
+        .map((m) => KEY_MODIFIERS.find((k) => k.value === m)?.label || m)
+        .join('+')
+      const rep = Number(d.repeat) > 1 ? ` ×${d.repeat}` : ''
+      const target = d.selector?.value ? selectorDesc(d.selector) : '当前聚焦元素'
+      return `${mods ? `${mods}+` : ''}${d.key || 'Enter'}${rep} → ${target}`
+    },
   },
   extract: {
     type: 'extract',
@@ -200,6 +246,7 @@ export const MODULE_ORDER = [
   'wait',
   'click',
   'input',
+  'keyboard',
   'extract',
   'intercept',
   'importTable',
@@ -296,6 +343,8 @@ export function requiredMissing(node) {
       if (!isSelectorFilled(d.selector)) return '未填写元素选择器'
       if (!d.text) return '未填写要输入的文本'
       return null
+    case 'keyboard':
+      return String(d.key ?? '').trim() ? null : '未选择按键'
     case 'extract': {
       const fields = d.fields || []
       if (fields.length === 0) return '至少配置一个提取字段'

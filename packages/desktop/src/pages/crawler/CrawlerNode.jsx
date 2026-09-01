@@ -189,7 +189,10 @@ export default function CrawlerNode({ id, data, type, selected }) {
         style={{
           marginTop: 7,
           fontSize: 11,
+          lineHeight: '16px',
           color: invalid || status === 'failed' ? '#ff6961' : status === 'success' ? '#5ad06f' : INK[3],
+          width: '100%',
+          minWidth: 0,
           overflow: 'hidden',
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',

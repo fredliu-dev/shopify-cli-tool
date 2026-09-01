@@ -18,6 +18,7 @@
     "@shopify/cli": "^4.5.2",
     "@xyflow/react": "^12.11.3",
     "adm-zip": "^0.6.0",
+    "dayjs": "^1.11.21",
     "echarts": "^6.1.0",
     "smol-toml": "^1.7.1"
   },

@@ -152,3 +152,57 @@ export async function deleteCrawler(id) {
   if (existsSync(file)) unlinkSync(file)
   return { ok: true }
 }
+
+/* -------- 公共资源库（跨项目共享的元素选择器 / 网址） -------- */
+
+/**
+ * 公共资源库文件：userDataDir()/crawler-common.json（crawlers 目录外——listCrawlers
+ * 会把目录里所有 .json 当项目读，混进去会在项目列表里出现一条垃圾数据）。
+ * 结构：{ version: 1, elements: [{id,name,mode,value}], urls: [{id,name,value}] }。
+ * 模块配置里选中公共条目即把值拷进节点 data（运行时与手填完全一致，runner 无感知）。
+ */
+async function commonFile() {
+  const { userDataDir, ensureDataDir } = await load()
+  ensureDataDir()
+  return join(userDataDir(), 'crawler-common.json')
+}
+
+/** 读公共资源库，损坏/不存在返回空库。 */
+export async function getCommonLib() {
+  const file = await commonFile()
+  if (!existsSync(file)) return { elements: [], urls: [] }
+  try {
+    const doc = JSON.parse(readFileSync(file, 'utf8'))
+    return {
+      elements: Array.isArray(doc.elements) ? doc.elements : [],
+      urls: Array.isArray(doc.urls) ? doc.urls : [],
+    }
+  } catch {
+    return { elements: [], urls: [] }
+  }
+}
+
+/** 写公共资源库（整体覆盖）：条目做最小形状校验，元素带 mode/value、网址带 value。 */
+export async function saveCommonLib(data) {
+  if (!isPlainObject(data)) return { ok: false, error: '公共资源数据格式错误' }
+  const normList = (arr, isElement) => {
+    if (!Array.isArray(arr)) return null
+    const out = []
+    for (const item of arr) {
+      if (!isPlainObject(item) || !String(item.value || '').trim()) continue // 无值的条目直接丢弃
+      out.push({
+        id: typeof item.id === 'string' ? item.id : randomUUID(),
+        name: String(item.name || '').trim().slice(0, 50) || String(item.value).slice(0, 50),
+        ...(isElement ? { mode: String(item.mode || 'class') } : {}),
+        value: String(item.value).trim().slice(0, 500),
+      })
+    }
+    return out
+  }
+  const elements = normList(data.elements, true)
+  const urls = normList(data.urls, false)
+  if (!elements || !urls) return { ok: false, error: '公共资源数据格式错误' }
+  const file = await commonFile()
+  writeFileSync(file, JSON.stringify({ version: 1, elements, urls }, null, 2), 'utf8')
+  return { ok: true, data: { elements, urls } }
+}

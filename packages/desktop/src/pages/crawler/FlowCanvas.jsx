@@ -55,7 +55,7 @@ export default function FlowCanvas({
 
   return (
     <div
-      style={{ flex: 1, minWidth: 0, position: 'relative', background: '#0a0a0d' }}
+      style={{ flex: 1, minWidth: 0, position: 'relative', background: 'transparent' }}
       onDrop={onDrop}
       onDragOver={onDragOver}
     >
