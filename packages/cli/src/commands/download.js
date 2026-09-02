@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import pc from 'picocolors'
 import ora from 'ora'
@@ -51,7 +52,8 @@ export default {
       })
       dl.succeed(`已下载：${pc.green(dest)}（${mb(bytes)}）`)
     } catch (err) {
-      dl.fail(`下载失败：${err.message}`)
+      const hint = existsSync(`${dest}.part`) ? '（已保留半截文件，下次运行自动从断点续传）' : ''
+      dl.fail(`下载失败：${err.message}${hint}`)
       return 1
     }
 

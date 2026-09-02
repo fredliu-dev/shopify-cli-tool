@@ -4,9 +4,10 @@
  * 只用 Node 内置模块 + 全局 fetch（Node ≥22），不引新依赖。
  */
 import { spawn } from 'node:child_process'
-import { createWriteStream, existsSync } from 'node:fs'
+import { createWriteStream, existsSync, renameSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { join } from 'node:path'
 
 /** 桌面应用产品名（与 electron-builder.yml 的 productName 一致）。 */
@@ -104,15 +105,26 @@ function desiredAssetMatcher({ os, arch }) {
 
 /**
  * 拉取最新 Release（GitHub API）。需带 User-Agent，否则 403。
- * @returns {Promise<object | null>} 404（还没发布）返回 null；其它错误抛错
+ * 自动重试（指数退避）+ 连接超时——api.github.com 时通时断，单次请求失败不应直接放弃。
+ * @returns {Promise<object | null>} 404（还没发布）返回 null；重试耗尽后抛错
  */
 export async function fetchLatestRelease() {
-  const res = await fetch(RELEASES_API, {
-    headers: { 'User-Agent': 'shopify-cli-tool', Accept: 'application/vnd.github+json' },
-  })
-  if (res.status === 404) return null
-  if (!res.ok) throw new Error(`GitHub 接口返回 HTTP ${res.status}`)
-  return res.json()
+  let lastErr
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(RELEASES_API, {
+        headers: { 'User-Agent': 'shopify-cli-tool', Accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (res.status === 404) return null
+      if (!res.ok) throw new Error(`GitHub 接口返回 HTTP ${res.status}`)
+      return await res.json()
+    } catch (err) {
+      lastErr = err
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)))
+    }
+  }
+  throw lastErr
 }
 
 /** 从 Release 里挑出适配当前平台的安装包资产；找不到返回 null。 */
@@ -122,27 +134,96 @@ export function pickAsset(release, pf) {
   return (release.assets || []).find((a) => match(String(a.name).toLowerCase())) || null
 }
 
+/** 下载的 HTTP 状态类错误（403/404 等）——重试无意义，需与网络类错误区分开。 */
+class HttpError extends Error {}
+
+/** 下载写盘一律先写 <dest>.part，全部校验通过后再原子改名——半截文件永不冒充成品。 */
+const partFileOf = (dest) => `${dest}.part`
+
 /**
- * 流式下载资产到 dest，回调进度。
+ * 单次下载尝试：支持 Range 续传（.part 已有字节则从断点接着下）。
+ * 用「无数据心跳」看门狗代替整体超时——大文件慢速下载不该被掐断，
+ * 只有连接挂起 / 中途断流（30 秒没有任何新数据）才中止本次尝试。
+ */
+async function downloadOnce(url, dest, onProgress) {
+  const partFile = partFileOf(dest)
+  const offset = existsSync(partFile) ? statSync(partFile).size : 0
+  const headers = { 'User-Agent': 'shopify-cli-tool' }
+  if (offset > 0) headers.Range = `bytes=${offset}-`
+
+  // 不传 signal 给 fetch 本体，改用下面可续期的看门狗（AbortSignal.timeout 会连同响应体一起掐）
+  const ac = new AbortController()
+  let watchdog
+  const arm = () => {
+    clearTimeout(watchdog)
+    watchdog = setTimeout(() => ac.abort(new Error('下载超时：30 秒没有收到新数据')), 30_000)
+  }
+  arm()
+
+  try {
+    const res = await fetch(url, { headers, redirect: 'follow', signal: ac.signal })
+    if (!res.ok) {
+      rmSync(partFile, { force: true }) // 状态类错误续传无意义，清掉 .part 让下次全量重来
+      throw new HttpError(`下载失败：HTTP ${res.status}`)
+    }
+    if (!res.body) throw new Error('下载响应无内容流')
+
+    // 服务器不支持 Range（返回 200 全量）→ 丢弃 .part 从头下
+    const resumed = offset > 0 && res.status === 206
+    const base = resumed ? offset : 0
+    if (!resumed && offset > 0) {
+      rmSync(partFile, { force: true })
+      return downloadOnce(url, dest, onProgress)
+    }
+    const total = base + (Number(res.headers.get('content-length')) || 0)
+
+    // .part 已齐（上次下完但没来得及改名）→ 直接收尾，不重复下载
+    if (total > 0 && base >= total) {
+      renameSync(partFile, dest)
+      return base
+    }
+
+    // 建流放在 fetch 之后：避免响应未就绪时写流先报错却没人监听
+    const ws = createWriteStream(partFile, { flags: resumed ? 'a' : 'w' })
+    const rs = Readable.fromWeb(res.body)
+    let loaded = base
+    rs.on('data', (chunk) => {
+      loaded += chunk.length
+      arm() // 有数据就续命
+      onProgress?.({ loaded, total })
+    })
+    await pipeline(rs, ws) // 任一侧出错/中止都会 reject，两侧流都会被清掉
+    // 完整性校验：CDN 中途掐断时流可能「正常」结束，长度对不上必须重试
+    if (total > 0 && loaded !== total) {
+      throw new Error(`下载不完整：${loaded}/${total} 字节`)
+    }
+    renameSync(partFile, dest)
+    return loaded
+  } finally {
+    clearTimeout(watchdog)
+  }
+}
+
+/**
+ * 流式下载资产到 dest，回调进度。带自动重试（网络类错误最多 3 次）+ 断点续传
+ * （.part 跨尝试甚至跨运行保留，下次从断点接着下）+ 长度完整性校验。
  * @param {string} url 资产 browser_download_url（GitHub 会 302 到 CDN，fetch 自动跟随）
  * @param {string} dest 本地保存路径
  * @param {({ loaded: number, total: number }) => void} [onProgress]
  * @returns {Promise<number>} 已写字节数
  */
 export async function downloadAsset(url, dest, onProgress) {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`下载失败：HTTP ${res.status}`)
-  if (!res.body) throw new Error('下载响应无内容流')
-  const total = Number(res.headers.get('content-length')) || 0
-  const ws = createWriteStream(dest)
-  const rs = Readable.fromWeb(res.body)
-  let loaded = 0
-  rs.on('data', (chunk) => {
-    loaded += chunk.length
-    onProgress?.({ loaded, total })
-  })
-  await new Promise((resolve, reject) => {
-    rs.pipe(ws).on('error', reject).on('finish', resolve)
-  })
-  return loaded
+  let lastErr
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await downloadOnce(url, dest, onProgress)
+    } catch (err) {
+      // HTTP 状态类错误重试无意义；abort（看门狗掐断）等网络类错误才值得再试
+      if (err instanceof HttpError) throw err
+      lastErr = err
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)))
+    }
+  }
+  // 重试耗尽：保留 .part 供下次运行续传，但把「不完整」类错误说清楚
+  throw lastErr
 }
