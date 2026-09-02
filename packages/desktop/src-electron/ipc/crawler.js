@@ -119,15 +119,20 @@ export function registerCrawlerIpc() {
     }
   })
 
-  ipcMain.handle('crawler:importGraph', async () => {
+  // filePath 可选：拖拽导入时渲染层直接传文件路径，跳过弹框
+  ipcMain.handle('crawler:importGraph', async (_evt, filePath) => {
     try {
-      const res = await dialog.showOpenDialog({
-        title: '导入爬虫画布',
-        properties: ['openFile'],
-        filters: [{ name: '爬虫画布 JSON', extensions: ['json'] }],
-      })
-      if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true }
-      const raw = JSON.parse(readFileSync(res.filePaths[0], 'utf8'))
+      let target = String(filePath || '')
+      if (!target) {
+        const res = await dialog.showOpenDialog({
+          title: '导入爬虫画布',
+          properties: ['openFile'],
+          filters: [{ name: '爬虫画布 JSON', extensions: ['json'] }],
+        })
+        if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true }
+        target = res.filePaths[0]
+      }
+      const raw = JSON.parse(readFileSync(target, 'utf8'))
       // 轻校验：version/名称/画布结构/模块类型/正则可编译（不要求配置完整，允许半成品导入续编）
       if (!raw || typeof raw !== 'object') return { ok: false, error: '文件格式不正确：不是有效的 JSON 对象' }
       if (raw.version !== 1) return { ok: false, error: `文件格式不正确：不支持的版本 ${raw.version}` }

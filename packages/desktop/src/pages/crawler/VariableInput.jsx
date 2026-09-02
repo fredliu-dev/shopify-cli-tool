@@ -6,18 +6,18 @@
 //         {{变量}} 插入光标处——已输入的文本保留，实现 URL/文本拼接变量
 // 聚焦即展开全量列表；输入时按去花括号后的关键字过滤（值已是 {{价格}} 也能过滤出 价格）。
 import React, { useRef, useState } from 'react'
-import { AutoComplete } from 'antd'
+import { AutoComplete, Input } from 'antd'
 
-export default function VariableInput({ value, onChange, options = [], mode = 'expr', placeholder }) {
+export default function VariableInput({ value, onChange, options = [], mode = 'expr', placeholder, multiLine = false }) {
   const [open, setOpen] = useState(false)
   // antd 选中会先 onSelect 再 onChange（携带原始选项值），用标志拦掉第二次，保住 {{}} 包装
   const suppressChangeRef = useRef(false)
-  // 拿内层 input 的光标位置：expr 模式插入用（antd AutoComplete 的 DOM 结构是 input > div）
+  // 拿内层输入框的光标位置：expr 模式插入用（antd AutoComplete 的 DOM 结构是 input/div > input|textarea）
   const rootRef = useRef(null)
 
   // 在光标处插入 {{变量}}：光标前后的文本保留，支持 https://x.com/{{路径}} 这类拼接
   const insertAtCursor = (snippet) => {
-    const input = rootRef.current?.querySelector('input')
+    const input = rootRef.current?.querySelector('input, textarea')
     const pos = input ? input.selectionStart ?? value.length : value.length
     const next = String(value ?? '').slice(0, pos) + snippet + String(value ?? '').slice(input ? input.selectionEnd ?? pos : pos)
     onChange?.(next)
@@ -27,42 +27,53 @@ export default function VariableInput({ value, onChange, options = [], mode = 'e
     })
   }
 
+  const dropdown = {
+    value,
+    options,
+    open,
+    onOpenChange: setOpen,
+    onFocus: () => setOpen(true),
+    onBlur: () => setOpen(false),
+    style: { width: '100%' },
+    filterOption: (input, option) =>
+      String(option.value).toLowerCase().includes(String(input).replace(/[{}\s]/g, '').toLowerCase()),
+    notFoundContent: '没有匹配的变量',
+    onSelect: (v) => {
+      suppressChangeRef.current = true
+      if (mode === 'name') {
+        onChange?.(v)
+        return
+      }
+      // 空值时插入 = 直接替换，行为与旧版一致
+      if (!value) {
+        onChange?.(`{{${v}}}`)
+        return
+      }
+      insertAtCursor(`{{${v}}}`)
+    },
+    onChange: (v) => {
+      if (suppressChangeRef.current) {
+        suppressChangeRef.current = false
+        return
+      }
+      onChange?.(v ?? '')
+    },
+  }
+
+  if (multiLine) {
+    // 多行模式：AutoComplete 内嵌 TextArea（antd 支持自定义输入组件），选中变量在光标处插入
+    return (
+      <div ref={rootRef} style={{ width: '100%' }}>
+        <AutoComplete {...dropdown}>
+          <Input.TextArea placeholder={placeholder} autoSize={{ minRows: 2, maxRows: 6 }} maxLength={2000} />
+        </AutoComplete>
+      </div>
+    )
+  }
+
   return (
     <div ref={rootRef} style={{ width: '100%' }}>
-      <AutoComplete
-        value={value}
-        options={options}
-        open={open}
-        onOpenChange={setOpen}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        placeholder={placeholder}
-        style={{ width: '100%' }}
-        filterOption={(input, option) =>
-          String(option.value).toLowerCase().includes(String(input).replace(/[{}\s]/g, '').toLowerCase())
-        }
-        notFoundContent="没有匹配的变量"
-        onSelect={(v) => {
-          suppressChangeRef.current = true
-          if (mode === 'name') {
-            onChange?.(v)
-            return
-          }
-          // 空值时插入 = 直接替换，行为与旧版一致
-          if (!value) {
-            onChange?.(`{{${v}}}`)
-            return
-          }
-          insertAtCursor(`{{${v}}}`)
-        }}
-        onChange={(v) => {
-          if (suppressChangeRef.current) {
-            suppressChangeRef.current = false
-            return
-          }
-          onChange?.(v ?? '')
-        }}
-      />
+      <AutoComplete {...dropdown} placeholder={placeholder} />
     </div>
   )
 }

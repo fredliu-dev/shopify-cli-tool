@@ -1923,6 +1923,9 @@ async function execNode(ctx, node) {
     const key = String(data.key || 'Enter').trim()
     const mods = Array.isArray(data.modifiers) ? data.modifiers.filter(Boolean) : []
     const times = Math.min(Math.max(Number(data.repeat) || 1, 1), 20)
+    // 按键后时延（ms）：全部按键完成后等待该时长再走下一步，给页面反应时间；0/缺省 = 不等待
+    const delayRaw = Number(data.delayMs)
+    const delay = Number.isFinite(delayRaw) ? Math.min(Math.max(delayRaw, 0), 60_000) : 0
     // 原生键盘事件（sendInputEvent，渲染层收到的是受信任输入）：回车触发表单提交、
     // Backspace 删字符、Tab 移焦点等浏览器默认行为都生效——合成 KeyboardEvent 做不到
     const press = () => {
@@ -1934,6 +1937,10 @@ async function execNode(ctx, node) {
       if (i < times - 1) await new Promise((r) => setTimeout(r, 80))
     }
     checkStopped()
+    if (delay > 0) {
+      await new Promise((r) => setTimeout(r, delay))
+      checkStopped()
+    }
     // 回车/空格可能提交表单引起跳转：留 500ms 导航窗口（无跳转 waitPossibleNavigation 只等 500ms）
     let navNote = ''
     if (key === 'Enter' || key === 'Space') {

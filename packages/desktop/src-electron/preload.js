@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 // contextIsolation 下渲染层无法直接访问 Node/Electron，只暴露最小白名单 API。
 contextBridge.exposeInMainWorld('api', {
@@ -162,6 +162,8 @@ contextBridge.exposeInMainWorld('api', {
     delete: (id) => ipcRenderer.invoke('crawler:delete', id),
     exportGraph: (id) => ipcRenderer.invoke('crawler:exportGraph', id),
     importGraph: () => ipcRenderer.invoke('crawler:importGraph'),
+    // 拖拽导入：Electron 33 起 File.path 被移除，需在 preload 用 webUtils 换取文件路径
+    importGraphFile: (file) => ipcRenderer.invoke('crawler:importGraph', webUtils.getPathForFile(file)),
     // 公共资源库（跨项目共享的元素选择器/网址）：{ elements:[{id,name,mode,value}], urls:[{id,name,value}] }
     getCommon: () => ipcRenderer.invoke('crawler:getCommon'),
     saveCommon: (data) => ipcRenderer.invoke('crawler:saveCommon', data),

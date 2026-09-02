@@ -142,7 +142,7 @@ export const MODULES = {
     icon: KeyOutlined,
     color: '#98989d',
     desc: '向页面发送原生键盘按键（回车/Tab/方向键…），可选先聚焦某元素，支持修饰键组合与连按',
-    defaultData: () => ({ label: '键盘按键', key: 'Enter', modifiers: [], repeat: 1, selector: defaultSelector(5000) }),
+    defaultData: () => ({ label: '键盘按键', key: 'Enter', modifiers: [], repeat: 1, delayMs: 0, selector: defaultSelector(5000) }),
     summary: (d) => {
       const mods = (Array.isArray(d.modifiers) ? d.modifiers : [])
         .map((m) => KEY_MODIFIERS.find((k) => k.value === m)?.label || m)

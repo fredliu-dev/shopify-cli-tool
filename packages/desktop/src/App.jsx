@@ -133,10 +133,12 @@ function MainShell() {
         display: 'flex',
         height: '100vh',
         // 光晕背景铺满整窗（含左侧栏）：侧栏透明，整条能与内容区融为一体；
-        // 工单/爬虫页自身不铺底，光晕从页面透出
+        // 工单/爬虫页自身不铺底，光晕从页面透出。
+        // 不能加 background-attachment: fixed：壳层本就不滚动，fixed 无意义，反而触发
+        // Chromium 渲染 bug——backdrop-filter 毛玻璃元素（爬虫节点等）周围会重采样出
+        // 一圈光晕矩形框（画布透明后尤其明显）
         background: '#0d0d0f',
         backgroundImage: GLOW_BACKGROUND,
-        backgroundAttachment: 'fixed',
       }}
     >
       <style>{NAV_STYLE}</style>

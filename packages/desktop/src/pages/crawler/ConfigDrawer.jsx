@@ -268,14 +268,18 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
           <>
             <SelectorInput value={data.selector} onChange={(s) => patch({ selector: s })} commonElements={commonElements} />
             <Form.Item label="输入内容" required style={{ marginTop: 14, marginBottom: 0 }}>
-              <Input.TextArea
+              <VariableInput
                 value={data.text}
-                onChange={(e) => patch({ text: e.target.value })}
-                placeholder="要填入的文本"
-                autoSize={{ minRows: 2, maxRows: 4 }}
-                maxLength={2000}
+                onChange={(v) => patch({ text: v })}
+                options={variableOptions}
+                multiLine
+                placeholder="要填入的文本；聚焦下拉选变量（自动带 {{}}）插入，或直接输入固定文本"
               />
             </Form.Item>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 6, lineHeight: 1.7 }}>
+              支持变量：下拉选择把 {'{{变量}}'} 插入光标处，可与固定文本混拼（如「你好，{'{{姓名}}'}」）；
+              运行时按当次运行的变量值替换后填入输入框。
+            </Text>
           </>
         )}
 
@@ -302,7 +306,7 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
                 onChange={(vals) => patch({ modifiers: vals })}
               />
             </Form.Item>
-            <Form.Item label="重复次数" style={{ marginBottom: 14 }} extra="连按多次，如方向键连按 3 次移动三项">
+            <Form.Item label="重复次数" style={{ marginBottom: 12 }} extra="连按多次，如方向键连按 3 次移动三项">
               <InputNumber
                 min={1}
                 max={20}
@@ -310,6 +314,17 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
                 onChange={(v) => patch({ repeat: v || 1 })}
                 style={{ width: 140 }}
                 addonAfter="次"
+              />
+            </Form.Item>
+            <Form.Item label="时延（毫秒）" style={{ marginBottom: 14 }} extra="按键触发后等待该时长再走下一步，给页面反应时间；0 = 不等待">
+              <InputNumber
+                min={0}
+                max={60000}
+                step={100}
+                value={Number.isFinite(Number(data.delayMs)) ? Number(data.delayMs) : 0}
+                onChange={(v) => patch({ delayMs: Math.max(0, Math.round(v || 0)) })}
+                style={{ width: 140 }}
+                addonAfter="ms"
               />
             </Form.Item>
             <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>

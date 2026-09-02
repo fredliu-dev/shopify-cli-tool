@@ -70,6 +70,9 @@ export function iconChip(color, size = 26, icon = 15) {
 /**
  * 爬虫页全局样式（index.jsx 注入一次，作用域限 .crawler-root）：
  * 细滚动条（overlay 风）、橘色文本选中、抗锯齿。
+ * 另剥掉 React Flow 内置节点外观：「输入文本」模块 type=input 与内置 input 类型同名，
+ * 包装层会吃到内置的 边框+内边距+底色+150px 宽（hover/selected 还有 box-shadow），
+ * 表现为节点外面多一个框、连线锚点也错位；自定义节点外观全在 CrawlerNode 自身，置空即可。
  */
 export const GLOBAL_CSS = `
 .crawler-root { -webkit-font-smoothing: antialiased }
@@ -82,4 +85,14 @@ export const GLOBAL_CSS = `
 }
 .crawler-root ::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.22) }
 .crawler-root ::-webkit-scrollbar-corner { background: transparent }
+.crawler-root .react-flow__node-input,
+.crawler-root .react-flow__node-default,
+.crawler-root .react-flow__node-output,
+.crawler-root .react-flow__node-group {
+  padding: 0 !important;
+  width: auto !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
 `

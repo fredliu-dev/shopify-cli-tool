@@ -1,6 +1,6 @@
 // 爬虫项目列表视图：卡片网格（安静毛玻璃 + 悬停抬升），新建/导入/重命名/删除，
 // 点卡片进编辑器。卡片左侧着色图标 chip（iOS 设置行风格）按项目 id 稳定取色。
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { App, Button, Col, Empty, Input, Modal, Popconfirm, Row, Space, Spin, Typography } from 'antd'
 import {
   DeleteOutlined,
@@ -42,6 +42,8 @@ export default function ProjectList({ onOpen, onImported }) {
   const [createName, setCreateName] = useState('')
   const [renaming, setRenaming] = useState(null) // { id, name }
   const [renameValue, setRenameValue] = useState('')
+  const [dropping, setDropping] = useState(false) // 拖拽画布文件悬停中：显示落区遮罩
+  const dragDepth = useRef(0) // dragenter/dragleave 成对计数，避开子元素抖动误清
 
   const refresh = async () => {
     const res = await window.api.crawler.ls()
@@ -89,9 +91,82 @@ export default function ProjectList({ onOpen, onImported }) {
     onImported?.(res.data.id)
   }
 
+  /* -------- 拖拽 .crawler.json 导入（与「导入画布」按钮同一套校验与落库） -------- */
+
+  const importDroppedFile = async (file) => {
+    if (!file) return
+    if (!/\.json$/i.test(file.name)) return message.warning('仅支持爬虫画布 JSON 文件（.json）')
+    const res = await window.api.crawler.importGraphFile(file)
+    if (!res.ok) return message.error(res.error || '导入失败')
+    message.success(`已导入「${res.data.name}」`)
+    onImported?.(res.data.id)
+  }
+
+  const onDragEnter = (e) => {
+    if (![...e.dataTransfer.types].includes('Files')) return
+    e.preventDefault()
+    dragDepth.current += 1
+    setDropping(true)
+  }
+  const onDragOver = (e) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+  }
+  const onDragLeave = (e) => {
+    e.preventDefault()
+    dragDepth.current -= 1
+    if (dragDepth.current <= 0) {
+      dragDepth.current = 0
+      setDropping(false)
+    }
+  }
+  const onDrop = (e) => {
+    e.preventDefault()
+    dragDepth.current = 0
+    setDropping(false)
+    importDroppedFile(e.dataTransfer.files?.[0])
+  }
+
   return (
-    <div style={{ padding: '30px 38px', height: '100%', overflowY: 'auto' }}>
+    <div
+      style={{ padding: '30px 38px', height: '100%', overflowY: 'auto', position: 'relative' }}
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <style>{CARD_CSS}</style>
+      {dropping && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1000,
+            pointerEvents: 'none',
+            background: 'rgba(10,132,255,0.08)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <div
+            style={{
+              padding: '18px 36px',
+              borderRadius: 16,
+              border: '1.5px dashed rgba(10,132,255,0.65)',
+              background: 'rgba(12,12,15,0.88)',
+              backdropFilter: MAT.blur,
+              WebkitBackdropFilter: MAT.blur,
+              fontSize: 15,
+              fontWeight: 600,
+              color: '#6cb2ff',
+              boxShadow: LIFT,
+            }}
+          >
+            松开导入画布（.crawler.json）
+          </div>
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 26 }}>
         <div>
           <div style={{ fontSize: 24, fontWeight: 600, letterSpacing: '-0.4px', color: INK[1], lineHeight: 1.2 }}>
