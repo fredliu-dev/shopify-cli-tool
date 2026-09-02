@@ -2454,9 +2454,16 @@ export default function TapdPage({ active = true }) {
   }, [baseItems, bucketOf, monthKey])
 
   // 客户端过滤链：分类快速筛选 → 关键字（名称/ID 包含，大小写不敏感；bug 名称字段是 title）
+  // 「已完成(本月)」与卡片统计同口径：不只按状态分类，还要求完成时间（completed）落在当月
   const filtered = useMemo(() => {
     let list = items
-    if (bucket !== 'all') list = list.filter((it) => bucketOf(it.status, it._type) === bucket)
+    if (bucket !== 'all') {
+      list = list.filter(
+        (it) =>
+          bucketOf(it.status, it._type) === bucket &&
+          (bucket !== 'done' || String(it.completed || '').slice(0, 7) === monthKey),
+      )
+    }
     const q = keyword.trim().toLowerCase()
     if (q) {
       list = list.filter(
@@ -2465,7 +2472,7 @@ export default function TapdPage({ active = true }) {
       )
     }
     return list
-  }, [items, bucket, bucketOf, keyword])
+  }, [items, bucket, bucketOf, keyword, monthKey])
 
   // 已加载工单里实际出现的状态集合（主列表 + 我的全量，后者保证已选状态过滤时
   // 下拉不全缩水成当前一项）
@@ -2504,12 +2511,6 @@ export default function TapdPage({ active = true }) {
     ].filter((g) => g.options.length)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusMaps, bucketOf, usedStatuses])
-
-  // 状态值所属的工单类型（选中状态让卡片分类跟随时用；映射缺失时返回 undefined 走关键词兜底）
-  const typeOfStatus = useCallback(
-    (v) => TYPES.find((t) => statusMaps[t.key]?.[v] !== undefined)?.key,
-    [statusMaps],
-  )
 
   // 列宽（拖拽表头右缘调整后记录于此，key 为列标识；未拖过的列用定义时的默认宽）
   const [colWidths, setColWidths] = useState({})
@@ -2879,11 +2880,7 @@ export default function TapdPage({ active = true }) {
             <Select
               style={{ width: 170 }}
               value={statusFilter}
-              onChange={(v) => {
-                setStatusFilter(v)
-                // 选中具体状态时，卡片分类自动跟随该状态所属的 待办/进行中/已完成（按状态所属类型判定）
-                if (v) setBucket(bucketOf(v, typeOfStatus(v)))
-              }}
+              onChange={(v) => setStatusFilter(v)} // 只筛状态，不联动分类胶囊（done 桶带「本月完成」约束，联动会把历史已通过工单藏掉）
               options={statusOptions}
               loading={loading && !statusMap}
               placeholder="状态过滤（全部）"

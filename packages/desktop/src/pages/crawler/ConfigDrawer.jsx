@@ -17,9 +17,11 @@ import {
   Tag,
   Typography,
 } from 'antd'
-import { DeleteOutlined, FolderOpenOutlined, PlusOutlined } from '@ant-design/icons'
+import { DeleteOutlined, FolderOpenOutlined, FormatPainterOutlined, PlusOutlined } from '@ant-design/icons'
+import beautify from 'js-beautify'
 import SelectorInput from './SelectorInput.jsx'
 import VariableInput from './VariableInput.jsx'
+import JsCodeEditor from './JsCodeEditor.jsx'
 import { CLICK_EVENTS, CLICK_TARGETS, CONDITION_OPS, KEY_EVENTS, KEY_MODIFIERS, MODULES, isUnaryOp } from './constants.js'
 import { INK, MAT, iconChip } from './theme.js'
 
@@ -523,14 +525,28 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
                 placeholder="下拉选择已定义的变量，或输入 .字段.下标 深层路径"
               />
             </Form.Item>
-            <Form.Item label="处理代码（JS）" required style={{ marginBottom: 12 }}>
-              <Input.TextArea
+            <Form.Item
+              label={
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  处理代码（JS）
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<FormatPainterOutlined />}
+                    onClick={() => patch({ code: beautify.js(String(data.code || ''), { indent_size: 2, wrap_line_length: 100 }) })}
+                    title="按标准风格格式化代码"
+                  >
+                    格式化
+                  </Button>
+                </span>
+              }
+              required
+              style={{ marginBottom: 12 }}
+            >
+              <JsCodeEditor
                 value={data.code}
-                onChange={(e) => patch({ code: e.target.value })}
+                onChange={(code) => patch({ code })}
                 placeholder={'// value = 变量旧值，vars = 全部变量\nreturn value.map(x => x.title)'}
-                autoSize={{ minRows: 4, maxRows: 14 }}
-                maxLength={5000}
-                style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12 }}
               />
             </Form.Item>
             {(() => {
