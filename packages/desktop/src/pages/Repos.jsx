@@ -2727,7 +2727,7 @@ function OpenEditorButton({ dir, defaultEditor }) {
 }
 
 function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCounts, themeProjectCounts, defaultEditor }) {
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const [hovered, setHovered] = useState(false) // 玻璃亮光 hover 态（仅本卡重渲，不影响其它卡片）
 
   // 后台链接：同一 store 下所有项目共享，提升到仓库卡片，避免每个项目面板重复显示。
