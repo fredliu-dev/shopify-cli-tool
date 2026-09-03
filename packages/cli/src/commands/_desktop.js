@@ -16,6 +16,15 @@ export const APP_NAME = 'Shopify Toolbox'
 export const REPO = { owner: 'fredliu-dev', name: 'shopify-cli-tool' }
 const RELEASES_API = `https://api.github.com/repos/${REPO.owner}/${REPO.name}/releases/latest`
 
+/**
+ * 国内 GitHub 加速镜像前缀（拼接原 URL 即走代理，如 `https://gh-proxy.com/https://github.com/...`）。
+ * 不开 VPN 时 api.github.com 与 release 下载（objects.githubusercontent.com）大多不可达，
+ * 直连失败后按顺序逐个回退到镜像；镜像站点时有失效，靠「直连优先 + 多镜像轮换」兜底。
+ * 实测（2026-09）：三个镜像都支持 release 资产下载（含 Range 续传），API 查询仅 gh-proxy.com
+ * 支持透传，故它排首位——API 回退一次即中，资产下载三个源都能用。
+ */
+const GH_MIRRORS = ['https://gh-proxy.com/', 'https://ghfast.top/', 'https://ghproxy.net/']
+
 /** 归一化当前系统：os = darwin | win32 | linux；arch = arm64 | x64。 */
 export function detectPlatform() {
   return { os: process.platform, arch: process.arch }
@@ -105,23 +114,28 @@ function desiredAssetMatcher({ os, arch }) {
 
 /**
  * 拉取最新 Release（GitHub API）。需带 User-Agent，否则 403。
- * 自动重试（指数退避）+ 连接超时——api.github.com 时通时断，单次请求失败不应直接放弃。
- * @returns {Promise<object | null>} 404（还没发布）返回 null；重试耗尽后抛错
+ * 直连优先（时通时断，多试一次），失败后逐个回退国内镜像；
+ * 连接超时 10 秒——无 VPN 时直连常是挂起而非快速失败，不能干等太久。
+ * @returns {Promise<object | null>} 404（还没发布）返回 null；所有源都失败后抛错
  */
 export async function fetchLatestRelease() {
   let lastErr
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(RELEASES_API, {
-        headers: { 'User-Agent': 'shopify-cli-tool', Accept: 'application/vnd.github+json' },
-        signal: AbortSignal.timeout(10_000),
-      })
-      if (res.status === 404) return null
-      if (!res.ok) throw new Error(`GitHub 接口返回 HTTP ${res.status}`)
-      return await res.json()
-    } catch (err) {
-      lastErr = err
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)))
+  for (let i = 0; i <= GH_MIRRORS.length; i++) {
+    const source = i === 0 ? RELEASES_API : GH_MIRRORS[i - 1] + RELEASES_API
+    const tries = i === 0 ? 2 : 1 // 直连多试一次；镜像各试一次，失败切下一个
+    for (let attempt = 0; attempt < tries; attempt++) {
+      try {
+        const res = await fetch(source, {
+          headers: { 'User-Agent': 'shopify-cli-tool', Accept: 'application/vnd.github+json' },
+          signal: AbortSignal.timeout(10_000),
+        })
+        if (res.status === 404) return null
+        if (!res.ok) throw new Error(`GitHub 接口返回 HTTP ${res.status}`)
+        return await res.json()
+      } catch (err) {
+        lastErr = err
+        if (attempt < tries - 1) await new Promise((r) => setTimeout(r, 1500))
+      }
     }
   }
   throw lastErr
@@ -133,9 +147,6 @@ export function pickAsset(release, pf) {
   if (!match || !release) return null
   return (release.assets || []).find((a) => match(String(a.name).toLowerCase())) || null
 }
-
-/** 下载的 HTTP 状态类错误（403/404 等）——重试无意义，需与网络类错误区分开。 */
-class HttpError extends Error {}
 
 /** 下载写盘一律先写 <dest>.part，全部校验通过后再原子改名——半截文件永不冒充成品。 */
 const partFileOf = (dest) => `${dest}.part`
@@ -164,7 +175,7 @@ async function downloadOnce(url, dest, onProgress) {
     const res = await fetch(url, { headers, redirect: 'follow', signal: ac.signal })
     if (!res.ok) {
       rmSync(partFile, { force: true }) // 状态类错误续传无意义，清掉 .part 让下次全量重来
-      throw new HttpError(`下载失败：HTTP ${res.status}`)
+      throw new Error(`下载失败：HTTP ${res.status}`)
     }
     if (!res.body) throw new Error('下载响应无内容流')
 
@@ -205,8 +216,9 @@ async function downloadOnce(url, dest, onProgress) {
 }
 
 /**
- * 流式下载资产到 dest，回调进度。带自动重试（网络类错误最多 3 次）+ 断点续传
- * （.part 跨尝试甚至跨运行保留，下次从断点接着下）+ 长度完整性校验。
+ * 流式下载资产到 dest，回调进度。直连优先，失败（网络类或镜像限流的 HTTP 状态类）逐个回退国内镜像；
+ * 带断点续传（.part 跨尝试、跨源、跨运行保留——同一文件内容一致，断点依然有效）
+ * + 长度完整性校验。单源内的瞬时网络错误也值得再试，直连给 2 次，镜像各 1 次。
  * @param {string} url 资产 browser_download_url（GitHub 会 302 到 CDN，fetch 自动跟随）
  * @param {string} dest 本地保存路径
  * @param {({ loaded: number, total: number }) => void} [onProgress]
@@ -214,16 +226,18 @@ async function downloadOnce(url, dest, onProgress) {
  */
 export async function downloadAsset(url, dest, onProgress) {
   let lastErr
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      return await downloadOnce(url, dest, onProgress)
-    } catch (err) {
-      // HTTP 状态类错误重试无意义；abort（看门狗掐断）等网络类错误才值得再试
-      if (err instanceof HttpError) throw err
-      lastErr = err
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)))
+  for (let i = 0; i <= GH_MIRRORS.length; i++) {
+    const target = i === 0 ? url : GH_MIRRORS[i - 1] + url
+    const tries = i === 0 ? 2 : 1 // 直连多试一次（时通时断）；镜像各试一次，失败切下一个
+    for (let attempt = 0; attempt < tries; attempt++) {
+      try {
+        return await downloadOnce(target, dest, onProgress)
+      } catch (err) {
+        lastErr = err
+        if (attempt < tries - 1) await new Promise((r) => setTimeout(r, 1500))
+      }
     }
   }
-  // 重试耗尽：保留 .part 供下次运行续传，但把「不完整」类错误说清楚
+  // 所有源耗尽：保留 .part 供下次运行续传，但把「不完整」类错误说清楚
   throw lastErr
 }
