@@ -361,6 +361,41 @@ export function parseOwnerRepoFromUrl(url) {
   return m ? { owner: m[1], repo: m[2] } : null
 }
 
+/* ---------------- GitHub API 请求（仅直连，不走国内镜像） ----------------
+ * 协作者/PR 等接口都带用户 token，实测（2026-09）gh-proxy 等镜像会把 Authorization
+ * 替换成镜像自己的共享账号——对私有仓库 GitHub 按「不可见」返回 404，误导排查，
+ * 故需要鉴权的 API 不能走镜像（镜像仅适用于匿名公开资源，如 release 下载，见 CLI _desktop.js）。
+ */
+
+/**
+ * GitHub API fetch（仅直连）。直连试 2 次（时通时断），每次 10 秒超时——
+ * 无 VPN 直连常是挂起而非快速失败，不能干等太久。
+ * 校验响应 content-type 必须为 JSON：本机直连被 DNS 污染时 api.github.com 会被
+ * 劫持成 301 → github.com 的 HTML 页，若不校验会把 HTML 当成功、JSON 解析再报怪错。
+ * 只要拿到合法 JSON 响应（含 404/401/403 等业务状态）就返回，由调用方按状态码分层报错。
+ * @param {string} path API 路径（含 query），如 /repos/{owner}/{repo}/collaborators?per_page=100
+ * @param {{ method?: string, headers?: object, body?: string }} [opts] 透传给 fetch 的选项
+ * @returns {Promise<Response>}
+ */
+async function githubApiFetch(path, opts = {}) {
+  const url = `https://api.github.com${path}`
+  let lastErr
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, { ...opts, signal: AbortSignal.timeout(10_000) })
+      const ct = String(res.headers.get('content-type') || '')
+      if (!ct.includes('application/json')) throw new Error('响应非 JSON（api.github.com 可能被网络劫持）')
+      return res
+    } catch (err) {
+      lastErr = err
+      if (attempt < 1) await new Promise((r) => setTimeout(r, 1500))
+    }
+  }
+  throw new Error(
+    `无法连接 GitHub API（${lastErr?.message || lastErr}）。拉取成员/创建 PR 需能直连 api.github.com，请开启 VPN 后重试`,
+  )
+}
+
 /**
  * 取仓库的 GitHub 协作者列表（login/头像/主页）。需 token；非 github 仓库返回 []。
  * token 来源优先级：显式传入（来自 settings.githubToken）> 环境变量 GH_TOKEN/GITHUB_TOKEN（终端启动兼容）。
@@ -377,10 +412,9 @@ export async function getCollaborators(repoPath, token) {
   if (!or) return [] // 非 github 仓库
   const tok = token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
   if (!tok) throw new Error('NO_TOKEN') // 特殊标识：前端据此显示 token 输入框（而非普通错误）
-  const res = await fetch(
-    `https://api.github.com/repos/${or.owner}/${or.repo}/collaborators?per_page=100`,
-    { headers: { Authorization: `Bearer ${tok}`, Accept: 'application/vnd.github+json' } },
-  )
+  const res = await githubApiFetch(`/repos/${or.owner}/${or.repo}/collaborators?per_page=100`, {
+    headers: { Authorization: `Bearer ${tok}`, Accept: 'application/vnd.github+json' },
+  })
   if (!res.ok) {
     let body = null
     try {
@@ -414,14 +448,14 @@ export async function getCollaborators(repoPath, token) {
  * @returns {Promise<{ failed: string[], error: string }>} failed=未能添加的 login；error=首次失败的 GitHub message
  */
 async function addReviewers(or, tok, number, reviewers) {
-  const endpoint = `https://api.github.com/repos/${or.owner}/${or.repo}/pulls/${number}/requested_reviewers`
+  const path = `/repos/${or.owner}/${or.repo}/pulls/${number}/requested_reviewers`
   const headers = {
     Authorization: `Bearer ${tok}`,
     Accept: 'application/vnd.github+json',
     'Content-Type': 'application/json',
   }
   const tryOnce = async (list) => {
-    const r = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ reviewers: list }) })
+    const r = await githubApiFetch(path, { method: 'POST', headers, body: JSON.stringify({ reviewers: list }) })
     if (r.ok) return { ok: true, msg: '' }
     let msg = ''
     try {
@@ -462,7 +496,7 @@ export async function createPullRequest(repoPath, opts, token) {
   const tok = token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
   if (!tok) throw new Error('NO_TOKEN')
   const { title, head, base, body, reviewers } = opts || {}
-  const res = await fetch(`https://api.github.com/repos/${or.owner}/${or.repo}/pulls`, {
+  const res = await githubApiFetch(`/repos/${or.owner}/${or.repo}/pulls`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${tok}`,

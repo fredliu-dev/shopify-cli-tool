@@ -18,3 +18,226 @@
 .sp-qlink:hover {
   filter: brightness(1.18);
 }
+
+/* ---------------------------------------------------------------- --
+   仓库卡片毛玻璃按钮：圆润胶囊 + 半透明玻璃底/描边/顶部内高光。
+   用类而非内联样式，保留 antd 的 hover/active 反馈（内联 background 会盖死伪类）。
+-- ---------------------------------------------------------------- */
+.glass-btn.ant-btn {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(12px) saturate(160%);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition:
+    background 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+.glass-btn.ant-btn:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+.glass-btn.ant-btn:not(:disabled):active {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* 主按钮（本地保存 / 初始化并保存）：蓝色玻璃 */
+.glass-btn-primary.ant-btn-primary {
+  background: rgba(22, 119, 255, 0.55);
+  border: 1px solid rgba(105, 177, 255, 0.6);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    0 2px 10px rgba(22, 119, 255, 0.3);
+  text-shadow: none;
+}
+.glass-btn-primary.ant-btn-primary:not(:disabled):hover {
+  background: rgba(22, 119, 255, 0.72);
+  border-color: rgba(145, 200, 255, 0.85);
+}
+.glass-btn-primary.ant-btn-primary:not(:disabled):active {
+  background: rgba(22, 119, 255, 0.85);
+}
+
+/* 危险按钮（删除主题 / 删除）：红色玻璃 */
+.glass-btn-danger.ant-btn-dangerous {
+  background: rgba(255, 77, 79, 0.15);
+  border: 1px solid rgba(255, 99, 99, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  color: #ff7875;
+}
+.glass-btn-danger.ant-btn-dangerous:not(:disabled):hover {
+  background: rgba(255, 77, 79, 0.28);
+  border-color: rgba(255, 120, 117, 0.75);
+}
+.glass-btn-danger.ant-btn-dangerous:not(:disabled):active {
+  background: rgba(255, 77, 79, 0.4);
+}
+
+/* 配置操作磁贴：图标在上、文字在下的玻璃快捷块，hover 提亮 + 轻微上浮 */
+.action-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 4px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(12px) saturate(160%);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease,
+    transform 0.25s ease;
+}
+.action-tile:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.28);
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 6px 16px rgba(0, 0, 0, 0.3);
+}
+.action-tile:active {
+  transform: translateY(0);
+}
+.action-tile .tile-icon {
+  font-size: 16px;
+}
+.action-tile .tile-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.action-tile.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* 主操作磁贴（本地保存 / 初始化并保存）：蓝色玻璃 */
+.action-tile-primary {
+  background: rgba(22, 119, 255, 0.4);
+  border-color: rgba(105, 177, 255, 0.55);
+  color: #fff;
+}
+.action-tile-primary:hover {
+  background: rgba(22, 119, 255, 0.58);
+  border-color: rgba(145, 200, 255, 0.85);
+}
+
+/* 项目面板标题小标签：模板名 = 低调灰玻璃小圆角；当前生效 = 绿色胶囊 + 发光状态圆点，强区分 */
+.glass-tag.ant-tag {
+  margin-inline-end: 0;
+  flex-shrink: 0;
+  border-radius: 6px;
+  padding: 0 8px;
+  line-height: 20px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(8px) saturate(160%);
+  -webkit-backdrop-filter: blur(8px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.65);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  transition:
+    background 0.25s ease,
+    border-color 0.25s ease;
+}
+.glass-tag.ant-tag:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.28);
+  color: rgba(255, 255, 255, 0.85);
+}
+.glass-tag-green.ant-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 0 10px;
+  font-weight: 600;
+  background: rgba(82, 196, 26, 0.2);
+  border-color: rgba(133, 217, 82, 0.55);
+  color: #a9d97a;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 0 10px rgba(114, 209, 60, 0.22);
+}
+.glass-tag-green.ant-tag::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #95de64;
+  box-shadow: 0 0 6px rgba(149, 222, 100, 0.9);
+}
+.glass-tag-green.ant-tag:hover {
+  background: rgba(82, 196, 26, 0.32);
+  border-color: rgba(149, 222, 100, 0.75);
+  color: #bfe88f;
+}
+
+/* 仓库路径栏：玻璃胶囊，点击复制完整路径；hover 提亮文字 */
+.path-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background 0.25s ease,
+    border-color 0.25s ease;
+}
+.path-chip:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+.path-chip:active {
+  transform: scale(0.99);
+}
+.path-chip-text {
+  min-width: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.25s ease;
+}
+.path-chip:hover .path-chip-text {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* 小型玻璃图标按钮（路径栏里的 编辑器 / 后台 入口） */
+.icon-chip.ant-btn {
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(8px) saturate(160%);
+  -webkit-backdrop-filter: blur(8px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  transition:
+    background 0.25s ease,
+    border-color 0.25s ease;
+}
+.icon-chip.ant-btn:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.13);
+  border-color: rgba(255, 255, 255, 0.28);
+}
