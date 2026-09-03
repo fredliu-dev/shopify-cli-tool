@@ -25,12 +25,16 @@ import {
   Typography,
 } from 'antd'
 import {
+  AppstoreOutlined,
   ArrowRightOutlined,
   CodeOutlined,
+  CopyOutlined,
   DashboardOutlined,
   DeleteOutlined,
   DeploymentUnitOutlined,
   ExclamationCircleOutlined,
+  CrownFilled,
+  EditOutlined,
   EyeOutlined,
   FolderOpenOutlined,
   FormatPainterOutlined,
@@ -39,6 +43,9 @@ import {
   ProjectOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
+  RocketOutlined,
+  SearchOutlined,
+  ShopOutlined,
 } from '@ant-design/icons'
 import { COMMIT_TYPES, formatCommitTitle } from '@shopify-cli-tool/core/commit'
 import WorkItemSelect from '../components/WorkItemSelect.jsx'
@@ -310,6 +317,18 @@ function SectionLabel({ color = '#1677ff', children }) {
   )
 }
 
+// 主题列表头像渐变色板：按主题 id 末位稳定取色，列表里每个主题都有辨识度
+const AVATAR_GRADIENTS = [
+  'linear-gradient(135deg,#1677ff,#0958d9)',
+  'linear-gradient(135deg,#13c2c2,#08979c)',
+  'linear-gradient(135deg,#722ed1,#531dab)',
+  'linear-gradient(135deg,#eb2f96,#c41d7f)',
+  'linear-gradient(135deg,#52c41a,#389e0d)',
+  'linear-gradient(135deg,#fa8c16,#d46b08)',
+  'linear-gradient(135deg,#2f54eb,#1d39c4)',
+  'linear-gradient(135deg,#faad14,#d48806)',
+]
+
 // 毛玻璃卡片（iOS 风格）：半透明背景 + 背景模糊 + 高光描边；
 // 需配合 App.jsx Content 的彩色光晕背景，blur 才能透出色彩。
 const GLASS = {
@@ -329,123 +348,49 @@ const HOVER_GLASS = {
     'inset 0 1px 0 rgba(255,255,255,0.22), inset 0 -1px 0 rgba(255,255,255,0.05), 0 14px 34px rgba(0,0,0,0.42)',
 }
 
-/* ---------------- 初始化 Modal（shop init 可视化，针对某仓库目录） ---------------- */
-function InitRepoModal({ open, repo, onClose, onDone }) {
-  const { message } = App.useApp()
-  const [templates, setTemplates] = useState([])
-  const [form] = Form.useForm()
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    if (!open) return
-    // 拉模板列表；同时按仓库远程地址反查模板，命中则直接回填，省去用户手选
-    window.api.config.templates().then(setTemplates)
-    if (repo?.remoteUrl) {
-      window.api.repos.resolveTemplateByRemote(repo.remoteUrl).then((res) => {
-        if (res.ok && res.data) form.setFieldValue('template', res.data)
-      })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
-
-  const submit = async (vals) => {
-    setLoading(true)
-    // 工单选择器的值：title 写 project_desc，url 写 dev 环境 _tapd（本地保存时回显并带入 projects.json）
-    const item = vals.workItem || null
-    const res = repo.hasToml
-      ? await window.api.config.initMerge({ dir: repo.path, templateName: vals.template })
-      : await window.api.config.initCreate({
-          dir: repo.path,
-          templateName: vals.template,
-          theme: vals.theme,
-          port: vals.port,
-          previewKey: vals.previewKey,
-          previewPath: vals.previewPath,
-          projectDesc: item?.title || '',
-          tapd: item?.url || '',
-        })
-    setLoading(false)
-    if (res.ok) {
-      message.success(repo.hasToml ? '已合并 dev 环境到现有配置' : '已创建 shopify.theme.toml')
-      onDone?.()
-    } else {
-      message.error(res.error || '初始化失败')
-    }
-  }
-
-  return (
-    <Modal title={`初始化配置 - ${repo?.name ?? ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose>
-      <Form form={form} layout="vertical" onFinish={submit} initialValues={{ port: '9292' }}>
-        <Form.Item name="template" label="模板" rules={[{ required: true, message: '请选择模板' }]}>
-          <Select options={templates.map((t) => ({ value: t.name, label: t.name }))} placeholder="选择模板" />
-        </Form.Item>
-        {!repo?.hasToml && (
-          <>
-            <Form.Item name="theme" label="theme">
-              <Input placeholder="主题 id（可留空，本地保存时再复制 live）" />
-            </Form.Item>
-            <Form.Item name="port" label="port" rules={[{ pattern: /^\d+$/, message: '需为数字' }]}>
-              <Input />
-            </Form.Item>
-            <Form.Item name="previewKey" label="preview_key（新页面需填）">
-              <Input />
-            </Form.Item>
-            <Form.Item
-              name="previewPath"
-              label="网页路径（选填）"
-              extra={
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  如 /pages/back-to-school-sale；无 preview_key 时拼到预览/开发链接，编辑器链接挂 previewPath 参数
-                </Text>
-              }
-            >
-              <Input placeholder="/pages/xxx" />
-            </Form.Item>
-            <Form.Item name="workItem" label="工单（选填，标题作为 project_desc）">
-              <WorkItemSelect />
-            </Form.Item>
-          </>
-        )}
-        <Button type="primary" htmlType="submit" loading={loading}>
-          {repo?.hasToml ? '合并 dev 环境' : '创建配置'}
-        </Button>
-      </Form>
-    </Modal>
-  )
-}
-
-/* ---------------- 本地保存 Modal（shop add 可视化，含复制线上 live 主题） ---------------- */
+/* ---------------- 初始化并保存 / 本地保存 Modal（二合一） ----------------
+ * hasToml（已有 dev 环境）：仅本地保存（shop add 可视化，含复制线上 live 主题）；
+ * 无 toml：初始化 + 本地保存一步完成 —— 先 initCreate 写 shopify.theme.toml，
+ * 再回读仓库状态取 dev 环境并 upsert 到 projects.json，免去「初始化→再本地保存」两步。
+ */
 function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts }) {
   const { message, modal } = App.useApp()
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [copyOpen, setCopyOpen] = useState(false)
+  // 无 toml 时按仓库远程地址反查模板，命中则直接回填，省去用户手选
+  const [tplOptions, setTplOptions] = useState([])
   // store 反查模板：undefined=加载中，null=反查不到需手选，字符串=已确定（直接用反查值）
   const [resolvedTpl, setResolvedTpl] = useState(undefined)
-  const [tplOptions, setTplOptions] = useState([])
   const [copyForm] = Form.useForm()
   const [copyLoading, setCopyLoading] = useState(false)
 
+  const isNew = !repo?.hasToml // 无配置文件：走「初始化并保存」
   const dev = repo?.devEnv || {}
 
   useEffect(() => {
-    if (open) {
-      // dev 来自仓库 shopify.theme.toml 的 [environments.dev]（getRepoStatus 实时读取），
-      // 配置里已有的值一律回填，避免用户重复输入；theme 留空时仍可点「复制线上 live 主题」覆盖。
-      // project_desc 回显初始化时关联的工单链接（toml _tapd），提交时 splitDesc 会再拆回 _tapd
-      form.setFieldsValue({
-        port: dev.port != null ? String(dev.port) : '',
-        theme: dev.theme != null ? String(dev.theme) : '',
-        preview_key: dev.preview_key ?? '',
-        project_desc: [dev.project_desc, dev._tapd].filter(Boolean).join('\n'),
-      })
+    if (!open) return
+    if (isNew) {
+      // 初始化场景：拉模板列表 + 按远程地址反查模板回填
+      window.api.repos.templates().then((r) => setTplOptions(r.ok ? r.data : []))
+      if (repo?.remoteUrl) {
+        window.api.repos.resolveTemplateByRemote(repo.remoteUrl).then((res) => {
+          if (res.ok && res.data) form.setFieldValue('template', res.data)
+        })
+      }
+      return
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, repo])
-
-  // 打开时按 store 反查模板：查到则自动用（不显示选择），查不到则拉模板列表让用户选
-  useEffect(() => {
-    if (!open || !dev.store) return
+    // dev 来自仓库 shopify.theme.toml 的 [environments.dev]（getRepoStatus 实时读取），
+    // 配置里已有的值一律回填，避免用户重复输入；theme 留空时仍可点「复制线上 live 主题」覆盖。
+    // project_desc 回显初始化时关联的工单链接（toml _tapd），提交时 splitDesc 会再拆回 _tapd
+    form.setFieldsValue({
+      port: dev.port != null ? String(dev.port) : '',
+      theme: dev.theme != null ? String(dev.theme) : '',
+      preview_key: dev.preview_key ?? '',
+      project_desc: [dev.project_desc, dev._tapd].filter(Boolean).join('\n'),
+    })
+    // 打开时按 store 反查模板：查到则自动用（不显示选择），查不到则拉模板列表让用户选
+    if (!dev.store) return
     setResolvedTpl(undefined)
     Promise.all([window.api.repos.resolveTemplate(dev.store), window.api.repos.templates()]).then(
       ([r1, r2]) => {
@@ -454,47 +399,63 @@ function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts })
       },
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, dev.store])
+  }, [open, repo])
 
   const doCopyLive = async (vals) => {
     setCopyLoading(true)
-    const res = await window.api.repos.copyLive({
-      dir: repo.path,
-      envName: 'dev',
-      envConfig: dev,
-      activity: vals.activity,
-      owner: vals.owner,
-    })
-    setCopyLoading(false)
-    if (res.ok) {
-      form.setFieldValue('theme', res.data.id)
-      message.success(`已复制主题：${res.data.name}（${res.data.id}）`)
-      setCopyOpen(false)
-      copyForm.resetFields()
-    } else {
-      modal.error({
-        title: '复制主题失败',
-        content: (
-          <div style={{ maxHeight: 280, overflow: 'auto' }}>
-            <div style={{ fontWeight: 500 }}>{res.error}</div>
-            {res.stderr && (
-              <pre
-                style={{
-                  marginTop: 8,
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                  fontSize: 12,
-                  background: 'rgba(255,255,255,0.05)',
-                  padding: 8,
-                  borderRadius: 4,
-                }}
-              >
-                {res.stderr.trim()}
-              </pre>
-            )}
-          </div>
-        ),
+    try {
+      // 初始化场景：复制 live 依赖 dev 环境（shopify -e dev 需要 toml 里有 store），
+      // 先用当前表单值落一份 toml；模板/port 不合法时关掉子弹窗，让错误显示在主表单上
+      let env = dev
+      if (isNew) {
+        try {
+          await form.validateFields(['template', 'port'])
+        } catch {
+          setCopyOpen(false)
+          return
+        }
+        env = await ensureInit(form.getFieldsValue())
+        if (!env) return
+      }
+      const res = await window.api.repos.copyLive({
+        dir: repo.path,
+        envName: 'dev',
+        envConfig: env,
+        activity: vals.activity,
+        owner: vals.owner,
       })
+      if (res.ok) {
+        form.setFieldValue('theme', res.data.id)
+        message.success(`已复制主题：${res.data.name}（${res.data.id}）`)
+        setCopyOpen(false)
+        copyForm.resetFields()
+      } else {
+        modal.error({
+          title: '复制主题失败',
+          content: (
+            <div style={{ maxHeight: 280, overflow: 'auto' }}>
+              <div style={{ fontWeight: 500 }}>{res.error}</div>
+              {res.stderr && (
+                <pre
+                  style={{
+                    marginTop: 8,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    fontSize: 12,
+                    background: 'rgba(255,255,255,0.05)',
+                    padding: 8,
+                    borderRadius: 4,
+                  }}
+                >
+                  {res.stderr.trim()}
+                </pre>
+              )}
+            </div>
+          ),
+        })
+      }
+    } finally {
+      setCopyLoading(false)
     }
   }
 
@@ -505,6 +466,35 @@ function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts })
     const tapd = m ? m[0] : null
     const desc = (tapd ? String(raw).replace(tapd, '') : String(raw)).replace(/[【】]/g, '').trim()
     return { desc, tapd }
+  }
+
+  // 初始化场景的幂等落盘：用当前表单值跑一次 initCreate 写 shopify.theme.toml，回读并返回 dev 环境；
+  // 同一弹窗生命周期只跑一次（复制 live 与提交保存共用，先到先跑）。失败返回 null 并提示。
+  const [initDone, setInitDone] = useState(false)
+  const [devEnvOverride, setDevEnvOverride] = useState(null)
+  const ensureInit = async (vals) => {
+    if (!isNew) return dev
+    if (initDone) return devEnvOverride
+    const { desc, tapd } = splitDesc(vals.project_desc)
+    const initRes = await window.api.config.initCreate({
+      dir: repo.path,
+      templateName: vals.template,
+      theme: vals.theme,
+      port: vals.port,
+      previewKey: vals.preview_key,
+      previewPath: vals.preview_path,
+      projectDesc: desc,
+      tapd,
+    })
+    if (!initRes.ok) {
+      message.error(initRes.error || '初始化失败')
+      return null
+    }
+    const st = await window.api.repos.status(repo.path)
+    const env = st.ok ? st.data.devEnv : null
+    setInitDone(true)
+    setDevEnvOverride(env)
+    return env
   }
 
   // 与当前仓库（同 store）已有本地项目判重，口径与 core isSameProject 六要素一致：
@@ -532,14 +522,44 @@ function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts })
   const wPreviewKey = Form.useWatch('preview_key', form)
   const wDesc = Form.useWatch('project_desc', form)
   const dup = useMemo(() => {
-    if (!open || !repo) return null
+    if (!open || !repo || isNew) return null // 初始化场景尚无 store/domain，判重交由后端 upsert 兜底
     if (!String(wTheme ?? '').trim() || !String(wDesc ?? '').trim()) return null
     return findDup({ theme: wTheme, preview_key: wPreviewKey, project_desc: wDesc })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, repo, wTheme, wPreviewKey, wDesc, projects, dev.store, dev.domain, repo?.currentBranch])
+  }, [open, repo, isNew, wTheme, wPreviewKey, wDesc, projects, dev.store, dev.domain, repo?.currentBranch])
 
   const submit = async (vals) => {
     const { desc, tapd } = splitDesc(vals.project_desc)
+    // 无 toml：先确保 toml 已落盘（可能已在「复制 live 主题」时初始化过），再走 repos.save 落 projects.json
+    if (isNew) {
+      setLoading(true)
+      try {
+        const devEnv = await ensureInit(vals)
+        if (!devEnv) return
+        const res = await window.api.repos.save({
+          dir: repo.path,
+          envName: 'dev',
+          fields: {
+            domain: devEnv?.domain,
+            port: vals.port,
+            theme: vals.theme,
+            preview_key: vals.preview_key,
+            project_desc: desc,
+          },
+          templateName: vals.template,
+          tapd,
+        })
+        if (res.ok) {
+          message.success(res.data.created ? '已初始化并保存为本地项目' : '已初始化（项目与已有本地项目字段一致，未另存）')
+          onDone?.()
+        } else {
+          message.error(res.error || '初始化成功，但保存本地项目失败')
+        }
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
     const dup = findDup(vals)
     if (dup) {
       modal.warning({
@@ -581,18 +601,23 @@ function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts })
   }
 
   return (
-    <Modal title={`本地保存 - ${repo?.name ?? ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose>
-      <Form form={form} layout="vertical" onFinish={submit}>
-        <Form.Item label="store（项目身份）">
-          <Input value={dev.store || ''} disabled />
-        </Form.Item>
-        <Form.Item label="domain（取自配置，不可改）">
-          <Input value={dev.domain || ''} disabled />
-        </Form.Item>
-        {resolvedTpl === null && (
+    <Modal title={`${isNew ? '初始化并保存' : '本地保存'} - ${repo?.name ?? ''}`} open={open} onCancel={onClose} footer={null} destroyOnClose>
+      <Form form={form} layout="vertical" onFinish={submit} initialValues={isNew ? { port: '9292' } : undefined}>
+        {!isNew && (
+          <>
+            <Form.Item label="store（项目身份）">
+              <Input value={dev.store || ''} disabled />
+            </Form.Item>
+            <Form.Item label="domain（取自配置，不可改）">
+              <Input value={dev.domain || ''} disabled />
+            </Form.Item>
+          </>
+        )}
+        {/* 模板：初始化场景必选；本地保存场景仅 store 反查不到模板时才出现 */}
+        {(isNew || resolvedTpl === null) && (
           <Form.Item
             name="template"
-            label="模板（store 未匹配到模板，请选择）"
+            label={isNew ? '模板' : '模板（store 未匹配到模板，请选择）'}
             rules={[{ required: true, message: '请选择模板' }]}
           >
             <Select options={tplOptions.map((t) => ({ label: t, value: t }))} placeholder="选择模板" />
@@ -606,12 +631,26 @@ function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts })
             <Form.Item name="theme" noStyle rules={[{ required: true, message: '请输入 theme（或点右侧复制 live 主题）' }]}>
               <Input placeholder="主题 id" />
             </Form.Item>
+            {/* 初始化场景点击后先用当前表单值落 toml，再复制 live 并回填 theme */}
             <Button onClick={() => setCopyOpen(true)}>复制线上 live 主题</Button>
           </Space.Compact>
         </Form.Item>
         <Form.Item name="preview_key" label="preview_key">
           <Input />
         </Form.Item>
+        {isNew && (
+          <Form.Item
+            name="preview_path"
+            label="网页路径（选填）"
+            extra={
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                如 /pages/back-to-school-sale；无 preview_key 时拼到预览/开发链接，编辑器链接挂 previewPath 参数
+              </Text>
+            }
+          >
+            <Input placeholder="/pages/xxx" />
+          </Form.Item>
+        )}
         <Form.Item name="project_desc" label="project_desc（标题，可附工单链接）" rules={[{ required: true, message: '请输入 project_desc' }]}>
           {/* freeText 版工单选择器：手填任意标题，或下拉/粘贴工单自动回填「标题\n链接」，提交时 splitDesc 拆为 _tapd */}
           <WorkItemSelect
@@ -622,7 +661,7 @@ function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts })
         {/* 命中已有项目判重时禁用保存（antd 禁用按钮不触发鼠标事件，问号单独挂 Tooltip） */}
         <Space>
           <Button type="primary" htmlType="submit" loading={loading} disabled={!!dup}>
-            保存为本地项目
+            {isNew ? '初始化并保存' : '保存为本地项目'}
           </Button>
           {dup && (
             <Tooltip
@@ -637,7 +676,8 @@ function SaveRepoModal({ open, repo, projects = [], onClose, onDone, contacts })
       <Modal title="复制线上 live 主题" open={copyOpen} onCancel={() => setCopyOpen(false)} footer={null} destroyOnClose>
         <Form form={copyForm} layout="vertical" onFinish={doCopyLive}>
           <Form.Item name="activity" label="活动名称" rules={[{ required: true, message: '请输入活动名称' }]}>
-            <Input />
+            {/* titleOnly 工单选择器：手填活动名，或下拉/粘贴工单自动用工单标题填充（不带链接） */}
+            <WorkItemSelect titleOnly footerHint="手填活动名即可；选工单会自动用工单标题填充" />
           </Form.Item>
           <Form.Item name="owner" label="负责人" rules={[{ required: true, message: '请输入负责人' }]}>
             <AutoComplete
@@ -674,6 +714,310 @@ function ChangedJsonModal({ open, title, files, onClose }) {
             </div>
           ))}
         </div>
+      )}
+    </Modal>
+  )
+}
+
+/* ---------------- 主题列表 Modal（当前 store 全部线上主题） ----------------
+ * live 主题置顶并以金色高亮样式区分；每行支持复制 ID / 跳转编辑后台，
+ * 非 live 主题另有 发布（红色/警示二次确认）与 删除（不可恢复，live 不可删）。
+ */
+function ThemeListModal({ open, repo, onClose, onChanged }) {
+  const { message, modal } = App.useApp()
+  const [loading, setLoading] = useState(false)
+  const [themes, setThemes] = useState([])
+  const [busyId, setBusyId] = useState(null)
+  const [keyword, setKeyword] = useState('')
+
+  const dir = repo?.path
+  const store = repo?.devEnv?.store || ''
+
+  const load = useCallback(async () => {
+    if (!dir) return
+    setLoading(true)
+    const res = await window.api.repos.themeList({ dir })
+    setLoading(false)
+    if (res.ok) {
+      const list = res.data || []
+      // live 置顶，其余保持 CLI 返回顺序
+      setThemes([...list.filter((t) => t.role === 'live'), ...list.filter((t) => t.role !== 'live')])
+    } else {
+      message.error(res.error || '获取主题列表失败')
+      setThemes([])
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dir])
+
+  useEffect(() => {
+    if (open) {
+      load()
+    } else {
+      // 关闭即清空状态：弹窗常驻挂载，不清的话换一个商店打开会先闪现上一个商店的数据
+      setThemes([])
+      setKeyword('')
+      setBusyId(null)
+      setLoading(false)
+    }
+  }, [open, load])
+
+  // 链接：复制到剪贴板 + 用系统默认浏览器打开（与仓库卡片 openLink 同款）
+  const openLink = async (url, label) => {
+    if (!url) return
+    const res = await window.api.shell.copy(url)
+    await window.api.shell.openExternal(url)
+    if (res?.ok) message.success(`已复制${label}并在默认浏览器打开`)
+  }
+
+  const editorLinkOf = (id) => `https://admin.shopify.com/store/${store.split('.')[0]}/themes/${id}/editor`
+
+  const copyId = async (t) => {
+    const res = await window.api.shell.copy(String(t.id))
+    if (res?.ok) message.success(`已复制主题 ID：${t.id}`)
+    else message.error('复制失败')
+  }
+
+  // 确认弹窗里的主题信息卡：accent 为 'gold'（发布）/ 'red'（删除），只展示名称与 ID
+  const themeInfoBox = (t, accent, tagText) => {
+    const c = accent === 'red' ? '255,77,79' : '250,173,20'
+    return (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 8,
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid rgba(${c},0.45)`,
+          background: `rgba(${c},0.08)`,
+        }}
+      >
+        <Tag color={accent === 'red' ? 'volcano' : 'gold'} style={{ marginInlineEnd: 0, flexShrink: 0 }}>
+          {tagText}
+        </Tag>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 600, lineHeight: '22px', wordBreak: 'break-word' }}>{t.name}</div>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            #{t.id}
+          </Text>
+        </div>
+      </div>
+    )
+  }
+
+  // 发布为线上 live：影响访客所见，弹窗二次确认（只留目标主题 + 当前 live 两项核心信息）
+  const confirmPublish = (t) => {
+    const live = themes.find((x) => x.role === 'live')
+    modal.confirm({
+      title: '确认发布为线上主题？',
+      icon: <ExclamationCircleOutlined style={{ color: '#faad14' }} />,
+      okText: '确认发布',
+      cancelText: '取消',
+      content: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {themeInfoBox(t, 'gold', '发布目标')}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>
+            <ShopOutlined style={{ color: '#4096ff' }} />
+            <span>
+              目标店铺：<b style={{ color: 'rgba(255,255,255,0.95)' }}>{store}</b>
+            </span>
+          </div>
+          <Text type="secondary" style={{ fontSize: 12, lineHeight: '20px' }}>
+            {live ? (
+              <>
+                发布后对访客立即生效，替换当前 live「{live.name}」（#{live.id}）；原 live 主题不会被删除。
+              </>
+            ) : (
+              <>发布后对访客立即生效；当前店铺暂无 live 主题。</>
+            )}
+          </Text>
+        </div>
+      ),
+      onOk: async () => {
+        setBusyId(t.id)
+        const r = await window.api.repos.publishTheme({ dir, themeId: t.id })
+        setBusyId(null)
+        if (!r.ok) return message.error({ content: r.error, duration: 8 })
+        message.success(`已发布「${t.name}」为线上主题`)
+        load()
+        onChanged?.()
+      },
+    })
+  }
+
+  // 删除线上主题：不可恢复，红色二次确认；按 store+theme 连带清理引用该主题的本地项目
+  const confirmDelete = (t) => {
+    modal.confirm({
+      title: '确认删除线上主题？',
+      icon: <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />,
+      okText: '确认删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      content: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {themeInfoBox(t, 'red', '删除目标')}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>
+            <ShopOutlined style={{ color: '#4096ff' }} />
+            <span>
+              目标店铺：<b style={{ color: 'rgba(255,255,255,0.95)' }}>{store}</b>
+            </span>
+          </div>
+          <Text type="secondary" style={{ fontSize: 12, lineHeight: '20px' }}>
+            删除后不可恢复；引用该主题的本地项目会被一并清理。
+          </Text>
+        </div>
+      ),
+      onOk: async () => {
+        setBusyId(t.id)
+        const r = await window.api.repos.deleteTheme({ dir, themeId: t.id, store })
+        setBusyId(null)
+        if (!r.ok) return message.error({ content: r.error, duration: 8 })
+        let text = `已删除线上主题「${t.name}」`
+        if (r.deletedProjects > 0) text += `，并清理 ${r.deletedProjects} 条本地项目`
+        message.success(text)
+        if (r.localError) message.warning({ content: `本地项目清理失败：${r.localError}`, duration: 8 })
+        load()
+        onChanged?.()
+      },
+    })
+  }
+
+  // live 主卡 + 非 live 列表：live 不参与搜索，永远固定展示在滚动区外顶部
+  const liveTheme = themes.find((t) => t.role === 'live')
+  const q = keyword.trim().toLowerCase()
+  const rest = q
+    ? themes.filter((t) => t.role !== 'live' && String(t.name || '').toLowerCase().includes(q))
+    : themes.filter((t) => t.role !== 'live')
+  const matched = themes.filter((t) => t.role === 'live' || String(t.name || '').toLowerCase().includes(q))
+
+  const renderRow = (t) => {
+    const isLive = t.role === 'live'
+    // 头像渐变色：按 id 稳定取色，不同主题有辨识度又不刺眼
+    const avColors = AVATAR_GRADIENTS[Number(String(t.id).slice(-1)) % AVATAR_GRADIENTS.length]
+    return (
+      <div key={t.id} className={`tl-row${isLive ? ' tl-live' : ''}`}>
+        {/* live 用皇冠主卡；普通主题用渐变首字头像 */}
+        <div className="tl-avatar" style={{ background: isLive ? 'linear-gradient(135deg,#faad14,#d48806)' : avColors }}>
+          {isLive ? <CrownFilled style={{ color: '#fff', fontSize: 16 }} /> : (t.name || '?').replace(/^\[.*?\]\s*/, '').trim().charAt(0).toUpperCase()}
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontWeight: 600,
+              fontSize: isLive ? 15 : 14,
+              color: isLive ? '#faad14' : 'rgba(255,255,255,0.92)',
+            }}
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
+            {isLive && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                <span className="tl-dot" />
+                <span style={{ fontSize: 11, letterSpacing: 1, color: '#faad14', fontWeight: 700 }}>LIVE</span>
+              </span>
+            )}
+          </div>
+          <div className="tl-id">#{t.id}</div>
+        </div>
+        <div className="tl-actions" style={isLive ? { opacity: 1 } : undefined}>
+          <Tooltip title="复制主题 ID">
+            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyId(t)} />
+          </Tooltip>
+          <Tooltip title="打开编辑器后台">
+            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openLink(editorLinkOf(t.id), '编辑器链接')} />
+          </Tooltip>
+          {!isLive && (
+            <Tooltip title="发布为线上主题">
+              <Button type="text" size="small" icon={<RocketOutlined />} loading={busyId === t.id} onClick={() => confirmPublish(t)} />
+            </Tooltip>
+          )}
+          {!isLive && (
+            <Tooltip title="删除主题（不可恢复）">
+              <Button type="text" size="small" danger icon={<DeleteOutlined />} loading={busyId === t.id} onClick={() => confirmDelete(t)} />
+            </Tooltip>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <Modal
+      title={
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <AppstoreOutlined style={{ color: '#1677ff' }} />
+            主题列表
+          </span>
+          {/* 店铺身份直接钉在标题行：所有操作的目标 store 一眼可辨 */}
+          <Tag
+            color="blue"
+            icon={<ShopOutlined />}
+            style={{ marginInlineEnd: 0, fontSize: 12, fontWeight: 600, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'middle' }}
+          >
+            {store || '未识别到 store'}
+          </Tag>
+        </span>
+      }
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      destroyOnClose
+      width={560}
+    >
+      {/* hover 亮起 / live 呼吸灯等交互样式走 class，内联样式写不了伪类与动画 */}
+      <style>{`
+        .tl-row{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);margin-bottom:8px;transition:background .2s,border-color .2s;}
+        .tl-row:hover{background:rgba(255,255,255,0.085);border-color:rgba(255,255,255,0.16);}
+        .tl-live{padding:13px 14px;margin-bottom:10px;gap:14px;background:linear-gradient(135deg,rgba(250,173,20,0.16),rgba(250,173,20,0.05));border:1px solid rgba(250,173,20,0.45);box-shadow:inset 0 0 24px rgba(250,173,20,0.08),0 4px 16px rgba(0,0,0,0.28);}
+        .tl-live:hover{border-color:rgba(250,173,20,0.65);}
+        .tl-actions{display:flex;opacity:.4;transition:opacity .2s;}
+        .tl-row:hover .tl-actions{opacity:1;}
+        .tl-avatar{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:rgba(255,255,255,0.92);flex-shrink:0;letter-spacing:0;}
+        .tl-live .tl-avatar{width:46px;height:46px;border-radius:11px;font-size:19px;box-shadow:0 4px 14px rgba(250,173,20,0.35);}
+        .tl-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:rgba(255,255,255,0.35);}
+        .tl-live .tl-id{font-size:12px;color:rgba(255,255,255,0.45);}
+        .tl-dot{width:6px;height:6px;border-radius:50%;background:#faad14;box-shadow:0 0 8px #faad14;animation:tlPulse 1.8s ease-in-out infinite;}
+        @keyframes tlPulse{0%,100%{opacity:1}50%{opacity:.3}}
+      `}</style>
+
+      {/* 名称筛选（live 不参与）+ 数量 + 刷新 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <Input
+          size="small"
+          allowClear
+          prefix={<SearchOutlined style={{ color: 'rgba(255,255,255,0.35)' }} />}
+          placeholder="按主题名称筛选（线上主题除外）"
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          style={{ flex: 1 }}
+        />
+        <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
+          {keyword.trim() ? `匹配 ${matched.length} 个` : `共 ${themes.length} 个主题`}
+        </Text>
+        <Button size="small" type="text" icon={<ReloadOutlined />} onClick={load} loading={loading} />
+      </div>
+
+      {loading && themes.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '32px 0' }}>
+          <Spin />
+        </div>
+      ) : themes.length === 0 ? (
+        <Empty description={loading ? '加载中…' : '暂无主题'} />
+      ) : (
+        <>
+          {/* live 固定在滚动区外的顶部且不参与搜索：任何时刻都可见当前线上主题 */}
+          {liveTheme && renderRow(liveTheme)}
+          {rest.length === 0 ? (
+            keyword.trim() ? (
+              <Empty description="没有匹配的主题" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : null
+          ) : (
+            <div style={{ maxHeight: 400, overflowY: 'auto', paddingRight: 2 }}>{rest.map(renderRow)}</div>
+          )}
+        </>
       )}
     </Modal>
   )
@@ -963,7 +1307,7 @@ function ManageTemplatesModal({ open, onClose, onChange }) {
   const [editTarget, setEditTarget] = useState(null) // { name }
   const [createOpen, setCreateOpen] = useState(false)
 
-  // config:templates 返回原始数组（非 { ok, data }，与 InitRepoModal 用法一致）
+  // config:templates 返回原始数组（非 { ok, data }，与 SaveRepoModal 用法一致）
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
@@ -2767,10 +3111,11 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
   }
 
   // 本地保存不再因 matched 禁用：已保存过的仓库也可打开表单改字段另存为新项目
-  // （与现有项目完全一致时由 SaveRepoModal 提交判重拦截）。仅无 dev 环境时禁用（无处可存）。
+  // （与现有项目完全一致时由 SaveRepoModal 提交判重拦截）。
+  // 无 toml 时同一按钮变「初始化并保存」：弹窗内 initCreate + 落 projects.json 两步合一
   const saveBtn = (
-    <Button size="small" type="primary" disabled={!repo.devEnv} onClick={() => onAction('save', repo)}>
-      本地保存
+    <Button size="small" type="primary" onClick={() => onAction('save', repo)}>
+      {repo.hasToml ? '本地保存' : '初始化并保存'}
     </Button>
   )
 
@@ -3090,38 +3435,28 @@ function RepoCard({ repo, projects, onAction, onProjectAction, branchProjectCoun
           )}
         </div>
 
-        {/* 配置操作 */}
+        {/* Git 流程：开发→拉分支 / 开发完→提测 / 上线前→合并信息 */}
         <div style={{ marginBottom: 14 }}>
+          <SectionLabel color="#52c41a">Git 流程</SectionLabel>
+          <GitFlowSteps repo={repo} project={repo.matched} projects={projects} onAction={onAction} />
+        </div>
+
+        {/* 配置操作 */}
+        <div>
           <SectionLabel color="#1677ff">配置操作</SectionLabel>
           <Space wrap size={[6, 6]}>
-            {!repo.hasToml ? (
-              <Button size="small" type="primary" onClick={() => onAction('init', repo)}>
-                初始化
-              </Button>
-            ) : (
-              <>
-                {saveBtn}
-                <Tooltip title="已有配置文件，无需初始化">
-                  <span>
-                    <Button size="small" disabled>
-                      初始化
-                    </Button>
-                  </span>
-                </Tooltip>
-              </>
-            )}
+            {saveBtn}
             <Tooltip title="在新窗口打开文件引用关系图（支持文件名模糊搜索，结果缓存）">
               <Button size="small" icon={<DeploymentUnitOutlined />} onClick={openDepGraph}>
                 引用图
               </Button>
             </Tooltip>
+            <Tooltip title={repo.hasToml ? '查看当前店铺全部主题（live 优先；复制 ID / 编辑器 / 发布 / 删除）' : '先初始化生成配置后才能查看主题列表'}>
+              <Button size="small" icon={<AppstoreOutlined />} disabled={!repo.hasToml} onClick={() => onAction('themeList', repo)}>
+                主题列表
+              </Button>
+            </Tooltip>
           </Space>
-        </div>
-
-        {/* Git 流程：开发→拉分支 / 开发完→提测 / 上线前→合并信息 */}
-        <div>
-          <SectionLabel color="#52c41a">Git 流程</SectionLabel>
-          <GitFlowSteps repo={repo} project={repo.matched} projects={projects} onAction={onAction} />
         </div>
 
         {/* 关联的本地项目：同 store 的多条都内嵌展示，保持原顺序不置顶 */}
@@ -3695,7 +4030,8 @@ export default function Repos({ registerMenu }) {
   const [mergeInfoFor, setMergeInfoFor] = useState(null) // 第③步「获取合并提交信息」目标 repo
 
   const [jsonModal, setJsonModal] = useState(null) // { title, files }
-  const [editRepo, setEditRepo] = useState(null) // { mode:'init'|'save', repo }
+  const [themeListFor, setThemeListFor] = useState(null) // 主题列表弹窗的目标 repo
+  const [editRepo, setEditRepo] = useState(null) // { mode:'save', repo }（无 toml 时弹窗内初始化+保存二合一）
   const [cloneable, setCloneable] = useState([]) // 模板 _github 项目 + 是否已存在（供「创建项目」查重）
   const [createProjectOpen, setCreateProjectOpen] = useState(false)
   const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false)
@@ -3783,6 +4119,17 @@ export default function Repos({ registerMenu }) {
     return () => off?.()
   }, [refreshCloneable, repoOrder])
 
+  // 分支变化检测：外部（终端/IDE）切分支后主进程自动把该分支对应本地项目配置写入 toml
+  // （仓库状态经 repos:repoUpdated 已刷新，这里只按同步结果提示；复用手动 checkout 的文案规则）
+  useEffect(() => {
+    const off = window.api.repos.onBranchSynced(({ branch, sync }) => {
+      const m = syncMessage(sync, `已检测到分支切换到 ${branch}`)
+      if (m) message[m.type](m.text)
+      else message.info(`已检测到分支切换到 ${branch}`)
+    })
+    return () => off?.()
+  }, [message])
+
   const pickAndScan = async () => {
     const res = await window.api.dialog.pickDir()
     if (!res.ok) return
@@ -3844,8 +4191,8 @@ export default function Repos({ registerMenu }) {
 
   // 仓库卡片动作分发
   const repoAction = (type, payload) => {
-    if (type === 'init') setEditRepo({ mode: 'init', repo: payload })
-    else if (type === 'save') setEditRepo({ mode: 'save', repo: payload })
+    if (type === 'save') setEditRepo({ mode: 'save', repo: payload })
+    else if (type === 'themeList') setThemeListFor(payload)
     else if (type === 'json') setJsonModal(payload)
     else if (type === 'checkout') checkoutBranch(payload.repo.path, payload.branch)
     else if (type === 'branch') setGitModal({ mode: 'branch', repo: payload })
@@ -4120,20 +4467,8 @@ export default function Repos({ registerMenu }) {
         </Masonry>
       )}
 
-      {/* 初始化 / 本地保存 弹窗 */}
-      {editRepo?.mode === 'init' && (
-        <InitRepoModal
-          open
-          repo={editRepo.repo}
-          onClose={() => setEditRepo(null)}
-          onDone={() => {
-            const path = editRepo.repo.path
-            setEditRepo(null)
-            refreshRepo(path)
-          }}
-        />
-      )}
-      {editRepo?.mode === 'save' && (
+      {/* 初始化并保存 / 本地保存 弹窗（无 toml 时二合一） */}
+      {editRepo && (
         <SaveRepoModal
           open
           repo={editRepo.repo}
@@ -4151,6 +4486,14 @@ export default function Repos({ registerMenu }) {
 
       {/* 查看 JSON 改动 */}
       <ChangedJsonModal open={!!jsonModal} title={jsonModal?.title} files={jsonModal?.files || []} onClose={() => setJsonModal(null)} />
+
+      {/* 主题列表（当前 store 全部主题，live 置顶） */}
+      <ThemeListModal
+        open={!!themeListFor}
+        repo={themeListFor}
+        onClose={() => setThemeListFor(null)}
+        onChanged={() => themeListFor && refreshRepo(themeListFor.path)}
+      />
 
       {/* 设置默认编辑器 */}
       <SettingsModal

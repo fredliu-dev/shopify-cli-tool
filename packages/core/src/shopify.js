@@ -99,6 +99,35 @@ export async function getThemeInfo({ cwd, envName, themeId }) {
 }
 
 /**
+ * 列出该环境对应 store 的全部主题（theme list -j，headless）。
+ * 主题列表弹窗展示用：live 优先由前端排序，这里保持 CLI 返回原顺序。
+ * 前置：该 store 已 `shopify login`。
+ * @param {{ cwd: string, envName: string }} opts
+ * @returns {Promise<{ ok: true, themes: Array<{ id, name, role }> } | { ok: false, code: number, stderr: string }>}
+ */
+export async function listThemes({ cwd, envName }) {
+    const res = await captureShopify(['theme', 'list', '-j', '-e', envName], { cwd })
+    if (res.code !== 0) {
+        return { ok: false, code: res.code, stderr: res.stderr }
+    }
+    const list = parseJson(res.stdout)
+    return { ok: true, themes: Array.isArray(list) ? list : [] }
+}
+
+/**
+ * 发布指定主题为线上 live 主题（headless）：`theme publish --theme <id> --force`。
+ * --force 跳过 CLI 的交互确认；live 主题不可重复发布（CLI 会报错，调用方宜先按 role 拦截）。
+ * 注意：theme publish 不支持 -j（JSON 输出）标志，传了会报 Nonexistent flag 退出码 2，
+ * 因此只靠退出码判断成败。前置：该 store 已 `shopify login`。
+ * @param {{ cwd: string, envName: string, themeId: string|number }} opts
+ * @returns {Promise<{ ok: boolean, code: number, stderr: string }>}
+ */
+export async function publishTheme({ cwd, envName, themeId }) {
+    const res = await captureShopify(['theme', 'publish', '--theme', String(themeId), '--force', '-e', envName], { cwd })
+    return { ok: res.code === 0, code: res.code, stderr: res.stderr }
+}
+
+/**
  * 删除线上主题（headless）：`theme delete --theme <id> --force`。
  * --force 跳过 CLI 的交互确认；live 主题不可删（CLI 会报错，调用方宜先用 getThemeInfo 按 role 拦截）。
  * 前置：该 store 已 `shopify login`。

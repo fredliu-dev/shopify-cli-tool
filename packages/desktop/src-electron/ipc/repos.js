@@ -79,6 +79,52 @@ function watchRepo(repoPath, core) {
   if (ws.length) watchers.set(repoPath, ws)
 }
 
+/* -------- 分支变化检测：监听 .git/HEAD，外部（终端/IDE）切分支后自动套用该分支的项目配置 -------- */
+const lastBranchByRepo = new Map() // repoPath -> 上次已知分支（首次记录基线，之后比对判断变化）
+const branchDebounce = new Map() // repoPath -> timer（与 toml 刷新的 debounce 分开，避免互相覆盖）
+
+/**
+ * 检测单个仓库的分支变化：与上次已知分支不同时，按新分支同步 shopify.theme.toml
+ * （有对应本地项目 → 套用最近一条项目配置；无项目 → 删残留 toml），
+ * 推送刷新后的仓库状态 + 分支同步结果（repos:branchSynced，渲染层据此提示）。
+ * 与 in-app checkout 同一套 syncConfigForBranch；app 内切换操作会先更新基线，不会重复触发。
+ */
+async function checkBranchChange(repoPath, core) {
+  try {
+    const info = await core.getRepoInfo(repoPath)
+    const prev = lastBranchByRepo.get(repoPath)
+    lastBranchByRepo.set(repoPath, info.currentBranch)
+    if (prev === undefined || info.currentBranch === prev) return
+    const sync = await core.syncConfigForBranch(repoPath, info.currentBranch)
+    await refreshAndSend(repoPath, core)
+    send('repos:branchSynced', { path: repoPath, branch: info.currentBranch, sync })
+  } catch {
+    /* 仓库被删等：忽略 */
+  }
+}
+
+/** 为单个仓库建立 .git/HEAD 监听：checkout/switch 会改写 HEAD，借其感知外部分支切换。 */
+function watchGitHead(repoPath, core) {
+  const gitDir = join(repoPath, '.git')
+  if (!existsSync(join(gitDir, 'HEAD'))) return
+  try {
+    // 监听 .git 目录（非 HEAD 文件本身）：git 以「写临时文件 + rename」更新 HEAD，
+    // 直接 watch 文件在 rename 后可能失效；watch 目录按 filename 过滤更稳
+    const w = watch(gitDir, (_evt, filename) => {
+      if (filename !== 'HEAD') return
+      if (branchDebounce.has(repoPath)) clearTimeout(branchDebounce.get(repoPath))
+      branchDebounce.set(
+        repoPath,
+        setTimeout(() => {
+          branchDebounce.delete(repoPath)
+          checkBranchChange(repoPath, core)
+        }, 500),
+      )
+    })
+    watchers.set(repoPath, [...(watchers.get(repoPath) || []), w])
+  } catch {}
+}
+
 /* -------- 工作区目录监听：子目录（仓库）新增/删除后重扫并同步 watchers -------- */
 const workspaceWatcher = { watcher: null, dir: null, timer: null }
 
@@ -116,7 +162,12 @@ async function rescanWorkspace(dir, core) {
     }
     // 新出现的仓库：建立内部监听
     data.forEach((r) => {
-      if (!watchers.has(r.path)) watchRepo(r.path, core)
+      if (!watchers.has(r.path)) {
+        watchRepo(r.path, core)
+        watchGitHead(r.path, core)
+      }
+      // 记录/刷新分支基线：避免重扫把上次已知分支覆盖成旧值导致误判
+      lastBranchByRepo.set(r.path, r.currentBranch)
     })
     send('repos:reposChanged', { data })
   } catch {
@@ -159,8 +210,12 @@ export function registerReposIpc() {
       const data = repos.map((r) => ({ ...r, ...core.getRepoStatus(r.path, r.currentBranch, { remote: r.remoteUrl }) }))
       // 全量重扫：先关闭所有旧监听（含上一个工作区残留），再按新结果重建
       closeAllWatchers()
-      // 为每个仓库建立文件监听（配置/templates 变动后实时刷新）
-      data.forEach((r) => watchRepo(r.path, core))
+      // 为每个仓库建立文件监听（配置/templates 变动后实时刷新）+ .git/HEAD 监听（外部分支切换检测）
+      data.forEach((r) => {
+        watchRepo(r.path, core)
+        watchGitHead(r.path, core)
+        lastBranchByRepo.set(r.path, r.currentBranch)
+      })
       // 监听工作区目录本身：子目录（仓库）新增/删除后实时重扫
       watchWorkspace(dir, core)
       return { ok: true, data }
@@ -293,6 +348,30 @@ export function registerReposIpc() {
     }
   })
 
+  // 主题列表（theme list -j）：主题列表弹窗展示当前 store 全部主题（live 优先由前端排序）
+  ipcMain.handle('repos:themeList', async (_evt, { dir, envName }) => {
+    const { listThemes } = await load()
+    try {
+      const res = await listThemes({ cwd: dir, envName: envName || 'dev' })
+      if (!res.ok) return { ok: false, error: `获取主题列表失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
+      return { ok: true, data: res.themes }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 发布主题为线上 live（theme publish --force 跳过交互确认；live 不可发布由前端按 role 拦截）
+  ipcMain.handle('repos:publishTheme', async (_evt, { dir, themeId }) => {
+    const { publishTheme } = await load()
+    try {
+      const res = await publishTheme({ cwd: dir, envName: 'dev', themeId })
+      if (!res.ok) return { ok: false, error: `发布主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
   // 查询项目 theme id 对应的线上主题信息（theme list -j）：删除主题前二次确认弹窗展示名称/角色用；
   // data=null 表示该主题在线上已不存在
   ipcMain.handle('repos:themeInfo', async (_evt, { dir, themeId }) => {
@@ -402,6 +481,7 @@ export function registerReposIpc() {
     try {
       const res = await checkoutBranch(dir, branch)
       if (!res.ok) return { ok: false, error: res.error }
+      lastBranchByRepo.set(dir, branch) // 刷新分支基线：HEAD 监听不必再对本次 app 内切换重复同步
       const sync = await syncConfigForBranch(dir, branch)
       return { ok: true, data: { sync } }
     } catch (err) {
@@ -420,6 +500,7 @@ export function registerReposIpc() {
       const res = await createBranch(dir, { base, name, fetch: true, push, switch: doSwitch })
       if (!res.ok) return { ok: false, error: res.error }
       // 仅在切到新分支时才同步 toml；不切换时仍停留在原分支，配置保持原样
+      if (doSwitch !== false) lastBranchByRepo.set(dir, name) // 刷新基线，避免 HEAD 监听重复同步
       const sync = doSwitch === false ? undefined : await syncConfigForBranch(dir, name)
       return { ok: true, data: { sync } }
     } catch (err) {
@@ -434,7 +515,10 @@ export function registerReposIpc() {
     try {
       const res = await deleteBranch(dir, { branch, deleteRemote: true })
       if (!res.ok) return res
-      if (res.switchedTo) await syncConfigForBranch(dir, res.switchedTo)
+      if (res.switchedTo) {
+        lastBranchByRepo.set(dir, res.switchedTo) // 刷新基线，避免 HEAD 监听重复同步
+        await syncConfigForBranch(dir, res.switchedTo)
+      }
       return { ok: true, data: { remoteDeleted: res.remoteDeleted, switchedTo: res.switchedTo || null } }
     } catch (err) {
       return { ok: false, error: err.message }

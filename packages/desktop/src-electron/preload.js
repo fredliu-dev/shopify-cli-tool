@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld('api', {
     save: (opts) => ipcRenderer.invoke('repos:save', opts),
     copyLive: (opts) => ipcRenderer.invoke('repos:copyLive', opts),
     themeInfo: (opts) => ipcRenderer.invoke('repos:themeInfo', opts),
+    themeList: (opts) => ipcRenderer.invoke('repos:themeList', opts),
+    publishTheme: (opts) => ipcRenderer.invoke('repos:publishTheme', opts),
     deleteTheme: (opts) => ipcRenderer.invoke('repos:deleteTheme', opts),
     switchConfig: (opts) => ipcRenderer.invoke('repos:switchConfig', opts),
     editors: () => ipcRenderer.invoke('repos:editors'),
@@ -76,6 +78,12 @@ contextBridge.exposeInMainWorld('api', {
       const listener = (_e, p) => cb(p)
       ipcRenderer.on('repos:reposChanged', listener)
       return () => ipcRenderer.removeListener('repos:reposChanged', listener)
+    },
+    // 检测到外部（终端/IDE）切分支后，主进程按新分支自动同步 toml 的结果
+    onBranchSynced: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('repos:branchSynced', listener)
+      return () => ipcRenderer.removeListener('repos:branchSynced', listener)
     },
   },
   settings: {

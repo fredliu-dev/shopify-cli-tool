@@ -71,8 +71,13 @@ const looksLikeRef = (s) => /^https?:\/\/\S+$/i.test(s) || /^\d{6,}$/.test(s)
  * freeText：值改为纯字符串且受控（配合 Form.Item 的 value/onChange）——手填任意文本合法，
  * 选中/解析工单后回填「标题\n链接」两行文本（本地保存弹窗的 project_desc 用：
  * 保存时 splitDesc 自动把链接拆为 _tapd）。此模式下未配置工单系统仍可手填，只是无下拉候选。
+ *
+ * titleOnly：在 freeText 行为基础上（纯字符串值 + 可手填），选中/解析工单后只回填工单标题、
+ * 不附链接 —— 供「活动名称」这类只要标题的字段（复制线上主题弹窗）复用。
  */
-export default function WorkItemSelect({ value, onChange, initialUrl = '', footerHint, freeText = false }) {
+export default function WorkItemSelect({ value, onChange, initialUrl = '', footerHint, freeText = false, titleOnly = false }) {
+  // titleOnly 隐含自由文本能力：值同样是纯字符串、未配置工单系统也可手填
+  const stringMode = freeText || titleOnly
   const [text, setText] = useState('')
   const [items, setItems] = useState([])
   const [phase, setPhase] = useState('loading') // loading | ready | unconfigured | error
@@ -165,16 +170,16 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
     setText(raw)
     const trimmed = raw.trim()
     if (!trimmed) {
-      onChange?.(freeText ? '' : null)
+      onChange?.(stringMode ? '' : null)
       setHint({ level: 'secondary', text: '' })
       return
     }
     // 命中下拉候选（按显示文本 / 链接 / ID 完全匹配）
     const hit = entries.find(({ it, display }) => display === trimmed || it.url === trimmed || String(it.id) === trimmed)
     if (hit) {
-      if (freeText) {
-        // freeText：按保存逻辑拼「标题\n链接」回填，保存时 splitDesc 把链接拆为 _tapd
-        const filled = `${hit.it.title}\n${hit.it.url}`
+      if (stringMode) {
+        // freeText：拼「标题\n链接」回填（保存时 splitDesc 拆出 _tapd）；titleOnly：只要标题
+        const filled = titleOnly ? hit.it.title : `${hit.it.title}\n${hit.it.url}`
         setText(filled)
         onChange?.(filled)
       } else {
@@ -193,8 +198,8 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
           workspaceId: cfgRes.ok ? cfgRes.data?.workspaceId : undefined,
         })
         if (res.ok) {
-          if (freeText) {
-            const filled = `${res.data.title}\n${res.data.url}`
+          if (stringMode) {
+            const filled = titleOnly ? res.data.title : `${res.data.title}\n${res.data.url}`
             setText(filled)
             onChange?.(filled)
           } else {
@@ -203,19 +208,19 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
           }
           setHint({ level: 'success', text: `已关联${res.data.typeCn}：${res.data.title}` })
         } else {
-          // freeText 允许任意文本，解析失败不清空，保留用户输入
-          if (!freeText) onChange?.(null)
+          // 自由文本模式允许任意文本，解析失败不清空，保留用户输入
+          if (!stringMode) onChange?.(null)
           setHint({ level: 'danger', text: res.error || '未找到该工单' })
         }
       }, 500)
       return
     }
-    onChange?.(freeText ? raw : null)
+    onChange?.(stringMode ? raw : null)
     setHint({ level: 'secondary', text: '从下拉选择工单，或粘贴工单链接 / 输入工单 ID' })
   }
 
-  // 未配置态只在非 freeText 时拦住输入：freeText 的字段（project_desc）是必填自由文本，不能没有输入框
-  if (phase === 'unconfigured' && !freeText) {
+  // 未配置态只在对象值模式拦住输入：字符串模式（freeText/titleOnly）的字段是必填自由文本，不能没有输入框
+  if (phase === 'unconfigured' && !stringMode) {
     return (
       <div>
         <Space>
@@ -236,16 +241,18 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
   return (
     <div>
       <AutoComplete
-        value={freeText ? String(value ?? '') : text}
+        value={stringMode ? String(value ?? '') : text}
         onChange={onText}
         options={options}
         disabled={phase === 'loading'}
         placeholder={
           phase === 'loading'
             ? '正在检测工单系统配置…'
-            : freeText
-              ? '手填标题，或选择/粘贴工单自动填「标题 + 链接」'
-              : '选择我的工单，或粘贴工单链接 / 输入工单 ID'
+            : titleOnly
+              ? '手填名称，或选择/粘贴工单自动填标题'
+              : freeText
+                ? '手填标题，或选择/粘贴工单自动填「标题 + 链接」'
+                : '选择我的工单，或粘贴工单链接 / 输入工单 ID'
         }
         filterOption={(v, o) => {
           const q = String(v || '').toLowerCase()
@@ -256,11 +263,11 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
           )
         }}
         notFoundContent={
-          phase === 'error' ? '工单列表获取失败' : freeText && phase === 'unconfigured' ? '未配置工单系统，可手填标题' : '暂无进行中的工单'
+          phase === 'error' ? '工单列表获取失败' : stringMode && phase === 'unconfigured' ? '未配置工单系统，可手填' : '暂无进行中的工单'
         }
         style={{ width: '100%' }}
       />
-      {freeText && phase === 'unconfigured' ? (
+      {stringMode && phase === 'unconfigured' ? (
         <Space style={{ marginTop: 6 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
             未配置 TAPD 工单系统：可先手填标题，或

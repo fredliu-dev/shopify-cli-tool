@@ -32,6 +32,7 @@ import {
   Tag,
   Tooltip,
   Typography,
+  Spin,
 } from 'antd'
 import dayjs from 'dayjs'
 import {
@@ -2139,6 +2140,9 @@ export default function TapdPage({ active = true }) {
   // 实时同步（主进程增量轮询）：连续失败自动暂停时亮「重试」标
   const [syncPaused, setSyncPaused] = useState(false)
   const [syncError, setSyncError] = useState('')
+  // 进门三连检进行中（拉配置/校验令牌/查网页登录态需几秒）：
+  // 期间不渲染「尚未设置项目」空态，改显整页 loading，避免进页先闪空态再出表格
+  const [booting, setBooting] = useState(true)
 
   // 本页内嵌在主窗口左侧栏切换（不再独立窗口）：标题沿用主窗口，页面切换由左侧栏负责
 
@@ -2148,24 +2152,28 @@ export default function TapdPage({ active = true }) {
   // ③ 都就绪 → 设 workspaceId 触发列表加载
   useEffect(() => {
     ;(async () => {
-      const res = await window.api.tapd.loadConfig()
-      const cfg = res.ok ? res.data : {}
-      setConfig(cfg)
-      const user = await window.api.tapd.user()
-      if (!user.ok) {
-        setNeedAuth(true)
-        setAuthOpen(true)
-        return
+      try {
+        const res = await window.api.tapd.loadConfig()
+        const cfg = res.ok ? res.data : {}
+        setConfig(cfg)
+        const user = await window.api.tapd.user()
+        if (!user.ok) {
+          setNeedAuth(true)
+          setAuthOpen(true)
+          return
+        }
+        setMyName(user.data?.name || '')
+        const lg = await window.api.tapd.checkLogin()
+        const loggedIn = !!(lg.ok && lg.data?.loggedIn)
+        setWebLogin(loggedIn)
+        if (!loggedIn) {
+          setLoginGuideOpen(true)
+          return // 等引导结束（登录成功或跳过）再放行
+        }
+        startLoading(cfg)
+      } finally {
+        setBooting(false) // 三连检结束（无论放行/引导/缺凭据）都退出整页 loading
       }
-      setMyName(user.data?.name || '')
-      const lg = await window.api.tapd.checkLogin()
-      const loggedIn = !!(lg.ok && lg.data?.loggedIn)
-      setWebLogin(loggedIn)
-      if (!loggedIn) {
-        setLoginGuideOpen(true)
-        return // 等引导结束（登录成功或跳过）再放行
-      }
-      startLoading(cfg)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -2790,15 +2798,22 @@ export default function TapdPage({ active = true }) {
         />
       )}
 
-      {/* 未配置项目引导（换项目在「凭据设置」里改 workspace_id） */}
-      {!workspaceId && !loading && (
+      {/* 进门三连检期间整页 loading（拉配置/校验需几秒，不能先闪「未配置」空态） */}
+      {booting ? (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Empty description="尚未设置 TAPD 项目（workspace_id）">
-            <Button type="primary" onClick={() => setAuthOpen(true)}>
-              打开凭据设置
-            </Button>
-          </Empty>
+          <Spin size="large" tip="正在加载配置…" />
         </div>
+      ) : (
+        /* 未配置项目引导（换项目在「凭据设置」里改 workspace_id） */
+        !workspaceId && !loading && (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Empty description="尚未设置 TAPD 项目（workspace_id）">
+              <Button type="primary" onClick={() => setAuthOpen(true)}>
+                打开凭据设置
+              </Button>
+            </Empty>
+          </div>
+        )
       )}
 
       {workspaceId && (
