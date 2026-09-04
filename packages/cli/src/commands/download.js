@@ -29,6 +29,7 @@ export default {
     } catch (err) {
       spin.fail(`查询最新版本失败：${err.message}`)
       log.info('已自动尝试直连与国内镜像加速仍失败，请检查网络（或开代理）后重试。')
+      log.info(`也可前往发布页手动下载：${pc.cyan('https://github.com/fredliu-dev/shopify-cli-tool/releases')}`)
       return 1
     }
     if (!release) {
@@ -56,6 +57,7 @@ export default {
       const hint = existsSync(`${dest}.part`) ? '（已保留半截文件，下次运行自动从断点续传）' : ''
       dl.fail(`下载失败：${err.message}${hint}`)
       log.info('已自动尝试直连与国内镜像加速仍失败，请检查网络（或开代理）后重试。')
+      log.info(`也可前往发布页手动下载：${pc.cyan('https://github.com/fredliu-dev/shopify-cli-tool/releases')}`)
       return 1
     }
 
