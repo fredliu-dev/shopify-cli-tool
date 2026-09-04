@@ -496,7 +496,8 @@ function ScheduleCalendar({ items, bucketOf, statusMap, monthlyPoints, currentMo
         return { it, s, e, b: bucketOf(it.status, it._type) }
       })
       .filter(Boolean)
-      .sort((a, x) => a.s.localeCompare(x.s))
+      // 开始时间晚的在上，早的在下；开始时间相同时周期短的在上，周期长的在下
+      .sort((a, x) => x.s.localeCompare(a.s) || a.e.localeCompare(x.e))
   }, [view, dayMonth, items, bucketOf])
 
   const [dy, dm] = dayMonth.split('-').map(Number)
