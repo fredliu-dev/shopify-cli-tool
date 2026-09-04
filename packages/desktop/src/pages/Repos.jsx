@@ -40,6 +40,7 @@ import {
   FormatPainterOutlined,
   GithubOutlined,
   GlobalOutlined,
+  LoadingOutlined,
   PlusOutlined,
   ProjectOutlined,
   QuestionCircleOutlined,
@@ -1125,112 +1126,127 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
       AVATAR_GRADIENTS[
         Number(String(t.id).slice(-1)) % AVATAR_GRADIENTS.length
       ];
+    // 操作项按序号逐个冒出；live 仅复制/编辑，普通主题另有发布与删除
+    const acts = [
+      {
+        key: "copy",
+        title: "复制主题 ID",
+        icon: <CopyOutlined />,
+        onClick: () => copyId(t),
+      },
+      {
+        key: "edit",
+        title: "打开编辑器后台",
+        icon: <EditOutlined />,
+        onClick: () => openLink(editorLinkOf(t.id), "编辑器链接"),
+      },
+      ...(!isLive
+        ? [
+            {
+              key: "publish",
+              title: "发布为线上主题",
+              icon: <RocketOutlined />,
+              busy: busyId === t.id,
+              onClick: () => confirmPublish(t),
+            },
+          ]
+        : []),
+      ...(!isLive
+        ? [
+            {
+              key: "delete",
+              title: "删除主题（不可恢复）",
+              icon: <DeleteOutlined />,
+              danger: true,
+              busy: busyId === t.id,
+              onClick: () => confirmDelete(t),
+            },
+          ]
+        : []),
+    ];
     return (
-      <div key={t.id} className={`tl-row${isLive ? " tl-live" : ""}`}>
-        {/* live 用皇冠主卡；普通主题用渐变首字头像 */}
-        <div
-          className='tl-avatar'
-          style={{
-            background: isLive
-              ? "linear-gradient(135deg,#faad14,#d48806)"
-              : avColors,
-          }}
-        >
-          {isLive ? (
-            <CrownFilled style={{ color: "#fff", fontSize: 16 }} />
-          ) : (
-            (t.name || "?")
-              .replace(/^\[.*?\]\s*/, "")
-              .trim()
-              .charAt(0)
-              .toUpperCase()
-          )}
-        </div>
-        <div style={{ minWidth: 0, flex: 1 }}>
+      <div key={t.id} className={`tl-item${isLive ? " tl-live" : ""}`}>
+        <div className='tl-card'>
+          {/* live 用皇冠主卡；普通主题用渐变首字头像 */}
           <div
+            className='tl-avatar'
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontWeight: 600,
-              fontSize: isLive ? 15 : 14,
-              color: isLive ? "#faad14" : "rgba(255,255,255,0.92)",
+              background: isLive
+                ? "linear-gradient(135deg,#faad14,#d48806)"
+                : avColors,
             }}
           >
-            <span
-              style={{
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {t.name}
-            </span>
-            {isLive && (
-              <span
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 5,
-                  flexShrink: 0,
-                }}
-              >
-                <span className='tl-dot' />
-                <span
-                  style={{
-                    fontSize: 11,
-                    letterSpacing: 1,
-                    color: "#faad14",
-                    fontWeight: 700,
-                  }}
-                >
-                  LIVE
-                </span>
-              </span>
+            {isLive ? (
+              <CrownFilled style={{ color: "#fff", fontSize: 16 }} />
+            ) : (
+              (t.name || "?")
+                .replace(/^\[.*?\]\s*/, "")
+                .trim()
+                .charAt(0)
+                .toUpperCase()
             )}
           </div>
-          <div className='tl-id'>#{t.id}</div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontWeight: 600,
+                fontSize: isLive ? 15 : 14,
+                color: isLive ? "#faad14" : "rgba(255,255,255,0.92)",
+              }}
+            >
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {t.name}
+              </span>
+              {isLive && (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    flexShrink: 0,
+                  }}
+                >
+                  <span className='tl-dot' />
+                  <span
+                    style={{
+                      fontSize: 11,
+                      letterSpacing: 1,
+                      color: "#faad14",
+                      fontWeight: 700,
+                    }}
+                  >
+                    LIVE
+                  </span>
+                </span>
+              )}
+            </div>
+            <div className='tl-id'>#{t.id}</div>
+          </div>
         </div>
-        <div className='tl-actions' style={isLive ? { opacity: 1 } : undefined}>
-          <Tooltip title='复制主题 ID'>
-            <Button
-              type='text'
-              size='small'
-              icon={<CopyOutlined />}
-              onClick={() => copyId(t)}
-            />
-          </Tooltip>
-          <Tooltip title='打开编辑器后台'>
-            <Button
-              type='text'
-              size='small'
-              icon={<EditOutlined />}
-              onClick={() => openLink(editorLinkOf(t.id), "编辑器链接")}
-            />
-          </Tooltip>
-          {!isLive && (
-            <Tooltip title='发布为线上主题'>
-              <Button
-                type='text'
-                size='small'
-                icon={<RocketOutlined />}
-                loading={busyId === t.id}
-                onClick={() => confirmPublish(t)}
-              />
-            </Tooltip>
-          )}
-          {!isLive && (
-            <Tooltip title='删除主题（不可恢复）'>
-              <Button
-                type='text'
-                size='small'
-                danger
-                icon={<DeleteOutlined />}
-                loading={busyId === t.id}
-                onClick={() => confirmDelete(t)}
-              />
-            </Tooltip>
-          )}
+        {/* 操作面板：平时收起，悬浮时卡片让位、操作项逐个滑出 */}
+        <div className='tl-actions'>
+          <div className='tl-actions-inner'>
+            {acts.map((a, i) => (
+              <Tooltip key={a.key} title={a.title}>
+                <div
+                  className={`tl-act${a.danger ? " tl-act-danger" : ""}`}
+                  style={{ "--i": i }}
+                  onClick={a.onClick}
+                >
+                  {a.busy ? <LoadingOutlined spin /> : a.icon}
+                </div>
+              </Tooltip>
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -1273,12 +1289,24 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
     >
       {/* hover 亮起 / live 呼吸灯等交互样式走 class，内联样式写不了伪类与动画 */}
       <style>{`
-        .tl-row{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);margin-bottom:8px;transition:background .2s,border-color .2s;}
-        .tl-row:hover{background:rgba(255,255,255,0.085);border-color:rgba(255,255,255,0.16);}
-        .tl-live{padding:13px 14px;margin-bottom:10px;gap:14px;background:linear-gradient(135deg,rgba(250,173,20,0.16),rgba(250,173,20,0.05));border:1px solid rgba(250,173,20,0.45);box-shadow:inset 0 0 24px rgba(250,173,20,0.08),0 4px 16px rgba(0,0,0,0.28);}
-        .tl-live:hover{border-color:rgba(250,173,20,0.65);}
-        .tl-actions{display:flex;opacity:.4;transition:opacity .2s;}
-        .tl-row:hover .tl-actions{opacity:1;}
+        .tl-item{display:flex;align-items:stretch;margin-bottom:8px;}
+        .tl-card{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);transition:background .2s,border-color .2s;}
+        .tl-item:hover .tl-card{background:rgba(255,255,255,0.085);border-color:rgba(255,255,255,0.16);}
+        .tl-live{margin-bottom:10px;}
+        .tl-live .tl-card{padding:13px 14px;gap:14px;background:linear-gradient(135deg,rgba(250,173,20,0.16),rgba(250,173,20,0.05));border:1px solid rgba(250,173,20,0.45);box-shadow:inset 0 0 24px rgba(250,173,20,0.08),0 4px 16px rgba(0,0,0,0.28);}
+        .tl-item.tl-live:hover .tl-card{border-color:rgba(250,173,20,0.65);}
+        /* 操作面板：0fr 收起 → 1fr 展开，卡片随之让位缩窄；back-out 曲线带回弹更 Q 弹 */
+        .tl-actions{display:grid;grid-template-columns:0fr;margin-left:0;transition:grid-template-columns .3s cubic-bezier(.34,1.56,.64,1),margin-left .3s cubic-bezier(.34,1.56,.64,1);}
+        .tl-item:hover .tl-actions{grid-template-columns:1fr;margin-left:8px;}
+        .tl-actions-inner{overflow:hidden;min-width:0;display:flex;align-items:stretch;gap:6px;}
+        /* 操作项正方形（普通 54 / live 72，与卡片等高）、与卡片同底色圆角；按 --i 逐个延迟冒出 */
+        .tl-act{width:54px;height:54px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.72);font-size:16px;cursor:pointer;opacity:0;transform:translateX(-6px) scale(.6);transition:opacity .25s ease,transform .38s cubic-bezier(.34,1.56,.64,1),background .15s,color .15s,border-color .15s;}
+        .tl-item:hover .tl-act{opacity:1;transform:none;transition-delay:calc(var(--i,0)*70ms),calc(var(--i,0)*70ms),0s,0s,0s;}
+        .tl-act:hover{background:rgba(255,255,255,0.10);color:#fff;border-color:rgba(255,255,255,0.18);}
+        .tl-live .tl-act{width:72px;height:72px;background:linear-gradient(135deg,rgba(250,173,20,0.16),rgba(250,173,20,0.05));border-color:rgba(250,173,20,0.45);color:rgba(255,255,255,0.85);}
+        .tl-live .tl-act:hover{background:linear-gradient(135deg,rgba(250,173,20,0.24),rgba(250,173,20,0.08));border-color:rgba(250,173,20,0.65);color:#faad14;}
+        .tl-act-danger{color:#ff7875;}
+        .tl-act-danger:hover{background:rgba(255,77,79,0.14);border-color:rgba(255,77,79,0.45);color:#ff7875;}
         .tl-avatar{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:rgba(255,255,255,0.92);flex-shrink:0;letter-spacing:0;}
         .tl-live .tl-avatar{width:46px;height:46px;border-radius:11px;font-size:19px;box-shadow:0 4px 14px rgba(250,173,20,0.35);}
         .tl-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:rgba(255,255,255,0.35);}

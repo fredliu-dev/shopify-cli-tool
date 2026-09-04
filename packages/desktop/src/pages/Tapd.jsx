@@ -1034,6 +1034,26 @@ export function TapdStyles() {
       .tapd-flow-node:hover .tapd-flow-dot { transform: scale(1.12); }
       .tapd-flow-node:hover .tapd-flow-label { color: rgba(255,255,255,0.92) !important; }
       .tapd-path-current { animation: tapd-node-pulse 1.6s ease-out infinite; }
+      /* 流转路径连线流光：高亮带沿段往右扫过（--d 由内联注入，逐段错峰成波浪感） */
+      .tapd-path-line { overflow: hidden; }
+      .tapd-path-line::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: -30%;
+        width: 30%;
+        border-radius: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.85), transparent);
+        animation: tapd-line-shine 1.8s ease-in-out infinite;
+        animation-delay: var(--d, 0s);
+      }
+      @keyframes tapd-line-shine {
+        0% { transform: translateX(0); opacity: 0; }
+        15% { opacity: 1; }
+        85% { opacity: 1; }
+        100% { transform: translateX(433%); opacity: 0; }
+      }
       .tapd-status-flow { cursor: pointer; transition: filter .15s, transform .15s; }
       .tapd-status-flow:hover { filter: brightness(1.35); transform: translateY(-1px); }
       .tapd-name-acts { opacity: 0; transition: opacity .15s; }
@@ -1049,31 +1069,42 @@ export function TapdStyles() {
 
 /* ---------------- 流转路径轨道（详情抽屉的视觉主线） ---------------- */
 
-// 横向步进轨道：创建 → flows 途经状态 → 当前 → 完成。
-// 节点一行排开，连线由相邻两步各画半段（颜色从上一状态渐变到下一状态）；
+// 横向步进轨道：创建 → 主线流转链（规划中→实现中→…），走到哪显示到哪。
+// 当前状态在主线上：截至当前节点，最后一个节点即当前，前面的节点全部标已完成✓；
+// 当前状态是旁路状态（修改中/待反馈等不在主链）时退化为 创建 → 当前；
+// 不单独画「完成」节点（主线终点本身即完结态），完结时间并入当前节点 Tooltip。
+// 节点一行排开，连线由相邻两步各画半段（颜色从上一状态渐变到下一状态，带流光动画）；
 // 当前节点放大发光脉冲、状态名带色胶囊，时间显示日期部分（完整时间在 Tooltip）；
 // 步数多时容器横向滚动
-function FlowPath({ item, statusMap }) {
-  // 相邻同状态合并（flows 末尾常与当前状态重复），时间取有值的一方
+function FlowPath({ item, statusMap, type }) {
+  // 主线链的英文键：task 用固定三态；story/bug 的自定义状态值随项目配置变化、中文名稳定，
+  // 按中文名从 statusMap 反查（与流转弹窗同一条主链）。已走过的节点统一绿色（已完成语义）
+  const chain =
+    type === 'task'
+      ? TASK_MAIN_FLOW
+      : MAIN_FLOW_CN.map((cn) => Object.keys(statusMap || {}).find((k) => statusMap[k] === cn)).filter(Boolean)
+  const curIdx = chain.indexOf(item.status)
   const steps = [
-    { key: '__created', label: '创建', color: '#8c8c8c', time: item.created },
-    ...String(item.flows || '')
-      .split('|')
-      .filter(Boolean)
-      .map((s) => ({ key: s, label: statusMap?.[s] || s, color: colorOf(s, statusMap?.[s]) })),
-    {
-      key: item.status,
-      label: statusMap?.[item.status] || item.status,
-      color: colorOf(item.status, statusMap?.[item.status]),
-      current: true,
-    },
-    ...(item.completed ? [{ key: '__done', label: '完成', color: '#52c41a', time: item.completed }] : []),
-  ].reduce((acc, s) => {
-    const prev = acc[acc.length - 1]
-    if (prev && prev.key === s.key) acc[acc.length - 1] = { ...s, time: s.time || prev.time }
-    else acc.push(s)
-    return acc
-  }, [])
+    { key: '__created', label: '创建', color: curIdx >= 0 ? '#52c41a' : '#8c8c8c', time: item.created, done: curIdx >= 0 },
+    ...(curIdx >= 0
+      ? chain.slice(0, curIdx + 1).map((k, i) => ({
+          key: k,
+          label: statusMap?.[k] || k,
+          color: i < curIdx ? '#52c41a' : colorOf(k, statusMap?.[k]),
+          done: i < curIdx,
+          current: i === curIdx,
+          ...(i === curIdx && item.completed ? { time: item.completed } : {}),
+        }))
+      : [
+          {
+            key: item.status,
+            label: statusMap?.[item.status] || item.status,
+            color: colorOf(item.status, statusMap?.[item.status]),
+            current: true,
+            ...(item.completed ? { time: item.completed } : {}),
+          },
+        ]),
+  ]
 
   return (
     <div
@@ -1098,7 +1129,10 @@ function FlowPath({ item, statusMap }) {
       <div style={{ overflowX: 'auto', paddingBottom: 2 }}>
         <div style={{ display: 'flex', minWidth: '100%' }}>
           {steps.map((s, i) => (
-            <Tooltip key={`${s.key}-${i}`} title={s.time ? `${s.label} · ${s.time}` : s.label}>
+            <Tooltip
+              key={`${s.key}-${i}`}
+              title={`${s.label}${s.current ? ' · 当前' : s.done ? ' · 已完成' : ''}${s.time ? ` · ${s.time}` : ''}`}
+            >
               <div
                 style={{
                   flex: '1 0 84px',
@@ -1110,32 +1144,36 @@ function FlowPath({ item, statusMap }) {
                   padding: '0 4px',
                 }}
               >
-                {/* 连线：左半段（上一步色 → 本步色）+ 右半段（本步色 → 下一步色） */}
+                {/* 连线：左半段（上一步色 → 本步色）+ 右半段（本步色 → 下一步色），带流光扫过动画 */}
                 {i > 0 && (
                   <span
+                    className='tapd-path-line'
                     style={{
                       position: 'absolute',
-                      top: 6,
+                      top: 7,
                       left: 0,
                       width: '50%',
                       height: 2,
                       borderRadius: 1,
                       background: `linear-gradient(90deg, ${steps[i - 1].color}, ${s.color})`,
                       opacity: 0.45,
+                      '--d': `${(i - 1) * 0.22}s`,
                     }}
                   />
                 )}
                 {i < steps.length - 1 && (
                   <span
+                    className='tapd-path-line'
                     style={{
                       position: 'absolute',
-                      top: 6,
+                      top: 7,
                       right: 0,
                       width: '50%',
                       height: 2,
                       borderRadius: 1,
                       background: `linear-gradient(90deg, ${s.color}, ${steps[i + 1].color})`,
                       opacity: 0.45,
+                      '--d': `${i * 0.22}s`,
                     }}
                   />
                 )}
@@ -1144,8 +1182,8 @@ function FlowPath({ item, statusMap }) {
                   style={{
                     position: 'relative',
                     zIndex: 1,
-                    width: s.current ? 14 : 10,
-                    height: s.current ? 14 : 10,
+                    width: s.current ? 16 : 12,
+                    height: s.current ? 16 : 12,
                     marginTop: s.current ? 0 : 2,
                     borderRadius: '50%',
                     background: s.color,
@@ -1155,7 +1193,11 @@ function FlowPath({ item, statusMap }) {
                     boxShadow: s.current ? `0 0 10px ${s.color}aa` : 'none',
                   }}
                 >
-                  {s.current && <span style={{ width: 4, height: 4, borderRadius: '50%', background: '#fff' }} />}
+                  {s.current ? (
+                    <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#fff' }} />
+                  ) : (
+                    s.done && <CheckOutlined style={{ fontSize: 8, color: '#fff' }} />
+                  )}
                 </span>
                 <span
                   style={{
@@ -1163,7 +1205,7 @@ function FlowPath({ item, statusMap }) {
                     maxWidth: '100%',
                     fontSize: 11,
                     fontWeight: s.current ? 600 : 400,
-                    color: s.current ? s.color : 'rgba(255,255,255,0.75)',
+                    color: s.current ? s.color : s.done ? '#52c41a' : 'rgba(255,255,255,0.75)',
                     padding: s.current ? '1px 8px' : '1px 0',
                     borderRadius: 9,
                     background: s.current ? `${s.color}26` : 'transparent',
@@ -1373,8 +1415,8 @@ export function DetailDrawer({ open, item, type, statusMap, workspaceId, myName,
             ))}
           </div>
 
-          {/* 流转路径轨道：创建 → flows 途经状态 → 当前 → 完成（本抽屉的视觉主线） */}
-          <FlowPath item={item} statusMap={statusMap} />
+          {/* 流转路径轨道：创建 → 主线流转链截至当前（前方节点标已完成）→ 完结追加完成（本抽屉的视觉主线） */}
+          <FlowPath item={item} statusMap={statusMap} type={type} />
 
           <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
             描述
