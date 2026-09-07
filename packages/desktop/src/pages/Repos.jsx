@@ -5291,18 +5291,10 @@ function RepoCard({
                   <span className='tile-label'>引用图</span>
                 </div>
               </Tooltip>
-              <Tooltip
-                title={
-                  repo.hasToml
-                    ? "查看当前店铺全部主题（live 优先；复制 ID / 编辑器 / 发布 / 删除）"
-                    : "先初始化生成配置后才能查看主题列表"
-                }
-              >
+              <Tooltip title='查看当前店铺全部主题（live 优先；复制 ID / 编辑器 / 发布 / 删除）'>
                 <div
-                  className={`action-tile${repo.hasToml ? "" : " is-disabled"}`}
-                  onClick={
-                    repo.hasToml ? () => onAction("themeList", repo) : undefined
-                  }
+                  className='action-tile'
+                  onClick={() => onAction("themeList", repo)}
                 >
                   <AppstoreOutlined
                     className='tile-icon'
@@ -5313,16 +5305,14 @@ function RepoCard({
               </Tooltip>
               <Tooltip title='输入网址（自动剔域名取路径），按当前配置的 store/theme 拼 Shopify 后台编辑器链接并跳转'>
                 <div
-                  className={`action-tile${repo.hasToml ? "" : " is-disabled"}`}
-                  onClick={
-                    repo.hasToml ? () => onAction("adminOpen", repo) : undefined
-                  }
+                  className='action-tile'
+                  onClick={() => onAction("adminOpen", repo)}
                 >
                   <GlobalOutlined
                     className='tile-icon'
                     style={{ color: "#faad14" }}
                   />
-                  <span className='tile-label'>打开后台</span>
+                  <span className='tile-label'>后台工具</span>
                 </div>
               </Tooltip>
             </div>
