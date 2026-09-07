@@ -13,6 +13,7 @@ import {
   Form,
   Input,
   Modal,
+  Pagination,
   Popconfirm,
   Radio,
   Select,
@@ -417,6 +418,7 @@ function SaveRepoModal({
   onClose,
   onDone,
   contacts,
+  onOpenThemeList,
 }) {
   const { message, modal } = App.useApp();
   const [form] = Form.useForm();
@@ -428,6 +430,8 @@ function SaveRepoModal({
   const [resolvedTpl, setResolvedTpl] = useState(undefined);
   const [copyForm] = Form.useForm();
   const [copyLoading, setCopyLoading] = useState(false);
+  // 点击「复制线上 live 主题」先查主题数量是否达上限（100），期间按钮 loading
+  const [counting, setCounting] = useState(false);
 
   const isNew = !repo?.hasToml; // 无配置文件：走「初始化并保存」
   const dev = repo?.devEnv || {};
@@ -467,6 +471,39 @@ function SaveRepoModal({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repo]);
+
+  // 点击「复制线上 live 主题」：先查 store 主题数量，达上限 100 不弹复制表单，
+  // 改弹主题列表让用户先删主题；未达上限才走原来的复制流程。
+  // 初始化场景拉主题列表需 store（来自 toml），先用当前表单值落 toml（ensureInit 幂等，提交保存时复用）
+  const onCopyClick = async () => {
+    setCounting(true);
+    try {
+      if (isNew) {
+        try {
+          await form.validateFields(["template", "port"]);
+        } catch {
+          return; // 校验错误显示在主表单上
+        }
+        const env = await ensureInit(form.getFieldsValue());
+        if (!env) return;
+      }
+      const res = await window.api.repos.themeList({ dir: repo.path });
+      // 上限口径与 Shopify 一致：去重后排除 development 主题（theme dev 会话产物，不计入 100 上限）
+      const count = res.ok
+        ? dedupeThemes(res.data).filter((t) => t.role !== "development").length
+        : 0;
+      if (count >= 100) {
+        message.warning(
+          `主题数量已达上限（${count}/100），请先在主题列表删除不用的主题`,
+        );
+        onOpenThemeList?.();
+        return;
+      }
+      setCopyOpen(true);
+    } finally {
+      setCounting(false);
+    }
+  };
 
   const doCopyLive = async (vals) => {
     setCopyLoading(true);
@@ -751,8 +788,8 @@ function SaveRepoModal({
             >
               <Input placeholder='主题 id' />
             </Form.Item>
-            {/* 初始化场景点击后先用当前表单值落 toml，再复制 live 并回填 theme */}
-            <Button onClick={() => setCopyOpen(true)}>
+            {/* 点击先查主题数量：达上限 100 弹主题列表引导删除，未达上限才弹复制表单 */}
+            <Button onClick={onCopyClick} loading={counting}>
               复制线上 live 主题
             </Button>
           </Space.Compact>
@@ -890,12 +927,26 @@ function ChangedJsonModal({ open, title, files, onClose }) {
  * live 主题置顶并以金色高亮样式区分；每行支持复制 ID / 跳转编辑后台，
  * 非 live 主题另有 发布（红色/警示二次确认）与 删除（不可恢复，live 不可删）。
  */
+// CLI 偶发对同一主题（同 ID）返回两条（线上 master 主题会被重复计数），按 ID 去重、live 优先保留
+const dedupeThemes = (list) => {
+  const seen = new Map();
+  for (const t of list || []) {
+    const prev = seen.get(String(t.id));
+    if (!prev || (t.role === "live" && prev.role !== "live"))
+      seen.set(String(t.id), t);
+  }
+  return [...seen.values()];
+};
+
 function ThemeListModal({ open, repo, onClose, onChanged }) {
   const { message, modal } = App.useApp();
   const [loading, setLoading] = useState(false);
   const [themes, setThemes] = useState([]);
   const [busyId, setBusyId] = useState(null);
   const [keyword, setKeyword] = useState("");
+  // 非 live 主题分页：店铺主题可能近百个，滚动列表翻找效率低
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   // 请求序号：关闭弹窗或切换商店后，旧请求的响应作废，防止数据错乱
   const loadSeqRef = useRef(0);
 
@@ -933,6 +984,7 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
       loadSeqRef.current++;
       setThemes([]);
       setKeyword("");
+      setPage(1);
       setBusyId(null);
       setLoading(false);
     }
@@ -1119,6 +1171,11 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
         .includes(q),
   );
 
+  // 当前页数据：刷新/筛选/改每页条数后页码可能越界（如删主题后当前页为空），自动收在有效页内
+  const maxPage = Math.max(1, Math.ceil(rest.length / pageSize));
+  const curPage = Math.min(page, maxPage);
+  const paged = rest.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   const renderRow = (t) => {
     const isLive = t.role === "live";
     // 头像渐变色：按 id 稳定取色，不同主题有辨识度又不刺眼
@@ -1286,6 +1343,15 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
       footer={null}
       destroyOnClose
       width={560}
+      // 固定弹窗高度：切页/换每页条数时弹窗不再跳变，行区域内部上下滚动
+      styles={{
+        body: {
+          height: 560,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        },
+      }}
     >
       {/* hover 亮起 / live 呼吸灯等交互样式走 class，内联样式写不了伪类与动画 */}
       <style>{`
@@ -1350,25 +1416,64 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
       </div>
 
       {loading && themes.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "32px 0" }}>
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
           <Spin />
         </div>
       ) : themes.length === 0 ? (
         <Empty description={loading ? "加载中…" : "暂无主题"} />
       ) : (
         <>
-          {/* live 固定在滚动区外的顶部且不参与搜索：任何时刻都可见当前线上主题 */}
+          {/* live 固定在顶部不随列表滚动且不参与搜索；行区域 flex:1 内部上下滚动 */}
           {liveTheme && renderRow(liveTheme)}
-          {rest.length === 0 ? (
-            keyword.trim() ? (
-              <Empty
-                description='没有匹配的主题'
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: "auto",
+              paddingRight: 2,
+            }}
+          >
+            {rest.length === 0 ? (
+              keyword.trim() ? (
+                <Empty
+                  description='没有匹配的主题'
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                />
+              ) : null
+            ) : (
+              paged.map(renderRow)
+            )}
+          </div>
+          {/* 分页固定在底部：滚动翻看时随时可切页 */}
+          {rest.length > 0 && (
+            <div
+              style={{
+                flexShrink: 0,
+                display: "flex",
+                justifyContent: "flex-end",
+                marginTop: 12,
+              }}
+            >
+              <Pagination
+                size='small'
+                current={curPage}
+                pageSize={pageSize}
+                total={rest.length}
+                showSizeChanger
+                pageSizeOptions={[10, 20, 50]}
+                onChange={(p, ps) => {
+                  setPage(p);
+                  setPageSize(ps);
+                }}
+                showTotal={(n) => `${n} 个`}
               />
-            ) : null
-          ) : (
-            <div style={{ maxHeight: 400, overflowY: "auto", paddingRight: 2 }}>
-              {rest.map(renderRow)}
             </div>
           )}
         </>
@@ -4790,14 +4895,20 @@ function RepoCard({
   }, [delBranchModal]);
 
   // 打开删除分支确认弹窗（带最新远程分支存在性）
+  // reload 内含 fetch origin，网络耗时明显：期间入口按钮转圈，避免点了半天才弹窗
   const openDelBranchModal = async () => {
-    const branch = repo.currentBranch;
-    const info = await reload(); // 拿最新 local/remote（含 fetch origin）
-    setDelBranchModal({
-      branch,
-      remoteExists: (info?.remote || []).includes(branch),
-      projectCount: projects.length,
-    });
+    setDelBranchLoading(true);
+    try {
+      const branch = repo.currentBranch;
+      const info = await reload(); // 拿最新 local/remote（含 fetch origin）
+      setDelBranchModal({
+        branch,
+        remoteExists: (info?.remote || []).includes(branch),
+        projectCount: projects.length,
+      });
+    } finally {
+      setDelBranchLoading(false);
+    }
   };
 
   // 入口：当前分支有本地项目 → 先问是否连线上主题一起删；没有 → 直接进删分支确认
@@ -5214,6 +5325,7 @@ function RepoCard({
                 danger
                 icon={<DeleteOutlined />}
                 disabled={!branchDeletable}
+                loading={delBranchLoading}
                 onClick={askDeleteBranch}
               >
                 删除分支
@@ -5887,20 +5999,27 @@ function ProjectPanel({
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  gap: 4,
-                  fontSize: 12,
-                  lineHeight: "20px",
-                  padding: "1px 8px",
-                  borderRadius: 6,
+                  gap: 5,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  lineHeight: "22px",
+                  padding: "5px 0",
+                  borderRadius: 8,
                   color: off ? "rgba(255,255,255,0.3)" : l.color,
-                  background: off ? "transparent" : `${l.color}1f`,
-                  border: `1px solid ${off ? "rgba(255,255,255,0.12)" : `${l.color}59`}`,
+                  textShadow: off ? "none" : `0 0 10px ${l.color}66`,
+                  background: off
+                    ? "transparent"
+                    : `linear-gradient(135deg, ${l.color}38, ${l.color}1a)`,
+                  border: `1px solid ${off ? "rgba(255,255,255,0.12)" : `${l.color}8c`}`,
+                  boxShadow: off
+                    ? "none"
+                    : `0 0 12px ${l.color}33, inset 0 1px 0 rgba(255,255,255,0.12)`,
                   cursor: off ? "not-allowed" : "pointer",
                   flex: 1,
                 }}
                 onClick={() => !off && openLink(url, l.copyLabel)}
               >
-                <Icon />
+                <Icon style={{ fontSize: 14 }} />
                 {l.label}
               </ALink>
             );
@@ -6669,6 +6788,8 @@ export default function Repos({ registerMenu }) {
             (p) => p.store === editRepo.repo.devEnv?.store,
           )}
           contacts={contacts}
+          // 主题数达上限 100 时从保存弹窗内直接唤起主题列表，引导用户删主题后再复制
+          onOpenThemeList={() => setThemeListFor(editRepo.repo)}
           onClose={() => setEditRepo(null)}
           onDone={() => {
             const path = editRepo.repo.path;
