@@ -24,6 +24,7 @@ import {
   Image,
   Input,
   Modal,
+  Progress,
   Radio,
   ConfigProvider,
   Select,
@@ -460,10 +461,14 @@ function ResizableHeaderCell({ width, onResize, ...rest }) {
   )
 }
 
-/* ---------------- 当月总览（纯文字：当月完成规模点；分类筛选已移至左侧筛选行的 Tab） ---------------- */
+/* ---------------- 当月总览（完成规模点 + 总规模点进度条；分类筛选已移至左侧筛选行的 Tab） ---------------- */
 
 function OverviewStats({ stats }) {
   const total = stats.todo.n + stats.doing.n + stats.done.n
+  // 当月总规模点 = 待办 + 进行中 + 本月完成（口径同卡片统计）；进度 = 完成点 / 总点数
+  const totalPts = fmtPoint(stats.todo.pts + stats.doing.pts + stats.done.pts)
+  const donePts = fmtPoint(stats.done.pts)
+  const percent = totalPts > 0 ? Math.min(100, Math.round((donePts / totalPts) * 1000) / 10) : 0
   return (
     <div
       style={{
@@ -474,13 +479,25 @@ function OverviewStats({ stats }) {
         border: '1px solid rgba(82,196,26,0.3)',
       }}
     >
-      <Text style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)' }}>当月完成</Text>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <Text style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)' }}>当月完成</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          当月总规模 {totalPts} 点
+        </Text>
+      </div>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-        <Text style={{ color: '#95de64', fontSize: 26, fontWeight: 700 }}>{fmtPoint(stats.done.pts)}</Text>
+        <Text style={{ color: '#95de64', fontSize: 26, fontWeight: 700 }}>{donePts}</Text>
         <Text type="secondary" style={{ fontSize: 12 }}>
           点 · {stats.done.n} 条已完成 / 共 {total} 条
         </Text>
       </div>
+      <Progress
+        percent={percent}
+        size="small"
+        strokeColor="#95de64"
+        trailColor="rgba(255,255,255,0.15)"
+        style={{ margin: '6px 0 0' }}
+      />
     </div>
   )
 }
