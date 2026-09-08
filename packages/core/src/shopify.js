@@ -140,6 +140,18 @@ export async function deleteTheme({ cwd, envName, themeId }) {
 }
 
 /**
+ * 重命名线上主题（headless）：`theme rename --theme <id> --name <新名称>`。
+ * --theme/--name 都传时 CLI 不进交互；live 主题同样可改（仅改名称，不影响发布状态）。
+ * 前置：该 store 已 `shopify login`。
+ * @param {{ cwd: string, envName: string, themeId: string|number, name: string }} opts
+ * @returns {Promise<{ ok: boolean, code: number, stderr: string }>}
+ */
+export async function renameTheme({ cwd, envName, themeId, name }) {
+    const res = await captureShopify(['theme', 'rename', '--theme', String(themeId), '--name', name, '-e', envName], { cwd })
+    return { ok: res.code === 0, code: res.code, stderr: res.stderr }
+}
+
+/**
  * 拉取指定 templates json 文件（headless，对应 shop async 的 pull 步骤）。
  * `shopify theme pull -e <env> --only <file> --only <file> …`
  * 前置：该 store 已 `shopify login`。

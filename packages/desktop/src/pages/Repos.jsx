@@ -41,6 +41,7 @@ import {
   FormatPainterOutlined,
   GithubOutlined,
   GlobalOutlined,
+  HighlightOutlined,
   LoadingOutlined,
   PlusOutlined,
   ProjectOutlined,
@@ -944,6 +945,10 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
   const [themes, setThemes] = useState([]);
   const [busyId, setBusyId] = useState(null);
   const [keyword, setKeyword] = useState("");
+  // 重命名：目标主题 + 新名称输入值 + 提交 loading
+  const [renameFor, setRenameFor] = useState(null); // { id, name, role }
+  const [renameVal, setRenameVal] = useState("");
+  const [renaming, setRenaming] = useState(false);
   // 非 live 主题分页：店铺主题可能近百个，滚动列表翻找效率低
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -1005,6 +1010,53 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
     const res = await window.api.shell.copy(String(t.id));
     if (res?.ok) message.success(`已复制主题 ID：${t.id}`);
     else message.error("复制失败");
+  };
+
+  // 重命名线上主题：弹窗内改名称（预填当前名），live 也可改（仅名称，不影响发布状态）
+  const askRename = (t) => {
+    setRenameVal(t.name || "");
+    setRenameFor(t);
+  };
+  // 实际执行重命名（二次确认通过后调用）
+  const performRename = async (name) => {
+    setRenaming(true);
+    const r = await window.api.repos.renameTheme({
+      dir,
+      themeId: renameFor.id,
+      name,
+    });
+    setRenaming(false);
+    if (!r.ok) return message.error({ content: r.error, duration: 8 });
+    message.success(`已重命名：「${renameFor.name}」→「${name}」`);
+    setRenameFor(null);
+    load();
+    onChanged?.();
+  };
+  // master/alt 生产分支主题（如 Shokz-US-2.0/master、/alt）：改名影响团队对线上环境的辨识，需二次确认
+  const doRename = async () => {
+    const name = renameVal.trim();
+    if (!name) return message.warning("请输入新名称");
+    if (name === renameFor.name) return setRenameFor(null); // 未改动直接关
+    if (/(?:^|\/)(?:master|alt)\b/i.test(renameFor.name)) {
+      modal.confirm({
+        title: "确认重命名生产分支主题？",
+        icon: <ExclamationCircleOutlined style={{ color: "#faad14" }} />,
+        okText: "确认重命名",
+        cancelText: "再想想",
+        content: (
+          <div>
+            <Text>
+              「{renameFor.name}」（#{renameFor.id}
+              ）看起来是 master/alt
+              生产分支主题，团队成员按名称识别线上环境，改名后可能影响协作辨识，请确认不是误操作。
+            </Text>
+          </div>
+        ),
+        onOk: () => performRename(name),
+      });
+      return;
+    }
+    performRename(name);
   };
 
   // 确认弹窗里的主题信息卡：accent 为 'gold'（发布）/ 'red'（删除），只展示名称与 ID
@@ -1183,7 +1235,7 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
       AVATAR_GRADIENTS[
         Number(String(t.id).slice(-1)) % AVATAR_GRADIENTS.length
       ];
-    // 操作项按序号逐个冒出；live 仅复制/编辑，普通主题另有发布与删除
+    // 操作项按序号逐个冒出；live 仅复制/编辑/重命名，普通主题另有发布与删除
     const acts = [
       {
         key: "copy",
@@ -1196,6 +1248,12 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
         title: "打开编辑器后台",
         icon: <EditOutlined />,
         onClick: () => openLink(editorLinkOf(t.id), "编辑器链接"),
+      },
+      {
+        key: "rename",
+        title: "重命名主题",
+        icon: <HighlightOutlined />,
+        onClick: () => askRename(t),
       },
       ...(!isLive
         ? [
@@ -1478,6 +1536,38 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
           )}
         </>
       )}
+
+      {/* 重命名线上主题：预填当前名，确认后调 theme rename 并刷新列表 */}
+      <Modal
+        title='重命名主题'
+        open={!!renameFor}
+        onCancel={() => !renaming && setRenameFor(null)}
+        onOk={doRename}
+        okText='确认重命名'
+        okButtonProps={{ loading: renaming, disabled: !renameVal.trim() }}
+        cancelText='取消'
+        cancelButtonProps={{ disabled: renaming }}
+        destroyOnClose
+        width={420}
+      >
+        <div style={{ marginBottom: 10 }}>
+          <Text type='secondary' style={{ fontSize: 12 }}>
+            目标主题：<Text code>#{renameFor?.id}</Text>{" "}
+            {renameFor?.role === "live" && (
+              <Tag color='gold' style={{ marginInlineEnd: 0 }}>
+                LIVE
+              </Tag>
+            )}
+          </Text>
+        </div>
+        <Input
+          value={renameVal}
+          onChange={(e) => setRenameVal(e.target.value)}
+          placeholder='新主题名称'
+          maxLength={60}
+          onPressEnter={() => renameVal.trim() && !renaming && doRename()}
+        />
+      </Modal>
     </Modal>
   );
 }
@@ -4526,9 +4616,9 @@ function CreateBranchModal({ open, repo, onClose, onDone, contacts }) {
   );
 }
 
-/* ---------------- Git 流程：阶段式流程卡（开发→提测→合并信息） ---------------- */
-// 三段彩色卡片用箭头串联，结构同构：序号+图标+动作标题+阶段副标题，整卡可点击（禁用则置灰+tooltip）。
-// ①开发·拉分支 → ②开发完·提测 → ③上线前·合并信息。
+/* ---------------- Git 流程：阶段式流程卡（拉分支→本地保存→提测→合并信息） ---------------- */
+// 四段彩色卡片用箭头串联，结构同构：序号+图标+动作标题+阶段副标题，整卡可点击（禁用则置灰+tooltip）。
+// ①开发·拉分支 → ②开发·本地保存 → ③开发完·提测 → ④上线前·合并信息。
 function FlowArrow() {
   return (
     <ArrowRightOutlined
@@ -4681,6 +4771,15 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
       <FlowArrow />
       <StageCard
         index={2}
+        color='#13c2c2'
+        title='本地保存'
+        stageName='开发'
+        tooltip='把当前分支配置存为本地项目（无 toml 时初始化+保存两步合一）'
+        onClick={() => onAction("save", repo)}
+      />
+      <FlowArrow />
+      <StageCard
+        index={3}
         color='#fa8c16'
         title='提测'
         stageName='开发完'
@@ -4690,7 +4789,7 @@ function GitFlowSteps({ repo, project, projects, onAction }) {
       />
       <FlowArrow />
       <StageCard
-        index={3}
+        index={4}
         color='#722ed1'
         title='合并信息'
         stageName='上线前'
@@ -4841,23 +4940,6 @@ function RepoCard({
       })),
     });
   }
-
-  // 本地保存不再因 matched 禁用：已保存过的仓库也可打开表单改字段另存为新项目
-  // （与现有项目完全一致时由 SaveRepoModal 提交判重拦截）。
-  // 无 toml 时同一按钮变「初始化并保存」：弹窗内 initCreate + 落 projects.json 两步合一
-  const saveBtn = (
-    <Tooltip title='保存当前 toml 配置为本地项目（无 toml 时先初始化再保存，两步合一）'>
-      <div
-        className='action-tile action-tile-primary'
-        onClick={() => onAction("save", repo)}
-      >
-        <ShopOutlined className='tile-icon' />
-        <span className='tile-label'>
-          {repo.hasToml ? "本地保存" : "初始化并保存"}
-        </span>
-      </div>
-    </Tooltip>
-  );
 
   // 当前生效（toml dev 段对应）的项目：仅用于面板「当前生效」标识，不改变展示顺序
   const matchedId = repo.matched?.id;
@@ -5372,7 +5454,7 @@ function RepoCard({
             )}
           </div>
 
-          {/* Git 流程：开发→拉分支 / 开发完→提测 / 上线前→合并信息 */}
+          {/* Git 流程：开发→拉分支 / 本地保存 / 开发完→提测 / 上线前→合并信息 */}
           <div style={{ marginBottom: 14 }}>
             <SectionLabel color='#52c41a'>Git 流程</SectionLabel>
             <GitFlowSteps
@@ -5389,11 +5471,10 @@ function RepoCard({
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(4, 1fr)",
+                gridTemplateColumns: "repeat(3, 1fr)",
                 gap: 8,
               }}
             >
-              {saveBtn}
               <Tooltip title='在新窗口打开文件引用关系图（支持文件名模糊搜索，结果缓存）'>
                 <div className='action-tile' onClick={openDepGraph}>
                   <DeploymentUnitOutlined

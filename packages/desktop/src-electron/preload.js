@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('api', {
     themeList: (opts) => ipcRenderer.invoke('repos:themeList', opts),
     publishTheme: (opts) => ipcRenderer.invoke('repos:publishTheme', opts),
     deleteTheme: (opts) => ipcRenderer.invoke('repos:deleteTheme', opts),
+    renameTheme: (opts) => ipcRenderer.invoke('repos:renameTheme', opts),
     switchConfig: (opts) => ipcRenderer.invoke('repos:switchConfig', opts),
     editors: () => ipcRenderer.invoke('repos:editors'),
     openInEditor: (opts) => ipcRenderer.invoke('repos:openInEditor', opts),

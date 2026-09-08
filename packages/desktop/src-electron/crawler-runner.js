@@ -912,6 +912,9 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
     tableVarName: null,
     tableRowsRef: null,
     currentTableRowIndex: null,
+    // 当前循环项（表格对齐循环里 = 当前表格行对应的项）：表格编辑写表格外还镜像列到此对象，
+    // 循环体内后续数据处理（如「还有没有空 id」判断）才能看到刚写入的列
+    currentItem: null,
     loop: null,
     loopStates: new Map(),
     walkGen: 0,
@@ -1055,6 +1058,24 @@ export async function runCrawler({ projectId, projectName, graph, showWindow, re
     ctx.declaredOutputs = cp.execution?.declaredOutputs || null
     ctx.loop = cp.execution?.loop || null
     ctx.loopStates = deserializeLoopStates(cp.execution?.loopStates)
+    // 恢复的循环状态重算 tableBacked：旧 checkpoint 里存的是旧「引用判据」的结果——
+    // 数据处理覆盖重建「表格数据」后引用已变，续跑会一直走「表格编辑新建行」。
+    // tableBacked 只在状态创建时计算，恢复时按当前判据（引用相等 或 同名+行数一致）重算
+    for (const [loopId, st] of ctx.loopStates) {
+      const loopNode = ctx.byId.get(loopId)
+      if (!loopNode || loopNode.type !== 'loop' || !Array.isArray(st.items)) continue
+      const vName = String(loopNode.data?.varName ?? '')
+        .trim()
+        .replace(/^\{\{/, '')
+        .replace(/\}\}$/, '')
+        .trim()
+      st.tableBacked =
+        !ctx.isWorker &&
+        (st.items === ctx.tableRowsRef ||
+          (vName === ctx.tableVarName &&
+            !!ctx.table?.rows &&
+            st.items.length === ctx.table.rows.length))
+    }
     ctx.walkGen = cp.execution?.walkGen || 0
     ctx.visited = new Set(cp.execution?.visited || [])
     ctx.queue = (cp.execution?.queue || []).map((id) => ctx.byId.get(id)).filter(Boolean)
@@ -1381,6 +1402,7 @@ function pickNext(ctx, node, result) {
     ctx.loop = st.outer.loop
     ctx.currentRow = st.outer.currentRow
     ctx.currentTableRowIndex = st.outer.currentTableRowIndex ?? null
+    ctx.currentItem = st.outer.currentItem ?? null
     ctx.loopStates.delete(backEdge.target)
     ctx.activeLoopId = st.outer.parentLoopId || null
     ctx.completedLoops.add(backEdge.target)
@@ -2058,14 +2080,24 @@ async function execNode(ctx, node) {
         throw new Error(`变量「${name}」不是数组也不是字符串（${typeof raw}），无法循环`)
       }
       // parentLoopId：进入本循环时最内层的活跃循环——嵌套场景换代沿父链同步外层代数
-      // tableBacked：items 就是导入表格的行（引用判据）——本循环按行下标与表格行对齐，
-      // 循环内「表格编辑」写当前行而非新建行
+      // tableBacked：items 就是导入表格的行——本循环按行下标与表格行对齐，
+      // 循环内「表格编辑」写当前行而非新建行。两种判据：
+      // ① 引用相等：循环变量就是导入表格写入的原数组；
+      // ② 同名+行数一致：「数据处理」覆盖重建「表格数据」（.map 返回新数组）是常见写法，
+      //    引用已变但行序与表格行一一对应，仍按行下标对齐；行数变了说明过滤/增删过，
+      //    无法对齐，回退新建行（宁多建行不写错行）
       st = {
         items,
         index: 0,
         gen: ctx.walkGen,
-        tableBacked: !ctx.isWorker && Array.isArray(raw) && raw === ctx.tableRowsRef,
-        outer: { loop: ctx.loop, currentRow: ctx.currentRow, currentTableRowIndex: ctx.currentTableRowIndex, parentLoopId: ctx.activeLoopId || null },
+        tableBacked:
+          !ctx.isWorker &&
+          Array.isArray(raw) &&
+          (raw === ctx.tableRowsRef ||
+            (name === ctx.tableVarName &&
+              !!ctx.table?.rows &&
+              raw.length === ctx.table.rows.length)),
+        outer: { loop: ctx.loop, currentRow: ctx.currentRow, currentTableRowIndex: ctx.currentTableRowIndex, currentItem: ctx.currentItem, parentLoopId: ctx.activeLoopId || null },
       }
       ctx.loopStates.set(node.id, st)
       ctx.log('info', `数据循环「${name}」共 ${items.length} 项${splitNote}`, node)
@@ -2076,6 +2108,7 @@ async function execNode(ctx, node) {
       ctx.loop = st.outer.loop
       ctx.currentRow = st.outer.currentRow
       ctx.currentTableRowIndex = st.outer.currentTableRowIndex ?? null
+      ctx.currentItem = st.outer.currentItem ?? null
       ctx.activeLoopId = st.outer.parentLoopId || null
       ctx.endLoopAgg?.(ctx, node.id)
       ctx.log('warn', `循环变量「${name}」为空，循环体已跳过`, node)
@@ -2089,6 +2122,7 @@ async function execNode(ctx, node) {
       ctx.loop = st.outer.loop
       ctx.currentRow = st.outer.currentRow
       ctx.currentTableRowIndex = st.outer.currentTableRowIndex ?? null
+      ctx.currentItem = st.outer.currentItem ?? null
       ctx.activeLoopId = st.outer.parentLoopId || null
       ctx.endLoopAgg?.(ctx, node.id)
       ctx.log('warn', `循环「${name}」已完成，再次进入时跳过循环体`, node)
@@ -2107,6 +2141,8 @@ async function execNode(ctx, node) {
     // 本循环直接遍历导入表格的行：表格编辑对齐到当前项的表格行；否则沿用外层行循环
     // 的行下标（嵌套非表格循环不冲掉外层的行指向）
     ctx.currentTableRowIndex = st.tableBacked ? gi : (st.outer.currentTableRowIndex ?? null)
+    // 当前循环项：表格对齐循环里 = 当前表格行对应的项（表格编辑镜像列的目标）；非表格循环沿用外层的项
+    ctx.currentItem = st.tableBacked ? item : (st.outer.currentItem ?? null)
     // 变量合并而非替换：外层变量继续可见；对象项的属性直接平铺成
     // 变量（与表格行一致），任何项都可经 {{当前项}}/{{当前序号}} 引用。
     // itemVar：嵌套循环时 {{当前项}} 就近覆盖（只剩最内层的），各循环配了
@@ -2214,6 +2250,11 @@ async function execNode(ctx, node) {
     const existed = ctx.table.columns.includes(column)
     if (!existed) ctx.table.columns.push(column)
     ctx.currentRow[column] = value
+    // 镜像到当前循环项：循环变量（「表格数据」等）的行对象是导入时的拷贝、数据处理后更是
+    // 新对象，表格编辑只写引擎表格的话循环体内看不到刚写入的列（如「还有没有空 id」判断）
+    if (ctx.currentItem !== null && typeof ctx.currentItem === 'object') {
+      ctx.currentItem[column] = value
+    }
     ctx.pushTable()
     return { summary: `${existed ? '更新' : '新增'}列「${column}」= ${value === '' ? '空' : value}` }
   }

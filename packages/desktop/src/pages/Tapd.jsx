@@ -114,7 +114,7 @@ function colorOf(status, cn = '') {
   const s = `${status} ${cn}`.toLowerCase()
   if (/reject|拒绝/.test(s)) return '#ff4d4f'
   if (/完成|实现|解决|通过|关闭|上线|done|closed|resolve/.test(s)) return '#52c41a'
-  if (/测试/.test(s)) return '#722ed1'
+  if (/测试/.test(s)) return '#b37feb'
   if (/进行|开发|progress|develop/.test(s)) return '#1677ff'
   if (/规划|待|未|open|new|plan/.test(s)) return '#faad14'
   return '#8c8c8c'
@@ -686,7 +686,9 @@ function ScheduleCalendar({ items, bucketOf, statusMap, monthlyPoints, currentMo
                           height: 24,
                           cursor: 'pointer',
                           borderTop: '1px solid rgba(255,255,255,0.04)',
-                          background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+                          background: hovered ? 'rgba(255,255,255,0.07)' : 'transparent',
+                          boxShadow: hovered ? 'inset 2px 0 0 #1677ff' : 'none',
+                          transition: 'background 0.15s ease, box-shadow 0.15s ease',
                         }}
                       >
                           <span
@@ -700,18 +702,49 @@ function ScheduleCalendar({ items, bucketOf, statusMap, monthlyPoints, currentMo
                               minWidth: 0,
                             }}
                           >
-                            <span style={{ width: 5, height: 5, borderRadius: '50%', background: color, flexShrink: 0 }} />
+                            <span
+                              style={{
+                                width: 5,
+                                height: 5,
+                                borderRadius: '50%',
+                                background: color,
+                                flexShrink: 0,
+                                boxShadow: hovered ? `0 0 6px ${color}` : 'none',
+                                transition: 'box-shadow 0.15s ease',
+                              }}
+                            />
                             <span
                               style={{
                                 fontSize: 11,
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis',
                                 whiteSpace: 'nowrap',
-                                color: hovered ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.7)',
+                                color: hovered ? '#fff' : 'rgba(255,255,255,0.7)',
+                                fontWeight: hovered ? 600 : 400,
+                                transform: hovered ? 'translateX(2px)' : 'none',
+                                transition: 'color 0.15s, transform 0.15s, font-weight 0.15s',
                               }}
                             >
                               {it.name || it.title}
                             </span>
+                            {/* 规模点徽标：行尾小胶囊，无点数不展示 */}
+                            {pointOf(it) > 0 && (
+                              <span
+                                style={{
+                                  flexShrink: 0,
+                                  fontSize: 9,
+                                  lineHeight: '13px',
+                                  padding: '0 4px',
+                                  borderRadius: 7,
+                                  color: hovered ? '#fff' : color,
+                                  background: hovered ? color : `${color}26`,
+                                  border: `1px solid ${color}55`,
+                                  transition: 'background 0.15s, color 0.15s',
+                                }}
+                              >
+                                {fmtPoint(pointOf(it))}点
+                              </span>
+                            )}
                           </span>
                           <div
                             style={{
@@ -751,17 +784,66 @@ function ScheduleCalendar({ items, bucketOf, statusMap, monthlyPoints, currentMo
                                 }}
                               />
                             )}
-                            {/* 信息框：hover 行时钉在横条正上方（open 受控行 hover，placement=top 定位到条） */}
+                            {/* 信息框：hover 行时钉在横条正上方（open 受控行 hover，placement=top 定位到条）。
+                                结构化排版：标题行（色点+名称）→ 日期行 → 分类/状态/规模点胶囊 → 虚线分隔的操作提示 */}
                             <Tooltip
                               open={hovered}
                               placement="top"
                               title={
-                                <div>
-                                  <div>{it.name || it.title}</div>
-                                  <div style={{ opacity: 0.7, marginTop: 2 }}>
-                                    {s} ~ {e}（{BUCKETS.find((x) => x.key === b)?.label} · {statusMap?.[it.status] || it.status}）
+                                <div style={{ minWidth: 200, maxWidth: 320 }}>
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: 6,
+                                      fontWeight: 600,
+                                      fontSize: 13,
+                                      paddingBottom: 6,
+                                      marginBottom: 6,
+                                      borderBottom: '1px solid rgba(255,255,255,0.14)',
+                                    }}
+                                  >
+                                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
+                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {it.name || it.title}
+                                    </span>
                                   </div>
-                                  <div style={{ opacity: 0.5, marginTop: 2 }}>点击行打开工单详情</div>
+                                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.78)', fontVariantNumeric: 'tabular-nums', letterSpacing: 0.2 }}>
+                                    {s} ~ {e}
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+                                    {[
+                                      { c: color, t: BUCKETS.find((x) => x.key === b)?.label },
+                                      { c: STATUS_COLOR[it.status] || '#8c8c8c', t: statusMap?.[it.status] || it.status },
+                                      ...(pointOf(it) > 0 ? [{ c: '#faad14', t: `${fmtPoint(pointOf(it))} 点` }] : []),
+                                    ].map((chip) => (
+                                      <span
+                                        key={chip.t}
+                                        style={{
+                                          fontSize: 10,
+                                          lineHeight: '16px',
+                                          padding: '0 6px',
+                                          borderRadius: 4,
+                                          color: chip.c,
+                                          background: `${chip.c}22`,
+                                          border: `1px solid ${chip.c}55`,
+                                        }}
+                                      >
+                                        {chip.t}
+                                      </span>
+                                    ))}
+                                  </div>
+                                  <div
+                                    style={{
+                                      marginTop: 8,
+                                      paddingTop: 5,
+                                      borderTop: '1px dashed rgba(255,255,255,0.12)',
+                                      fontSize: 10,
+                                      color: 'rgba(255,255,255,0.45)',
+                                    }}
+                                  >
+                                    点击行打开工单详情
+                                  </div>
                                 </div>
                               }
                             >
@@ -777,8 +859,9 @@ function ScheduleCalendar({ items, bucketOf, statusMap, monthlyPoints, currentMo
                                   background: `linear-gradient(180deg, ${color}cc, ${color}8c)`,
                                   borderLeft: clippedL ? `2px solid ${color}` : 'none',
                                   borderRight: clippedR ? `2px solid ${color}` : 'none',
-                                  boxShadow: hovered ? `0 0 8px ${color}66` : 'none',
-                                  transition: 'top 0.1s, bottom 0.1s, box-shadow 0.1s',
+                                  boxShadow: hovered ? `0 0 10px ${color}aa, 0 0 3px ${color}` : 'none',
+                                  filter: hovered ? 'brightness(1.15)' : 'none',
+                                  transition: 'top 0.1s, bottom 0.1s, box-shadow 0.15s, filter 0.15s',
                                   zIndex: 2,
                                 }}
                               />

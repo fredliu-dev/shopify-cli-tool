@@ -360,6 +360,18 @@ export function registerReposIpc() {
     }
   })
 
+  // 重命名线上主题（theme rename headless；仅改名称不影响发布状态，live 也可改）
+  ipcMain.handle('repos:renameTheme', async (_evt, { dir, themeId, name }) => {
+    const { renameTheme } = await load()
+    try {
+      const res = await renameTheme({ cwd: dir, envName: 'dev', themeId, name })
+      if (!res.ok) return { ok: false, error: `重命名主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
   // 发布主题为线上 live（theme publish --force 跳过交互确认；live 不可发布由前端按 role 拦截）
   ipcMain.handle('repos:publishTheme', async (_evt, { dir, themeId }) => {
     const { publishTheme } = await load()
