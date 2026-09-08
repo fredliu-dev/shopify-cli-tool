@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AutoComplete, Button, Space, Tag, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { switchShellPage } from '../shell-events.js'
@@ -75,7 +75,7 @@ const looksLikeRef = (s) => /^https?:\/\/\S+$/i.test(s) || /^\d{6,}$/.test(s)
  * titleOnly：在 freeText 行为基础上（纯字符串值 + 可手填），选中/解析工单后只回填工单标题、
  * 不附链接 —— 供「活动名称」这类只要标题的字段（复制线上主题弹窗）复用。
  */
-export default function WorkItemSelect({ value, onChange, initialUrl = '', footerHint, freeText = false, titleOnly = false }) {
+export default function WorkItemSelect({ value, onChange, initialUrl = '', footerHint, freeText = false, titleOnly = false, parentRef = '' }) {
   // titleOnly 隐含自由文本能力：值同样是纯字符串、未配置工单系统也可手填
   const stringMode = freeText || titleOnly
   const [text, setText] = useState('')
@@ -84,6 +84,27 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
   const [err, setErr] = useState('')
   const [hint, setHint] = useState({ level: 'secondary', text: '' })
   const timer = useRef(null)
+
+  // 若指定了父工单引用（如本地项目已关联父需求），额外拉取其子工单并入候选，
+  // 这样选择器里可直接切换到子工单；失败静默（子单是增强信息，不阻塞主列表）。
+  const loadChildren = useCallback(async (baseItems) => {
+    const raw = String(parentRef || '').trim()
+    if (!raw || !looksLikeRef(raw)) return baseItems
+    const cfgRes = await window.api.tapd.loadConfig()
+    const workspaceId = cfgRes.ok ? cfgRes.data?.workspaceId : undefined
+    if (!workspaceId) return baseItems
+    const resolved = await window.api.tapd.resolveWorkItem({ input: raw, workspaceId })
+    if (!resolved.ok || !resolved.data?.id) return baseItems
+    const { type: parentType, id: parentId } = resolved.data
+    const kidsRes = await window.api.tapd.childrenOf({ parentType, parentId, workspaceId })
+    if (!kidsRes.ok || !kidsRes.data?.length) return baseItems
+    const byId = new Map(baseItems.map((it) => [String(it.id), it]))
+    const merged = [...baseItems]
+    for (const k of kidsRes.data) {
+      if (!byId.has(String(k.id))) merged.push(k)
+    }
+    return merged
+  }, [parentRef])
 
   const detect = async (force = false) => {
     setPhase('loading')
@@ -96,7 +117,8 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
     }
     const res = await window.api.tapd.myOpenItems({ workspaceId: cfg.workspaceId, force })
     if (res.ok) {
-      setItems(res.data || [])
+      const merged = await loadChildren(res.data || [])
+      setItems(merged)
       setPhase('ready')
       return
     }
@@ -132,30 +154,60 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase])
 
+  // 树型排序：父单在前、子单紧跟其父（下拉里缩进成树）；父不在候选里的子单平铺。
+  // 父子关系按 parentRef（story_id/parent_id）在候选集合内解析
+  const ordered = useMemo(() => {
+    const byId = new Map(items.map((it) => [String(it.id), it]))
+    const kids = new Map()
+    items.forEach((it) => {
+      const ref = String(it.parentRef || '').trim()
+      if (!ref || ref === '0' || ref === String(it.id) || !byId.has(ref)) return
+      if (!kids.has(ref)) kids.set(ref, [])
+      kids.get(ref).push(it)
+    })
+    const list = []
+    items
+      .filter((it) => {
+        const ref = String(it.parentRef || '').trim()
+        return !(ref && ref !== '0' && ref !== String(it.id) && byId.has(ref))
+      })
+      .sort((a, b) => Number(b.id) - Number(a.id))
+      .forEach((p) => {
+        const cs = kids.get(String(p.id)) || []
+        list.push({ it: p, depth: 0, childCount: cs.length })
+        ;[...cs].sort((a, b) => Number(b.id) - Number(a.id)).forEach((c) => list.push({ it: c, depth: 1 }))
+      })
+    return list
+  }, [items])
+
   // 选中后输入框显示的文本（同时也是命中匹配的键）：标题重名时后缀 #id 末 4 位消歧
   const entries = useMemo(() => {
     const seen = new Set()
-    return items.map((it) => {
+    return ordered.map(({ it, depth, childCount }) => {
       const display = seen.has(it.title) ? `${it.title} #${it.id.slice(-4)}` : it.title
       seen.add(it.title)
-      return { it, display }
+      return { it, display, depth, childCount }
     })
-  }, [items])
+  }, [ordered])
 
   const options = useMemo(
     () =>
-      entries.map(({ it, display }) => ({
+      entries.map(({ it, display, depth, childCount }) => ({
         value: display,
         display,
         item: it,
         label: (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, paddingLeft: depth * 20 }}>
+              {depth > 0 && <span style={{ color: 'rgba(255,255,255,0.35)', flexShrink: 0 }}>└</span>}
               <StatusPill status={it.status} cn={it.statusCn} />
               <Tag color={TYPE_COLOR[it.type] || 'default'} style={{ marginInlineEnd: 0, flexShrink: 0 }}>
                 {it.typeCn}
               </Tag>
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{display}</span>
+              {childCount > 0 && (
+                <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, flexShrink: 0 }}>{childCount} 子单</span>
+              )}
             </span>
             <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, flexShrink: 0 }}>#{it.id.slice(-6)}</span>
           </div>
@@ -300,7 +352,7 @@ export default function WorkItemSelect({ value, onChange, initialUrl = '', foote
         </Text>
       ) : (
         <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 12 }}>
-          {footerHint || '候选为当前账号未完成的工单；选中后工单标题作为 project_desc，链接随配置保存供后续回显'}
+          {footerHint || '候选为当前账号未完成的工单及其父需求（按父子树展示）；选中后工单标题作为 project_desc，链接随配置保存供后续回显'}
         </Text>
       )}
     </div>

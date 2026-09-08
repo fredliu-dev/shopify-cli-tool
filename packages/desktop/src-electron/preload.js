@@ -131,12 +131,14 @@ contextBridge.exposeInMainWorld('api', {
     // 初始化弹窗工单下拉：我的未完成工单聚合；resolveWorkItem 为手输链接/ID 的单条解析
     myOpenItems: (opts) => ipcRenderer.invoke('tapd:myOpenItems', opts),
     resolveWorkItem: (opts) => ipcRenderer.invoke('tapd:resolveWorkItem', opts),
+    // 按 id 精确取单个工单（详情抽屉「父工单」纯展示用）
+    getWorkItem: (opts) => ipcRenderer.invoke('tapd:getWorkItem', opts),
     statusMap: (opts) => ipcRenderer.invoke('tapd:statusMap', opts),
     transitions: (opts) => ipcRenderer.invoke('tapd:transitions', opts),
     lastSteps: (opts) => ipcRenderer.invoke('tapd:lastSteps', opts),
     updateStatus: (opts) => ipcRenderer.invoke('tapd:updateStatus', opts),
-    // 编辑工单字段：{ type, workspaceId, id, fields }（fields 键为 TAPD 字段名，core 白名单过滤）
-    update: (opts) => ipcRenderer.invoke('tapd:update', opts),
+    // 取父工单下的子工单（本地项目关联父工单时，选择器可切换到子工单）
+    childrenOf: (opts) => ipcRenderer.invoke('tapd:childrenOf', opts),
     members: (opts) => ipcRenderer.invoke('tapd:members', opts),
     comments: (opts) => ipcRenderer.invoke('tapd:comments', opts),
     addComment: (opts) => ipcRenderer.invoke('tapd:addComment', opts),

@@ -5724,7 +5724,8 @@ function EditProjectModal({ open, project, onClose, onDone }) {
         <Form.Item name='_tapd' label='工单（选填）'>
           <WorkItemSelect
             initialUrl={project?._tapd ? String(project._tapd) : ""}
-            footerHint='仅保存工单链接（重新选择或粘贴新链接即替换）；活动标题请维护上方「项目描述」'
+            parentRef={project?._tapd ? String(project._tapd) : ""}
+            footerHint='当前为父工单时会自动加载其子工单；选中子工单后项目即关联到该子单'
           />
         </Form.Item>
         <Button type='primary' htmlType='submit' loading={loading}>

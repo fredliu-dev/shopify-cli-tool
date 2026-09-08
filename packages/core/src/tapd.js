@@ -7,7 +7,7 @@ import { loadProjects } from './projects.js'
 const DATA_DIR = userDataDir()
 const TAPD_FILE = join(DATA_DIR, 'tapd.json')
 const TAPD_CACHE_FILE = join(DATA_DIR, 'tapd-cache.json')
-const TAPD_CACHE_VERSION = 1
+const TAPD_CACHE_VERSION = 2 // v2：myOpen 候选带 parentRef/parentOnly（父子树），旧结构直接作废重拉
 const TAPD_CACHE_MAX = 12
 
 const TAPD_API_BASE = 'https://api.tapd.cn'
@@ -245,16 +245,17 @@ export async function getWorkspaceInfo(workspaceId, auth) {
  * 分页拉取某类工单列表（逐页串行，页间 120ms 防限流）。
  * 每条附带 _url（TAPD 前端详情链接，`_` 前缀=派生字段，与 _tapd/_branch 约定一致）。
  * @param {'story'|'bug'|'task'} type
- * @param {{ workspaceId: string, status?: string, iterationId?: string, owner?: string, id?: string, maxPages?: number, auth?: object }} opts
+ * @param {{ workspaceId: string, status?: string, iterationId?: string, owner?: string, id?: string, parentId?: string, storyId?: string, maxPages?: number, auth?: object }} opts
  *   maxPages 默认 3（每页 200，最多拉 600 条；TAPD 限流按账号计，保守起步）；
- *   id 为按工单 id 精确过滤（服务端 id 参数，供 resolveWorkItemRef 单条定位）
+ *   id 为按工单 id 精确过滤（服务端 id 参数，供 resolveWorkItemRef 单条定位）；
+ *   parentId 映射为 parent_id，用于查子需求；storyId 映射为 story_id，用于查某需求下的任务/缺陷
  * @returns {Promise<{ items: Array<object>, total: number }>} total 来自 /count 接口
  */
-export async function listWorkItems(type, { workspaceId, status, iterationId, owner, id, maxPages = 3, auth } = {}) {
+export async function listWorkItems(type, { workspaceId, status, iterationId, owner, id, parentId, storyId, maxPages = 3, auth } = {}) {
     const meta = WORK_ITEM_META[type]
     if (!meta) throw new Error(`未知的工单类型：${type}`)
     if (!workspaceId) throw new Error('请先选择 TAPD 项目（workspace_id）')
-    const filters = cleanParams({ status, iteration_id: iterationId, owner, id })
+    const filters = cleanParams({ status, iteration_id: iterationId, owner, id, parent_id: parentId, story_id: storyId })
     let items = []
     let page = 1
     while (page <= maxPages) {
@@ -314,6 +315,73 @@ export async function resolveWorkItemRef(input, { workspaceId, auth } = {}) {
         }
     }
     throw new Error('未找到该工单（可能不在所属项目内，或当前令牌无权限查看）')
+}
+
+/**
+ * 按类型 + id 精确取单个工单（详情抽屉「父工单」纯展示用；单页列表请求，不缓存）。
+ * @param {'story'|'bug'|'task'} type
+ * @param {{ workspaceId: string, id: string, auth?: object }} opts
+ * @returns {Promise<object|null>} 命中的完整工单实体（带 _url），查不到返回 null
+ */
+export async function getWorkItemById(type, { workspaceId, id, auth } = {}) {
+    if (!id) return null
+    const { items } = await listWorkItems(type, { workspaceId, id, maxPages: 1, auth })
+    return items.find((it) => String(it.id) === String(id)) || null
+}
+
+/**
+ * 取某父工单下的子工单（用于「本地项目关联父工单时，提测/release 等选择器可切换到子工单」）。
+ * - 父为 story：查其下子需求（parent_id）+ 任务（story_id）+ 缺陷（story_id）
+ * - 父为 task/bug：通常无子单，返回空数组
+ * 子工单类型各自请求，失败互不阻塞；结果统一为 WorkItemSelect 可消费的候选对象。
+ * @param {'story'|'bug'|'task'} parentType
+ * @param {string} parentId
+ * @param {{ workspaceId: string, auth?: object }} opts
+ * @returns {Promise<Array<{ type: string, typeCn: string, id: string, title: string, status: string, statusCn: string, url: string, parentRef: string }>>}
+ */
+export async function listChildrenOfWorkItem(parentType, parentId, { workspaceId, auth } = {}) {
+    if (!parentId || !workspaceId) return []
+    const pid = String(parentId)
+    const out = []
+    const statusMaps = {}
+    const loadStatusMap = async (type) => {
+        if (statusMaps[type]) return statusMaps[type]
+        statusMaps[type] = (await getStatusMap(type, { workspaceId, auth })) || {}
+        return statusMaps[type]
+    }
+    if (parentType === 'story') {
+        const [storyMap, taskMap, bugMap] = await Promise.all([
+            loadStatusMap('story'),
+            loadStatusMap('task'),
+            loadStatusMap('bug'),
+        ])
+        const runs = [
+            { type: 'story', map: storyMap, filter: { parentId: pid } },
+            { type: 'task', map: taskMap, filter: { storyId: pid } },
+            { type: 'bug', map: bugMap, filter: { storyId: pid } },
+        ]
+        for (const { type, map, filter } of runs) {
+            try {
+                const meta = WORK_ITEM_META[type]
+                const { items } = await listWorkItems(type, { workspaceId, ...filter, maxPages: 3, auth })
+                for (const it of items) {
+                    out.push({
+                        type,
+                        typeCn: meta.cn,
+                        id: String(it.id),
+                        title: String(it.name || it.title || `#${it.id}`),
+                        status: it.status,
+                        statusCn: String(map?.[it.status] || it.status),
+                        url: meta.url(workspaceId, it.id),
+                        parentRef: pid,
+                    })
+                }
+            } catch {
+                /* 某一类子单查询失败不阻塞其他类型 */
+            }
+        }
+    }
+    return out
 }
 
 /* ---------------- 实时同步（增量轮询） ---------------- */
@@ -555,53 +623,6 @@ export async function updateWorkItemStatus(type, { workspaceId, id, status, extr
     await tapdRequest(meta.api, { method: 'POST', form, auth })
     clearTapdCache(`list:${workspaceId}`)
     return { id, status }
-}
-
-// 编辑工单允许下发的字段（开放文档声明的可编辑字段白名单，防止把内部字段发给 API）；
-// custom_field_* 是各项目自定义字段（开放文档明确更新接口支持）
-const EDITABLE_FIELDS = new Set([
-    'name',
-    'title',
-    'description',
-    'owner',
-    'cc',
-    'priority',
-    'priority_label',
-    'begin',
-    'due',
-    'deadline',
-    'developer',
-    'iteration_id',
-    'version',
-    'module',
-    'label',
-    'current_user',
-])
-const isEditableKey = (k) => EDITABLE_FIELDS.has(k) || /^custom_field_/.test(k)
-
-/**
- * 编辑工单字段：POST /stories|/bugs|/tasks（id + workspace_id + 任意可改字段，一次一条）。
- * 与流转状态同一端点；空值字段跳过（开放 API 对空串行为不明确，不支持清空日期类字段）。
- * 成功后清掉该 workspace 全部列表缓存（下次 tapd:list 强制重新拉取）。
- * @param {'story'|'bug'|'task'} type
- * @param {{ workspaceId: string, id: string, fields: object, auth?: object }} opts
- * @returns {Promise<{ id: string, fields: object }>}
- */
-export async function updateWorkItem(type, { workspaceId, id, fields, auth } = {}) {
-    const meta = WORK_ITEM_META[type]
-    if (!meta) throw new Error(`未知的工单类型：${type}`)
-    if (!id) throw new Error('缺少工单 id')
-    const patch = {}
-    for (const [k, v] of Object.entries(fields || {})) {
-        if (!isEditableKey(k)) continue
-        const s = String(v ?? '').trim()
-        if (s) patch[k] = s
-    }
-    if (!Object.keys(patch).length) throw new Error('没有可更新的字段')
-    const form = cleanParams({ workspace_id: workspaceId, id, ...patch })
-    await tapdRequest(meta.api, { method: 'POST', form, auth })
-    clearTapdCache(`list:${workspaceId}`)
-    return { id, fields: patch }
 }
 
 /* ---------------- 缓存（deps.js 同款：版本号 + savedAt + LRU） ---------------- */

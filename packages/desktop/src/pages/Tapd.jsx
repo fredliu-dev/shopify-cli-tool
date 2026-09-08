@@ -21,11 +21,11 @@ import {
   Drawer,
   Empty,
   Form,
+  Image,
   Input,
   Modal,
   Radio,
   ConfigProvider,
-  DatePicker,
   Select,
   Space,
   Table,
@@ -34,7 +34,6 @@ import {
   Typography,
   Spin,
 } from 'antd'
-import dayjs from 'dayjs'
 import {
   CheckOutlined,
   CommentOutlined,
@@ -287,21 +286,45 @@ function onRichImageError(e) {
 }
 
 // 富文本/纯文本统一渲染（TAPD description 两种都可能返回；纯文本保留换行）。
-// 暗色主题下富文本内联的深灰字色由页面级 .tapd-rich 规则强制覆盖，保证可读
+// 暗色主题下富文本内联的深灰字色由页面级 .tapd-rich 规则强制覆盖，保证可读。
+// 点击富文本里的图片全屏放大预览（antd Image 预览层，带缩放/旋转工具条）
 function RichContent({ html, style }) {
+  const [previewSrc, setPreviewSrc] = useState('') // 当前预览的图片地址（'' = 关闭）
   const s = String(html || '').trim()
   if (!s) return <Text type="secondary">（无）</Text>
   if (!/[<>]/.test(s)) {
     return <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', ...style }}>{s}</div>
   }
+  const onClick = (e) => {
+    // 图片优先于链接（TAPD 常把 <img> 包在 <a> 里）：点图即全屏预览，不再触发链接跳转；
+    // 加载失败的占位图（需登录）没有可看的内容，跳过
+    const img = e.target.closest && e.target.closest('img')
+    if (img && !img.dataset.tapdFallback) {
+      e.preventDefault()
+      setPreviewSrc(img.currentSrc || img.getAttribute('src') || '')
+      return
+    }
+    onRichContentClick(e)
+  }
   return (
-    <div
-      className="tapd-rich"
-      style={style}
-      onClick={onRichContentClick}
-      onErrorCapture={onRichImageError}
-      dangerouslySetInnerHTML={{ __html: proxiedTapdImages(s) }}
-    />
+    <>
+      <div
+        className="tapd-rich"
+        style={style}
+        onClick={onClick}
+        onErrorCapture={onRichImageError}
+        dangerouslySetInnerHTML={{ __html: proxiedTapdImages(s) }}
+      />
+      {/* 隐藏宿主 Image：只借它的全屏预览层展示被点的图，主图本身不占布局 */}
+      <Image
+        style={{ display: 'none' }}
+        preview={{
+          visible: !!previewSrc,
+          src: previewSrc || undefined,
+          onVisibleChange: (v) => !v && setPreviewSrc(''),
+        }}
+      />
+    </>
   )
 }
 
@@ -1101,9 +1124,15 @@ export function TapdStyles() {
   return (
     <style>{`
       .tapd-rich, .tapd-rich * { color: rgba(255,255,255,0.82) !important; }
-      .tapd-rich a { color: #4096ff !important; }
+      /* 长 URL（无空格连续字符）强制在容器内折行，防止撑破父栏/描述块 */
+      .tapd-rich { overflow-wrap: anywhere; word-break: break-word; }
+      .tapd-rich a { color: #4096ff !important; word-break: break-all; }
       .tapd-rich p { margin: 0 0 8px; line-height: 1.7; }
-      .tapd-rich img { max-width: 100%; border-radius: 6px; }
+      .tapd-rich img { max-width: 100%; border-radius: 6px; cursor: zoom-in; }
+      /* 表格里父工单行（带子单）：淡蓝底色 + 左侧同色细条，与子单行区分 */
+      .tapd-parent-row > td { background: rgba(22, 119, 255, 0.08) !important; }
+      .tapd-parent-row > td:first-child { box-shadow: inset 2px 0 0 rgba(22, 119, 255, 0.45); }
+      .tapd-parent-row:hover > td { background: rgba(22, 119, 255, 0.14) !important; }
       .tapd-rich pre, .tapd-rich code { white-space: pre-wrap; word-break: break-word; }
       @keyframes tapd-node-pulse {
         0% { box-shadow: 0 0 0 0 var(--nc-a, rgba(255,255,255,0.4)); }
@@ -1325,7 +1354,77 @@ function FlowPath({ item, statusMap, type }) {
 
 /* ---------------- 详情抽屉（全字段 + 描述 + 评论历史 / 回评论） ---------------- */
 
-export function DetailDrawer({ open, item, type, statusMap, workspaceId, myName, webLogin, onWebLogin, members, onClose, onFlow, onEditSaved }) {
+// 父需求面板（详情抽屉左侧栏，纯展示）：状态 + 标题 + 关键字段 + 描述富文本。
+// 无流转/编辑/评论等任何操作逻辑；数据由 DetailDrawer 按子单的 story_id/parent_id 拉取
+function ParentPanel({ parent, statusMap }) {
+  return (
+    <div
+      style={{
+        // 弹性宽度：占抽屉四成，窄窗口下限 300 防挤压，宽屏上限 640 防失衡（不写死 px）
+        flex: '0 1 40%',
+        minWidth: 300,
+        maxWidth: 640,
+        minHeight: 0,
+        overflowY: 'auto',
+        paddingRight: 18,
+        borderRight: '1px solid rgba(255,255,255,0.08)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          父需求
+        </Text>
+        <StatusTag status={parent.status} cn={statusMap?.[parent.status]} />
+        {parent.priority ? <PriorityDot priority={parent.priority} style={{ width: 12, height: 12, fontSize: 8 }} /> : null}
+      </div>
+      <Text strong style={{ fontSize: 14, lineHeight: 1.5, display: 'block', marginBottom: 10 }}>
+        {parent.name || parent.title}
+      </Text>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: 1,
+          background: 'rgba(255,255,255,0.07)',
+          borderRadius: 8,
+          overflow: 'hidden',
+          marginBottom: 12,
+        }}
+      >
+        {[
+          { label: '处理人', value: String(parent.owner || '').split(';').filter(Boolean).join('、') || '-' },
+          { label: '规模点', value: pointOf(parent) || '-' },
+          { label: '开始时间', value: startOf(parent) || '-' },
+          { label: '截止时间', value: dueOf(parent) || '-' },
+        ].map((f) => (
+          <div key={f.label} style={{ background: 'rgba(255,255,255,0.03)', padding: '6px 10px 7px', minWidth: 0 }}>
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 2 }}>{f.label}</div>
+            <div
+              style={{
+                fontSize: 12,
+                color: 'rgba(255,255,255,0.85)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                fontVariantNumeric: 'tabular-nums',
+              }}
+            >
+              {f.value}
+            </div>
+          </div>
+        ))}
+      </div>
+      <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+        描述
+      </Text>
+      <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 8, padding: '8px 12px' }}>
+        <RichContent html={parent.description} />
+      </div>
+    </div>
+  )
+}
+
+export function DetailDrawer({ open, item, type, statusMap, workspaceId, myName, webLogin, onWebLogin, onClose, onFlow }) {
   const { message } = App.useApp()
   const [comments, setComments] = useState([])
   const [cmtsLoading, setCmtsLoading] = useState(false)
@@ -1335,11 +1434,35 @@ export function DetailDrawer({ open, item, type, statusMap, workspaceId, myName,
   const [editingId, setEditingId] = useState(null) // 正在内联编辑的评论 id
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
-  const [editing, setEditing] = useState(false) // 编辑工单弹窗
   // 图片重载 nonce：登录 TAPD 后点「重新加载」bump 一次，key 变化强制 <img> 重新请求
   const [imgNonce, setImgNonce] = useState(0)
+  // 父工单（纯展示）：task/bug 的 story_id、story 的 parent_id 指向父需求；
+  // 命中时抽屉加宽为双栏，左侧栏只读展示（无流转/编辑/评论等任何操作）
+  const [parent, setParent] = useState(null)
+  const [parentStatusMap, setParentStatusMap] = useState(null)
   const hasImages =
     /<img\b/i.test(String(item?.description || '')) || comments.some((c) => /<img\b/i.test(c.description || ''))
+
+  // 打开/切换工单时拉父需求（失败静默：父栏是增强信息，不阻塞详情展示）
+  useEffect(() => {
+    setParent(null)
+    setParentStatusMap(null)
+    if (!open || !item || !workspaceId) return
+    const ref = String(item.story_id || item.parent_id || '').trim()
+    if (!ref || ref === '0') return
+    let alive = true
+    ;(async () => {
+      const res = await window.api.tapd.getWorkItem({ type: 'story', workspaceId, id: ref })
+      if (!alive || !res.ok || !res.data) return
+      setParent(res.data)
+      const sm = await window.api.tapd.statusMap({ type: 'story', workspaceId })
+      if (alive && sm.ok) setParentStatusMap(sm.data)
+    })()
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, item?.id, workspaceId])
 
   // 打开/切换工单时拉评论（实时，不缓存）；失败静默为空（评论是增强信息）
   useEffect(() => {
@@ -1398,9 +1521,17 @@ export function DetailDrawer({ open, item, type, statusMap, workspaceId, myName,
   }
 
   return (
-    <Drawer open={open} onClose={onClose} width={620} title="工单详情" styles={{ body: { padding: '12px 20px 24px' } }}>
+    <Drawer open={open} onClose={onClose} width={parent ? 'min(1500px, 92vw)' : 620} title="工单详情" styles={{ body: { padding: '12px 20px 24px' } }}>
       {item && (
-        <div>
+        <div
+          style={
+            parent
+              ? { display: 'flex', alignItems: 'stretch', gap: 18, height: '100%' } // 双栏：左父需求 / 右本单，各自滚动
+              : undefined
+          }
+        >
+          {parent && <ParentPanel parent={parent} statusMap={parentStatusMap} />}
+          <div style={parent ? { flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto' } : undefined}>
           {/* 头部：状态 + 标题 + 操作 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
             <StatusTag status={item.status} cn={statusMap?.[item.status]} />
@@ -1423,9 +1554,6 @@ export function DetailDrawer({ open, item, type, statusMap, workspaceId, myName,
               </Tag>
             )}
             <div style={{ flex: 1 }} />
-            <Button size="small" icon={<EditOutlined />} onClick={() => setEditing(true)}>
-              编辑
-            </Button>
             <Button size="small" type="primary" ghost onClick={() => onFlow(item)}>
               流转
             </Button>
@@ -1689,19 +1817,9 @@ export function DetailDrawer({ open, item, type, statusMap, workspaceId, myName,
               发送
             </Button>
           </div>
+          </div>
         </div>
       )}
-
-      {/* 编辑工单：保存成功后局部回填（列表 + 详情同步），列表全量下次刷新自动对齐 */}
-      <EditWorkModal
-        open={editing}
-        item={item}
-        type={type}
-        members={members}
-        myName={myName}
-        onClose={() => setEditing(false)}
-        onSaved={onEditSaved}
-      />
     </Drawer>
   )
 }
@@ -2088,150 +2206,6 @@ export function FlowModal({ open, item, type, statusMap, transitions, members, w
   )
 }
 
-/* ---------------- 编辑工单弹窗（开放 API：POST /stories|/bugs|/tasks，id + 字段，一次一条） ---------------- */
-
-// 优先级数字 → 中文 label（TAPD 常规口径 1-5）；本身就是中文（自定义优先级）原样返回
-const priorityLabelOf = (p) => {
-  const s = String(p ?? '').trim()
-  return { 1: '紧急', 2: '高', 3: '中', 4: '低', 5: '低' }[s] || s
-}
-// 编辑保存后的本地回填：label 反推回 priority 数字（表格/详情的徽标按数字取色）
-const priorityOfLabel = (l) => ({ 紧急: 1, 高: 2, 中: 3, 低: 4 })[l] ?? l
-
-function EditWorkModal({ open, item, type, members, myName, onClose, onSaved }) {
-  const { message } = App.useApp()
-  const [form] = Form.useForm()
-  const [saving, setSaving] = useState(false)
-
-  // 三类工单的字段名差异：bug 标题是 title、截止是 deadline；story/task 是 name/due。
-  // 截止时间经 dueFieldOf 解析（due → deadline → 日期类自定义字段），保存时写回原字段
-  const titleKey = type === 'bug' ? 'title' : 'name'
-  const dueField = useMemo(
-    () => (item ? dueFieldOf(item) : { key: type === 'bug' ? 'deadline' : 'due', value: '' }),
-    [item, type],
-  )
-  const typeCn = { story: '需求', bug: '缺陷', task: '任务' }[type] || type
-
-  // 打开时用当前工单值铺表单（描述转纯文本；日期取前 10 位）。
-  // Modal 用 forceRender 常驻挂载：保证 effect 执行时 Form 已连接，setFieldsValue 一定生效
-  useEffect(() => {
-    if (open && item) {
-      form.setFieldsValue({
-        title: item[titleKey] || item.name || item.title || '',
-        owners: String(item.owner || '').split(';').filter(Boolean),
-        priority_label: priorityLabelOf(item.priority),
-        begin: startOf(item) ? dayjs(startOf(item)) : null,
-        due: dueField.value ? dayjs(dueField.value) : null,
-        description: plainOf(item.description),
-      })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, item?.id, type, dueField.key, dueField.value])
-
-  // 处理人候选：项目成员 ∪ 当前工单处理人（与流转弹窗同口径）
-  const ownerOptions = useMemo(() => {
-    const map = new Map()
-    ;(members || []).forEach((m) => map.set(m.user, `${m.name}（${m.user}）`))
-    String(item?.owner || '')
-      .split(';')
-      .filter(Boolean)
-      .forEach((o) => {
-        if (!map.has(o)) map.set(o, o)
-      })
-    return [...map.entries()].map(([value, label]) => ({ value, label }))
-  }, [members, item])
-
-  const save = async () => {
-    const v = await form.validateFields()
-    // 组装全量字段（仅提交有变化的，避免制造无谓的变更记录）；空值跳过 = 不修改该字段
-    const next = {
-      [titleKey]: String(v.title || '').trim(),
-      owner: `${(v.owners || []).filter(Boolean).join(';')};`,
-      priority_label: v.priority_label || '',
-      begin: v.begin ? v.begin.format('YYYY-MM-DD') : '',
-      [dueField.key]: v.due ? v.due.format('YYYY-MM-DD') : '',
-      description: String(v.description || '').replace(/\n/g, '<br>'),
-    }
-    const origin = {
-      [titleKey]: item[titleKey] || '',
-      owner: `${String(item.owner || '').split(';').filter(Boolean).join(';')};`,
-      priority_label: priorityLabelOf(item.priority),
-      begin: startOf(item),
-      [dueField.key]: dueField.value,
-      description: plainOf(item.description),
-    }
-    const diff = Object.fromEntries(Object.entries(next).filter(([k, val]) => val !== (origin[k] || '')))
-    if (!Object.keys(diff).length) {
-      message.info('内容没有变化')
-      return
-    }
-    setSaving(true)
-    const res = await window.api.tapd.update({ type, workspaceId: item.workspace_id, id: item.id, fields: { ...diff, current_user: myName } })
-    setSaving(false)
-    if (!res.ok) {
-      message.error(res.error || '保存失败')
-      return
-    }
-    // 本地回填：label → priority 数字反推，其余字段原样
-    const local = {}
-    for (const [k, val] of Object.entries(diff)) {
-      if (k === 'priority_label') {
-        local.priority = priorityOfLabel(val)
-      } else if (k === 'owner') {
-        local.owner = String(val).replace(/;+$/, '') // 展示侧不留尾分号
-      } else {
-        local[k] = val
-      }
-    }
-    message.success('已保存')
-    onSaved?.(local)
-    onClose()
-  }
-
-  return (
-    <Modal title={`编辑${typeCn}`} open={open} onCancel={onClose} onOk={save} okText="保存" cancelText="取消" confirmLoading={saving} width={560} forceRender>
-      {item && (
-        <Form form={form} layout="vertical" style={{ marginTop: 8 }}>
-          <Form.Item name="title" label="标题" rules={[{ required: true, message: '标题不能为空' }]}>
-            <Input maxLength={200} />
-          </Form.Item>
-          <Form.Item name="owners" label="处理人（可多个）">
-            <Select
-              mode="tags"
-              options={ownerOptions}
-              tokenSeparators={[';', '，']}
-              placeholder="选择或输入处理人"
-              allowClear
-              showSearch
-              optionFilterProp="label"
-            />
-          </Form.Item>
-          <Form.Item name="priority_label" label="优先级">
-            <Select
-              options={['紧急', '高', '中', '低'].map((l) => ({ value: l, label: l }))}
-              placeholder="选择优先级"
-              allowClear
-            />
-          </Form.Item>
-          <Form.Item label="预计开始 / 截止" style={{ marginBottom: 0 }}>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <Form.Item name="begin" style={{ flex: 1, marginBottom: 0 }}>
-                <DatePicker style={{ width: '100%' }} placeholder="预计开始（留空不修改）" allowClear />
-              </Form.Item>
-              <Form.Item name="due" style={{ flex: 1, marginBottom: 0 }}>
-                <DatePicker style={{ width: '100%' }} placeholder="截止（留空不修改）" allowClear />
-              </Form.Item>
-            </div>
-          </Form.Item>
-          <Form.Item name="description" label="详细描述（纯文本，换行自动转 &lt;br&gt;）">
-            <Input.TextArea rows={6} />
-          </Form.Item>
-        </Form>
-      )}
-    </Modal>
-  )
-}
-
 /* ---------------- 页面主体 ---------------- */
 
 export default function TapdPage({ active = true }) {
@@ -2607,6 +2581,90 @@ export default function TapdPage({ active = true }) {
     }
     return list
   }, [items, bucket, bucketOf, keyword, monthKey])
+
+  // 树型表格：子单（story_id/parent_id 命中列表内的父单）挂到父行 children；父不在列表里
+  // （如「只看我的」时父需求是别人的）按引用补拉父单（parentExtras）作为父行，保证成树。
+  // 兜底：成环等异常数据挂不上树的平铺追加且不带 children，防无限嵌套 / 重复 key
+  const [parentExtras, setParentExtras] = useState([]) // 补拉的父需求（不在主列表里的 story）
+  const missingRefs = useMemo(() => {
+    const ids = new Set(filtered.map((it) => String(it.id)))
+    const refs = new Set()
+    filtered.forEach((it) => {
+      const ref = String(it.story_id || it.parent_id || '').trim()
+      if (ref && ref !== '0' && ref !== String(it.id) && !ids.has(ref)) refs.add(ref)
+    })
+    return [...refs]
+  }, [filtered])
+  const missingKey = missingRefs.join(',')
+  useEffect(() => {
+    if (!workspaceId || !missingKey) {
+      setParentExtras([])
+      return
+    }
+    let alive = true
+    ;(async () => {
+      const refs = missingKey.split(',').slice(0, 30) // 封顶 30：防极端数据拉爆请求
+      const hits = []
+      for (const ref of refs) {
+        try {
+          const res = await window.api.tapd.getWorkItem({ type: 'story', workspaceId, id: ref })
+          if (alive && res.ok && res.data) hits.push({ ...res.data, _type: 'story' })
+        } catch {
+          /* 单个父单拉取失败不阻塞其余 */
+        }
+        if (!alive) return
+        if (refs.indexOf(ref) < refs.length - 1) await new Promise((r) => setTimeout(r, 120))
+      }
+      if (alive) setParentExtras(hits)
+    })()
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [missingKey, workspaceId])
+  const treeData = useMemo(() => {
+    const extra = parentExtras.filter((p) => !filtered.some((it) => String(it.id) === String(p.id)))
+    const pool = filtered.concat(extra)
+    const byId = new Map(pool.map((it) => [String(it.id), it]))
+    const kids = new Map()
+    const roots = []
+    pool.forEach((it) => {
+      const ref = String(it.story_id || it.parent_id || '').trim()
+      const pid = ref && ref !== '0' && ref !== String(it.id) && byId.has(ref) ? ref : null
+      if (pid) {
+        if (!kids.has(pid)) kids.set(pid, [])
+        kids.get(pid).push(it)
+      } else {
+        roots.push(it)
+      }
+    })
+    const attach = (list) =>
+      list.map((it) => {
+        const k = kids.get(String(it.id))
+        return k?.length ? { ...it, children: attach(k) } : it
+      })
+    const rows = attach(roots).filter((it) => it.children?.length || !parentExtras.some((p) => String(p.id) === String(it.id)))
+    const shown = new Set()
+    const collect = (list) => list.forEach((it) => (shown.add(String(it.id)), it.children && collect(it.children)))
+    collect(rows)
+    return rows.concat(pool.filter((it) => !shown.has(String(it.id)) && !parentExtras.some((p) => String(p.id) === String(it.id))))
+  }, [filtered, parentExtras])
+
+  // 展开态受控：父行默认全部展开；用户手动收起的父行记入 collapsedParents，
+  // 实时同步增量更新（treeData 变化）后仍未展开的继续收起，新父行默认展开
+  const [collapsedParents, setCollapsedParents] = useState(() => new Set())
+  const parentIds = useMemo(() => {
+    const ids = []
+    const walk = (list) =>
+      list.forEach((it) => {
+        if (it.children?.length) {
+          ids.push(String(it.id))
+          walk(it.children)
+        }
+      })
+    walk(treeData)
+    return ids
+  }, [treeData])
 
   // 已加载工单里实际出现的状态集合（主列表 + 我的全量，后者保证已选状态过滤时
   // 下拉不全缩水成当前一项）
@@ -3074,13 +3132,27 @@ export default function TapdPage({ active = true }) {
               rowKey="id"
               loading={loading}
               columns={columns}
-              dataSource={filtered}
+              dataSource={treeData}
               components={{ header: { cell: ResizableHeaderCell } }}
+              // 父工单行（带子单的）加淡蓝底色，树结构一眼可辨
+              rowClassName={(r) => (r.children?.length ? 'tapd-parent-row' : '')}
+              expandable={{
+                expandedRowKeys: parentIds.filter((id) => !collapsedParents.has(id)),
+                onExpandedRowsChange: (keys) => {
+                  const next = new Set()
+                  parentIds.forEach((id) => !keys.includes(id) && next.add(id))
+                  setCollapsedParents(next)
+                },
+              }}
               scroll={{ x: columns.reduce((s, c) => s + (c.width || 0), 0), y: tableBodyY }}
               pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (n) => `共 ${n} 条` }}
               locale={{ emptyText: loading ? '加载中…' : '暂无工单' }}
               onRow={(record) => ({
-                onClick: () => setDetailItem(record),
+                onClick: (e) => {
+                  // 点父行的展开/收起箭头不算行点击（否则会顺带打开详情抽屉）
+                  if (e.target.closest && e.target.closest('.ant-table-row-expand-icon')) return
+                  setDetailItem(record)
+                },
                 style: { cursor: 'pointer' },
               })}
               />
@@ -3157,17 +3229,8 @@ export default function TapdPage({ active = true }) {
         myName={myName}
         webLogin={webLogin}
         onWebLogin={setWebLogin}
-        members={members}
         onClose={() => setDetailItem(null)}
         onFlow={(it) => setFlowItem(it)}
-        onEditSaved={(patch) => {
-          // 编辑保存后局部回填：详情 + 两个列表（baseItems 统计用 / items 表格用）同步更新
-          // （core 已清缓存，下次刷新自动全量对齐）
-          if (detailItem) setDetailItem({ ...detailItem, ...patch })
-          const hit = (it) => it.id === detailItem?.id
-          setBaseItems((prev) => prev.map((it) => (hit(it) ? { ...it, ...patch } : it)))
-          setItems((prev) => prev.map((it) => (hit(it) ? { ...it, ...patch } : it)))
-        }}
       />
       <FlowModal
         open={!!flowItem}

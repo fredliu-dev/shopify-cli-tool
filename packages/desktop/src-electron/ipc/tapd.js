@@ -459,7 +459,7 @@ export function registerTapdIpc() {
   // owner 走服务端过滤；「排除已完成」客户端判定（终态集合优先、statusMap 中文名关键词兜底，
   // 与 TAPD 页 bucketOf 同口径）；三类串行拉取防限流。未配令牌时 NO_TAPD_AUTH 原样透传，前端显示「去配置」
   ipcMain.handle('tapd:myOpenItems', async (_evt, { workspaceId, force } = {}) => {
-    const { getTapdUser, listWorkItems, getStatusMap, getLastSteps, buildTapdUrl, loadTapdCache, saveTapdCache } =
+    const { getTapdUser, listWorkItems, getStatusMap, getLastSteps, buildTapdUrl, getWorkItemById, loadTapdCache, saveTapdCache } =
       await load()
     try {
       const key = `myOpen:${workspaceId}`
@@ -475,6 +475,7 @@ export function registerTapdIpc() {
         { key: 'task', cn: '任务' },
       ]
       const out = []
+      let storyStatusMap = null
       for (const t of TYPES) {
         // 元信息（statusMap/lastSteps）走与独立 handler 相同的缓存 key，首开 TAPD 页后即互享
         let statusMap = loadTapdCache()[`meta:${workspaceId}:${t.key}:statusMap`]?.data
@@ -482,6 +483,7 @@ export function registerTapdIpc() {
           statusMap = await getStatusMap(t.key, { workspaceId })
           if (statusMap) saveTapdCache(`meta:${workspaceId}:${t.key}:statusMap`, statusMap)
         }
+        if (t.key === 'story') storyStatusMap = statusMap
         let lastSteps = loadTapdCache()[`meta:${workspaceId}:${t.key}:lastSteps`]?.data
         if (!lastSteps) {
           lastSteps = await getLastSteps(t.key, { workspaceId })
@@ -507,8 +509,38 @@ export function registerTapdIpc() {
             status: it.status,
             statusCn: String(statusMap?.[it.status] || it.status),
             url: buildTapdUrl(t.key, workspaceId, it.id),
+            // 父工单引用（task/bug 的 story_id、story 的 parent_id）：下拉按父子树展示用
+            parentRef: String(it.story_id || it.parent_id || '').trim(),
           })
         }
+      }
+      // 补父工单：子单的父需求（可能已完成 / 非本人所有，不在上面的候选里）也拉进来，
+      // 保证下拉里父子成树。逐个按 id 精确拉（页间 120ms 防限流；封顶 30 个防极端多父子拉爆），
+      // 结果随 myOpen 缓存，重复打开不再发请求
+      const inList = new Set(out.map((x) => String(x.id)))
+      const parentRefs = [
+        ...new Set(out.map((x) => x.parentRef).filter((r) => r && r !== '0' && !inList.has(r))),
+      ].slice(0, 30)
+      for (const [i, ref] of parentRefs.entries()) {
+        try {
+          const hit = await getWorkItemById('story', { workspaceId, id: ref })
+          if (hit) {
+            out.push({
+              type: 'story',
+              typeCn: '需求',
+              id: String(hit.id),
+              title: String(hit.name || hit.title || `#${hit.id}`),
+              status: hit.status,
+              statusCn: String(storyStatusMap?.[hit.status] || hit.status),
+              url: buildTapdUrl('story', workspaceId, hit.id),
+              parentRef: String(hit.parent_id || '').trim(),
+              parentOnly: true, // 标记：仅为补全父子树带出的父单（已完成/非本人的）
+            })
+          }
+        } catch {
+          /* 单个父单拉取失败不阻塞候选 */
+        }
+        if (i < parentRefs.length - 1) await new Promise((r) => setTimeout(r, 120))
       }
       out.sort((a, b) => Number(b.id) - Number(a.id))
       saveTapdCache(key, out)
@@ -523,6 +555,16 @@ export function registerTapdIpc() {
     const { resolveWorkItemRef } = await load()
     try {
       return { ok: true, data: await resolveWorkItemRef(input, { workspaceId }) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 按 id 精确取单个工单（详情抽屉「父工单」纯展示用；不缓存，见 core getWorkItemById）
+  ipcMain.handle('tapd:getWorkItem', async (_evt, { type, workspaceId, id } = {}) => {
+    const { getWorkItemById } = await load()
+    try {
+      return { ok: true, data: await getWorkItemById(type, { workspaceId, id }) }
     } catch (err) {
       return { ok: false, error: err.message }
     }
@@ -583,11 +625,14 @@ export function registerTapdIpc() {
     }
   })
 
-  // 编辑工单字段（标题/处理人/优先级/起止时间/描述等，core 白名单过滤 + 清列表缓存）
-  ipcMain.handle('tapd:update', async (_evt, { type, workspaceId, id, fields } = {}) => {
-    const { updateWorkItem } = await load()
+  // 编辑工单字段通道已随「工单不允许编辑」下线（原 tapd:update / core updateWorkItem 已删）；
+  // 状态流转走 tapd:updateStatus，评论走 tapd:addComment / tapd:updateComment
+
+  // 取父工单下的子工单（本地项目关联父工单时，选择器里可切换子工单；父非 story 返回空）
+  ipcMain.handle('tapd:childrenOf', async (_evt, { parentType, parentId, workspaceId } = {}) => {
+    const { listChildrenOfWorkItem } = await load()
     try {
-      return { ok: true, data: await updateWorkItem(type, { workspaceId, id, fields }) }
+      return { ok: true, data: await listChildrenOfWorkItem(parentType, parentId, { workspaceId }) }
     } catch (err) {
       return { ok: false, error: err.message }
     }
