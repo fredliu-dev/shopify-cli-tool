@@ -959,6 +959,29 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
   // 请求序号：关闭弹窗或切换商店后，旧请求的响应作废，防止数据错乱
   const loadSeqRef = useRef(0);
 
+  // 拖拽：按住标题区平移整个面板；偏移存在本实例 state 里，多开时各弹窗互不影响
+  const [drag, setDrag] = useState({ x: 0, y: 0 });
+  const onDragStart = (e) => {
+    if (e.button !== 0) return;
+    const start = { mx: e.clientX, my: e.clientY, ox: drag.x, oy: drag.y };
+    e.preventDefault(); // 拖拽过程中不选中标题文本
+    const onMove = (ev) =>
+      setDrag({
+        x: start.ox + (ev.clientX - start.mx),
+        y: start.oy + (ev.clientY - start.my),
+      });
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    document.body.style.userSelect = "none";
+  };
+
   const dir = repo?.path;
   const store = repo?.devEnv?.store || "";
 
@@ -1380,7 +1403,16 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
   return (
     <Modal
       title={
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+        <span
+          onMouseDown={onDragStart}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 10,
+            cursor: "move",
+            userSelect: "none",
+          }}
+        >
           <span
             style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
           >
@@ -1423,6 +1455,15 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
       footer={null}
       destroyOnClose
       width={560}
+      // 多开共存：不出遮罩，页面与其它弹窗仍可交互（关闭走右上角 X）
+      mask={false}
+      wrapClassName='tl-wrap'
+      // modalRender 包一层做平移，实现拖拽（标题区按下拖动）
+      modalRender={(node) => (
+        <div style={{ transform: `translate(${drag.x}px, ${drag.y}px)` }}>
+          {node}
+        </div>
+      )}
       // 固定弹窗高度：切页/换每页条数时弹窗不再跳变，行区域内部上下滚动
       styles={{
         body: {
@@ -1435,6 +1476,8 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
     >
       {/* hover 亮起 / live 呼吸灯等交互样式走 class，内联样式写不了伪类与动画 */}
       <style>{`
+        /* 多开共存：wrap 固定铺满全屏会挡住下层弹窗与页面，放行事件；内容区 antd 自带 pointer-events:auto */
+        .tl-wrap{pointer-events:none;}
         .tl-item{display:flex;align-items:stretch;margin-bottom:8px;}
         .tl-card{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);transition:background .2s,border-color .2s;}
         .tl-item:hover .tl-card{background:rgba(255,255,255,0.085);border-color:rgba(255,255,255,0.16);}
@@ -6358,7 +6401,7 @@ export default function Repos({ registerMenu }) {
   const [mergeInfoFor, setMergeInfoFor] = useState(null); // 第③步「获取合并提交信息」目标 repo
 
   const [jsonModal, setJsonModal] = useState(null); // { title, files }
-  const [themeListFor, setThemeListFor] = useState(null); // 主题列表弹窗的目标 repo
+  const [themeListFor, setThemeListFor] = useState([]); // 主题列表弹窗目标 repos（多开：每仓库一个独立实例，数据互不干扰）
   const [editRepo, setEditRepo] = useState(null); // { mode:'save', repo }（无 toml 时弹窗内初始化+保存二合一）
   const [cloneable, setCloneable] = useState([]); // 模板 _github 项目 + 是否已存在（供「创建项目」查重）
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
@@ -6521,10 +6564,18 @@ export default function Repos({ registerMenu }) {
     await refreshProjects();
   };
 
+  // 主题列表弹窗：按仓库路径去重开（同一仓库不重复弹），不同仓库各开各的、可同时共存
+  const openThemeList = (repo) =>
+    setThemeListFor((list) =>
+      list.some((r) => r.path === repo.path) ? list : [...list, repo],
+    );
+  const closeThemeList = (path) =>
+    setThemeListFor((list) => list.filter((r) => r.path !== path));
+
   // 仓库卡片动作分发
   const repoAction = (type, payload) => {
     if (type === "save") setEditRepo({ mode: "save", repo: payload });
-    else if (type === "themeList") setThemeListFor(payload);
+    else if (type === "themeList") openThemeList(payload);
     else if (type === "json") setJsonModal(payload);
     else if (type === "checkout")
       checkoutBranch(payload.repo.path, payload.branch);
@@ -6923,7 +6974,7 @@ export default function Repos({ registerMenu }) {
           )}
           contacts={contacts}
           // 主题数达上限 100 时从保存弹窗内直接唤起主题列表，引导用户删主题后再复制
-          onOpenThemeList={() => setThemeListFor(editRepo.repo)}
+          onOpenThemeList={() => openThemeList(editRepo.repo)}
           onClose={() => setEditRepo(null)}
           onDone={() => {
             const path = editRepo.repo.path;
@@ -6941,13 +6992,16 @@ export default function Repos({ registerMenu }) {
         onClose={() => setJsonModal(null)}
       />
 
-      {/* 主题列表（当前 store 全部主题，live 置顶） */}
-      <ThemeListModal
-        open={!!themeListFor}
-        repo={themeListFor}
-        onClose={() => setThemeListFor(null)}
-        onChanged={() => themeListFor && refreshRepo(themeListFor.path)}
-      />
+      {/* 主题列表（当前 store 全部主题，live 置顶）——按仓库多开，每仓库一个独立实例 */}
+      {themeListFor.map((r) => (
+        <ThemeListModal
+          key={r.path}
+          open
+          repo={r}
+          onClose={() => closeThemeList(r.path)}
+          onChanged={() => refreshRepo(r.path)}
+        />
+      ))}
 
       {/* 设置默认编辑器 */}
       <SettingsModal
