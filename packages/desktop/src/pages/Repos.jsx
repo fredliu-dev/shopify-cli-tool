@@ -50,6 +50,8 @@ import {
   RocketOutlined,
   SearchOutlined,
   ShopOutlined,
+  SortAscendingOutlined,
+  SortDescendingOutlined,
 } from "@ant-design/icons";
 import { COMMIT_TYPES, formatCommitTitle } from "@shopify-cli-tool/core/commit";
 import React, {
@@ -952,6 +954,8 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
   // 非 live 主题分页：店铺主题可能近百个，滚动列表翻找效率低
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  // 排序方向：CLI 返回即由旧到新；desc=true 反转为由新到旧（换店打开保留偏好）
+  const [desc, setDesc] = useState(false);
   // 请求序号：关闭弹窗或切换商店后，旧请求的响应作废，防止数据错乱
   const loadSeqRef = useRef(0);
 
@@ -962,7 +966,7 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
     if (!dir) return;
     const seq = ++loadSeqRef.current;
     setLoading(true);
-    const res = await window.api.repos.themeList({ dir });
+    const res = await window.api.repos.themeList({ dir, store });
     // 响应返回时若已有更新的请求（或弹窗已关闭重置），丢弃本次结果
     if (seq !== loadSeqRef.current) return;
     setLoading(false);
@@ -1024,6 +1028,7 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
       dir,
       themeId: renameFor.id,
       name,
+      store,
     });
     setRenaming(false);
     if (!r.ok) return message.error({ content: r.error, duration: 8 });
@@ -1138,7 +1143,11 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
       ),
       onOk: async () => {
         setBusyId(t.id);
-        const r = await window.api.repos.publishTheme({ dir, themeId: t.id });
+        const r = await window.api.repos.publishTheme({
+          dir,
+          themeId: t.id,
+          store,
+        });
         setBusyId(null);
         if (!r.ok) return message.error({ content: r.error, duration: 8 });
         message.success(`已发布「${t.name}」为线上主题`);
@@ -1206,7 +1215,7 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
   // live 主卡 + 非 live 列表：live 不参与搜索，永远固定展示在滚动区外顶部
   const liveTheme = themes.find((t) => t.role === "live");
   const q = keyword.trim().toLowerCase();
-  const rest = q
+  const filtered = q
     ? themes.filter(
         (t) =>
           t.role !== "live" &&
@@ -1215,6 +1224,7 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
             .includes(q),
       )
     : themes.filter((t) => t.role !== "live");
+  const rest = desc ? [...filtered].reverse() : filtered;
   const matched = themes.filter(
     (t) =>
       t.role === "live" ||
@@ -1377,23 +1387,35 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
             <AppstoreOutlined style={{ color: "#1677ff" }} />
             主题列表
           </span>
-          {/* 店铺身份直接钉在标题行：所有操作的目标 store 一眼可辨 */}
-          <Tag
-            color='blue'
-            icon={<ShopOutlined />}
-            style={{
-              marginInlineEnd: 0,
-              fontSize: 12,
-              fontWeight: 600,
-              maxWidth: 280,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              verticalAlign: "middle",
-            }}
-          >
-            {store || "未识别到 store"}
-          </Tag>
+          {/* 店铺身份直接钉在标题行：所有操作的目标 store 一眼可辨；点击进主题后台 */}
+          <Tooltip title={store ? "点击打开主题后台" : null}>
+            <Tag
+              color='blue'
+              icon={<ShopOutlined />}
+              onClick={
+                store
+                  ? () =>
+                      openLink(
+                        `https://admin.shopify.com/store/${store.split(".")[0]}/themes`,
+                        "主题后台链接",
+                      )
+                  : undefined
+              }
+              style={{
+                marginInlineEnd: 0,
+                fontSize: 12,
+                fontWeight: 600,
+                maxWidth: 280,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                verticalAlign: "middle",
+                cursor: store ? "pointer" : "default",
+              }}
+            >
+              {store || "未识别到 store"}
+            </Tag>
+          </Tooltip>
         </span>
       }
       open={open}
@@ -1437,6 +1459,24 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
         .tl-live .tl-id{font-size:12px;color:rgba(255,255,255,0.45);}
         .tl-dot{width:6px;height:6px;border-radius:50%;background:#faad14;box-shadow:0 0 8px #faad14;animation:tlPulse 1.8s ease-in-out infinite;}
         @keyframes tlPulse{0%,100%{opacity:1}50%{opacity:.3}}
+        /* 分页与弹窗卡片同语言：玻璃底 + 圆角，hover 亮起，active 蓝色渐变 */
+        .tl-pagination .ant-pagination-total-text{margin-right:10px;font-size:12px;color:rgba(255,255,255,0.45);}
+        .tl-pagination .ant-pagination-item,
+        .tl-pagination .ant-pagination-prev .ant-pagination-item-link,
+        .tl-pagination .ant-pagination-next .ant-pagination-item-link{border-radius:8px;border-color:rgba(255,255,255,0.10);background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.72);transition:all .2s;}
+        .tl-pagination .ant-pagination-item a{color:inherit;}
+        .tl-pagination .ant-pagination-item:hover,
+        .tl-pagination .ant-pagination-prev:hover .ant-pagination-item-link,
+        .tl-pagination .ant-pagination-next:hover .ant-pagination-item-link{border-color:rgba(255,255,255,0.22);background:rgba(255,255,255,0.10);}
+        .tl-pagination .ant-pagination-item:hover a{color:#fff;}
+        .tl-pagination .ant-pagination-item-active{border-color:rgba(22,119,255,0.55);background:linear-gradient(135deg,rgba(22,119,255,0.28),rgba(22,119,255,0.10));box-shadow:0 0 12px rgba(22,119,255,0.22);}
+        .tl-pagination .ant-pagination-item-active a{color:#fff;}
+        .tl-pagination .ant-pagination-item-active:hover{border-color:rgba(22,119,255,0.75);background:linear-gradient(135deg,rgba(22,119,255,0.32),rgba(22,119,255,0.14));}
+        .tl-pagination .ant-pagination-jump-prev .ant-pagination-item-link-icon,
+        .tl-pagination .ant-pagination-jump-next .ant-pagination-item-link-icon{color:#4096ff;}
+        .tl-pagination .ant-pagination-jump-prev .ant-pagination-item-ellipsis,
+        .tl-pagination .ant-pagination-jump-next .ant-pagination-item-ellipsis{color:rgba(255,255,255,0.30) !important;}
+        .tl-pagination .ant-pagination-options .ant-select-selector{border-radius:8px;border-color:rgba(255,255,255,0.10);background:rgba(255,255,255,0.04);}
       `}</style>
 
       {/* 名称筛选（live 不参与）+ 数量 + 刷新 */}
@@ -1464,6 +1504,15 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
             ? `匹配 ${matched.length} 个`
             : `共 ${themes.length} 个主题`}
         </Text>
+        {/* 排序方向切换：图标展示当前方向，点击取反 */}
+        <Tooltip title={desc ? "由新到旧 · 点击切换" : "由旧到新 · 点击切换"}>
+          <Button
+            size='small'
+            type='text'
+            icon={desc ? <SortDescendingOutlined /> : <SortAscendingOutlined />}
+            onClick={() => setDesc((v) => !v)}
+          />
+        </Tooltip>
         <Button
           size='small'
           type='text'
@@ -1520,6 +1569,7 @@ function ThemeListModal({ open, repo, onClose, onChanged }) {
               }}
             >
               <Pagination
+                className='tl-pagination'
                 size='small'
                 current={curPage}
                 pageSize={pageSize}
@@ -5046,6 +5096,7 @@ function RepoCard({
         const res = await window.api.repos.themeInfo({
           dir: project.repoPath || repo.path,
           themeId,
+          store: project.store,
         });
         if (!res.ok) {
           message.error({
@@ -5858,6 +5909,7 @@ function ProjectPanel({
     const res = await window.api.repos.themeInfo({
       dir: project.repoPath,
       themeId: id,
+      store: project.store,
     });
     setThemeDelLoading(false);
     if (!res.ok) return message.error({ content: res.error, duration: 8 });

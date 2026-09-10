@@ -30,6 +30,17 @@ function parseJson(stdout) {
 }
 
 /**
+ * 线上主题操作的定位参数：传了 store 用全局 --store（不依赖本地 toml，适合未创建本地项目的仓库），
+ * 否则回退 -e 环境名（从 cwd 的 shopify.theme.toml 解析 store）。
+ * 两种方式都要求该 store 已 shopify login（CLI 按 store 存 token）。
+ * @param {{ envName?: string, store?: string }} opts
+ * @returns {string[]}
+ */
+function targetArgs({ envName, store }) {
+    return store ? ['--store', store] : ['-e', envName]
+}
+
+/**
  * 复制指定环境的 live 主题为新草稿主题（headless，无 inquirer）。
  * 流程：`theme list --role live -j` 取 live id → 拼 `[env] 活动 | 负责人 | YYYYMMDD` 主题名
  * → `theme duplicate --theme <id> --name <name> --force -j` 取新 id → 用 buildLinks 算后台/编辑链接。
@@ -84,12 +95,12 @@ export async function duplicateLiveTheme({ cwd, envName, envConfig, activity, ow
  * 查询单个主题的线上信息（theme list -j 后按 id 匹配）。
  * 本地项目只存 theme id，不存名称；「删除主题」二次确认弹窗要展示主题名/角色，先来这里拉。
  * 前置：该 store 已 `shopify login`。
- * @param {{ cwd: string, envName: string, themeId: string|number }} opts
+ * @param {{ cwd: string, envName?: string, store?: string, themeId: string|number }} opts
  * @returns {Promise<{ ok: true, theme: { id: string, name: string, role: string } | null } | { ok: false, code: number, stderr: string }>}
  *   theme=null 表示该 id 在线上已不存在（可能已被删除）
  */
-export async function getThemeInfo({ cwd, envName, themeId }) {
-    const res = await captureShopify(['theme', 'list', '-j', '-e', envName], { cwd })
+export async function getThemeInfo({ cwd, envName, store, themeId }) {
+    const res = await captureShopify(['theme', 'list', '-j', ...targetArgs({ envName, store })], { cwd })
     if (res.code !== 0) {
         return { ok: false, code: res.code, stderr: res.stderr }
     }
@@ -102,11 +113,11 @@ export async function getThemeInfo({ cwd, envName, themeId }) {
  * 列出该环境对应 store 的全部主题（theme list -j，headless）。
  * 主题列表弹窗展示用：live 优先由前端排序，这里保持 CLI 返回原顺序。
  * 前置：该 store 已 `shopify login`。
- * @param {{ cwd: string, envName: string }} opts
+ * @param {{ cwd: string, envName?: string, store?: string }} opts
  * @returns {Promise<{ ok: true, themes: Array<{ id, name, role }> } | { ok: false, code: number, stderr: string }>}
  */
-export async function listThemes({ cwd, envName }) {
-    const res = await captureShopify(['theme', 'list', '-j', '-e', envName], { cwd })
+export async function listThemes({ cwd, envName, store }) {
+    const res = await captureShopify(['theme', 'list', '-j', ...targetArgs({ envName, store })], { cwd })
     if (res.code !== 0) {
         return { ok: false, code: res.code, stderr: res.stderr }
     }
@@ -119,11 +130,11 @@ export async function listThemes({ cwd, envName }) {
  * --force 跳过 CLI 的交互确认；live 主题不可重复发布（CLI 会报错，调用方宜先按 role 拦截）。
  * 注意：theme publish 不支持 -j（JSON 输出）标志，传了会报 Nonexistent flag 退出码 2，
  * 因此只靠退出码判断成败。前置：该 store 已 `shopify login`。
- * @param {{ cwd: string, envName: string, themeId: string|number }} opts
+ * @param {{ cwd: string, envName?: string, store?: string, themeId: string|number }} opts
  * @returns {Promise<{ ok: boolean, code: number, stderr: string }>}
  */
-export async function publishTheme({ cwd, envName, themeId }) {
-    const res = await captureShopify(['theme', 'publish', '--theme', String(themeId), '--force', '-e', envName], { cwd })
+export async function publishTheme({ cwd, envName, store, themeId }) {
+    const res = await captureShopify(['theme', 'publish', '--theme', String(themeId), '--force', ...targetArgs({ envName, store })], { cwd })
     return { ok: res.code === 0, code: res.code, stderr: res.stderr }
 }
 
@@ -131,11 +142,11 @@ export async function publishTheme({ cwd, envName, themeId }) {
  * 删除线上主题（headless）：`theme delete --theme <id> --force`。
  * --force 跳过 CLI 的交互确认；live 主题不可删（CLI 会报错，调用方宜先用 getThemeInfo 按 role 拦截）。
  * 前置：该 store 已 `shopify login`。
- * @param {{ cwd: string, envName: string, themeId: string|number }} opts
+ * @param {{ cwd: string, envName?: string, store?: string, themeId: string|number }} opts
  * @returns {Promise<{ ok: boolean, code: number, stderr: string }>}
  */
-export async function deleteTheme({ cwd, envName, themeId }) {
-    const res = await captureShopify(['theme', 'delete', '--theme', String(themeId), '--force', '-e', envName], { cwd })
+export async function deleteTheme({ cwd, envName, store, themeId }) {
+    const res = await captureShopify(['theme', 'delete', '--theme', String(themeId), '--force', ...targetArgs({ envName, store })], { cwd })
     return { ok: res.code === 0, code: res.code, stderr: res.stderr }
 }
 
@@ -143,11 +154,11 @@ export async function deleteTheme({ cwd, envName, themeId }) {
  * 重命名线上主题（headless）：`theme rename --theme <id> --name <新名称>`。
  * --theme/--name 都传时 CLI 不进交互；live 主题同样可改（仅改名称，不影响发布状态）。
  * 前置：该 store 已 `shopify login`。
- * @param {{ cwd: string, envName: string, themeId: string|number, name: string }} opts
+ * @param {{ cwd: string, envName?: string, store?: string, themeId: string|number, name: string }} opts
  * @returns {Promise<{ ok: boolean, code: number, stderr: string }>}
  */
-export async function renameTheme({ cwd, envName, themeId, name }) {
-    const res = await captureShopify(['theme', 'rename', '--theme', String(themeId), '--name', name, '-e', envName], { cwd })
+export async function renameTheme({ cwd, envName, store, themeId, name }) {
+    const res = await captureShopify(['theme', 'rename', '--theme', String(themeId), '--name', name, ...targetArgs({ envName, store })], { cwd })
     return { ok: res.code === 0, code: res.code, stderr: res.stderr }
 }
 

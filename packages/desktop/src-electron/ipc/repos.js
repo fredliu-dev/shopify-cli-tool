@@ -349,10 +349,11 @@ export function registerReposIpc() {
   })
 
   // 主题列表（theme list -j）：主题列表弹窗展示当前 store 全部主题（live 优先由前端排序）
-  ipcMain.handle('repos:themeList', async (_evt, { dir, envName }) => {
+  // store 优先走 --store（不依赖本地 toml，未创建本地项目也可用）；无 store 回退 -e 环境名
+  ipcMain.handle('repos:themeList', async (_evt, { dir, envName, store }) => {
     const { listThemes } = await load()
     try {
-      const res = await listThemes({ cwd: dir, envName: envName || 'dev' })
+      const res = await listThemes({ cwd: dir, envName: envName || 'dev', store })
       if (!res.ok) return { ok: false, error: `获取主题列表失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
       return { ok: true, data: res.themes }
     } catch (err) {
@@ -361,10 +362,10 @@ export function registerReposIpc() {
   })
 
   // 重命名线上主题（theme rename headless；仅改名称不影响发布状态，live 也可改）
-  ipcMain.handle('repos:renameTheme', async (_evt, { dir, themeId, name }) => {
+  ipcMain.handle('repos:renameTheme', async (_evt, { dir, themeId, name, store }) => {
     const { renameTheme } = await load()
     try {
-      const res = await renameTheme({ cwd: dir, envName: 'dev', themeId, name })
+      const res = await renameTheme({ cwd: dir, envName: 'dev', themeId, name, store })
       if (!res.ok) return { ok: false, error: `重命名主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
       return { ok: true }
     } catch (err) {
@@ -373,10 +374,10 @@ export function registerReposIpc() {
   })
 
   // 发布主题为线上 live（theme publish --force 跳过交互确认；live 不可发布由前端按 role 拦截）
-  ipcMain.handle('repos:publishTheme', async (_evt, { dir, themeId }) => {
+  ipcMain.handle('repos:publishTheme', async (_evt, { dir, themeId, store }) => {
     const { publishTheme } = await load()
     try {
-      const res = await publishTheme({ cwd: dir, envName: 'dev', themeId })
+      const res = await publishTheme({ cwd: dir, envName: 'dev', themeId, store })
       if (!res.ok) return { ok: false, error: `发布主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
       return { ok: true }
     } catch (err) {
@@ -386,10 +387,10 @@ export function registerReposIpc() {
 
   // 查询项目 theme id 对应的线上主题信息（theme list -j）：删除主题前二次确认弹窗展示名称/角色用；
   // data=null 表示该主题在线上已不存在
-  ipcMain.handle('repos:themeInfo', async (_evt, { dir, themeId }) => {
+  ipcMain.handle('repos:themeInfo', async (_evt, { dir, themeId, store }) => {
     const { getThemeInfo } = await load()
     try {
-      const res = await getThemeInfo({ cwd: dir, envName: 'dev', themeId })
+      const res = await getThemeInfo({ cwd: dir, envName: 'dev', themeId, store })
       if (!res.ok) return { ok: false, error: `查询主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
       return { ok: true, data: res.theme }
     } catch (err) {
@@ -402,7 +403,7 @@ export function registerReposIpc() {
   ipcMain.handle('repos:deleteTheme', async (_evt, { dir, themeId, store }) => {
     const { deleteTheme, deleteProjectsByTheme } = await load()
     try {
-      const res = await deleteTheme({ cwd: dir, envName: 'dev', themeId })
+      const res = await deleteTheme({ cwd: dir, envName: 'dev', themeId, store })
       if (!res.ok) return { ok: false, error: `删除主题失败（退出码 ${res.code}）：${lastLine(res.stderr)}` }
       // 线上主题已删（不可恢复），本地清理失败不回滚，把错误带回给前端提示即可
       let local = { deleted: 0, synced: 0 }
