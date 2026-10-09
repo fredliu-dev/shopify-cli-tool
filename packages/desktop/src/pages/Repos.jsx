@@ -5050,6 +5050,8 @@ function RepoCard({
   /* ---------------- 删除分支流程 ---------------- */
   // 确认弹窗数据（含远程分支存在性、关联项目快照）；确认按钮 5 秒倒计时防手滑
   const [delBranchModal, setDelBranchModal] = useState(null);
+  // 「是否先删除线上主题」选择弹窗：独立受控 Modal，点 X 仅关闭、不进入下一步
+  const [delAskModal, setDelAskModal] = useState(null);
   const [delCountdown, setDelCountdown] = useState(0);
   const [delBranchLoading, setDelBranchLoading] = useState(false);
 
@@ -5093,35 +5095,7 @@ function RepoCard({
     if (branch === "main" || branch === "master")
       return message.warning("主分支不允许删除");
     if (!projects.length) return openDelBranchModal();
-    const p = projects[0];
-    modal.confirm({
-      title: "该分支下有本地项目，是否先删除线上主题？",
-      icon: <ExclamationCircleOutlined style={{ color: "#faad14" }} />,
-      content: (
-        <div>
-          <Text style={{ display: "block", marginBottom: 6 }}>
-            分支 <Text code>{branch}</Text> 关联 {projects.length} 个本地项目：
-          </Text>
-          <Text type='secondary' style={{ fontSize: 12, display: "block" }}>
-            store {p.store} · theme {String(p.theme ?? "-")} ·{" "}
-            {p.description || "无描述"}
-          </Text>
-          <Text
-            type='warning'
-            style={{ fontSize: 12, display: "block", marginTop: 8 }}
-          >
-            选「删除主题」会先从 Shopify
-            删除该线上主题并清理引用它的本地项目，然后再进入删除分支确认；
-            选「跳过」则不动主题，直接删除分支。
-          </Text>
-        </div>
-      ),
-      okText: "删除主题",
-      okButtonProps: { danger: true },
-      cancelText: "跳过，直接删分支",
-      onOk: () => deleteThemeThenAsk(p, branch),
-      onCancel: () => openDelBranchModal(),
-    });
+    setDelAskModal({ project: projects[0], branch, count: projects.length });
   };
 
   // 先删线上主题（live 拦截 + 二次确认），成功后再进入删除分支确认；失败则终止整个流程
@@ -5162,6 +5136,7 @@ function RepoCard({
         }
         modal.confirm({
           title: "确认删除线上主题？",
+          closable: true, // confirm 默认无右上角关闭按钮，补上
           icon: <ExclamationCircleOutlined style={{ color: "#ff4d4f" }} />,
           okText: "确认删除主题",
           okButtonProps: { danger: true },
@@ -5621,6 +5596,64 @@ function RepoCard({
             />
           ))}
         </div>
+
+        {/* 删除分支前选择：有本地项目时先问是否连线上主题一起删；自定义 footer 双按钮，点 X / 遮罩仅关闭整个流程 */}
+        <Modal
+          title={
+            <>
+              <ExclamationCircleOutlined
+                style={{ color: "#faad14", marginRight: 8 }}
+              />
+              该分支下有本地项目，是否先删除线上主题？
+            </>
+          }
+          open={!!delAskModal}
+          onCancel={() => setDelAskModal(null)}
+          footer={[
+            <Button
+              key='skip'
+              onClick={() => {
+                setDelAskModal(null);
+                openDelBranchModal();
+              }}
+            >
+              跳过，直接删分支
+            </Button>,
+            <Button
+              key='del'
+              type='primary'
+              danger
+              onClick={() => {
+                const m = delAskModal;
+                if (!m) return;
+                setDelAskModal(null);
+                deleteThemeThenAsk(m.project, m.branch);
+              }}
+            >
+              删除主题
+            </Button>,
+          ]}
+        >
+          <div>
+            <Text style={{ display: "block", marginBottom: 6 }}>
+              分支 <Text code>{delAskModal?.branch}</Text> 关联{" "}
+              {delAskModal?.count} 个本地项目：
+            </Text>
+            <Text type='secondary' style={{ fontSize: 12, display: "block" }}>
+              store {delAskModal?.project?.store} · theme{" "}
+              {String(delAskModal?.project?.theme ?? "-")} ·{" "}
+              {delAskModal?.project?.description || "无描述"}
+            </Text>
+            <Text
+              type='warning'
+              style={{ fontSize: 12, display: "block", marginTop: 8 }}
+            >
+              选「删除主题」会先从 Shopify
+              删除该线上主题并清理引用它的本地项目，然后再进入删除分支确认；
+              选「跳过」则不动主题，直接删除分支。
+            </Text>
+          </div>
+        </Modal>
 
         {/* 删除分支确认：展示分支信息，确认按钮 5 秒倒计时归零后才能点（防手滑） */}
         <Modal
