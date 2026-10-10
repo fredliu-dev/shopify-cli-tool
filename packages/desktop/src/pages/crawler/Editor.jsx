@@ -36,10 +36,10 @@ const MAX_LOGS = 500
 const MAX_LOOP_DETAILS = 2000
 const EMPTY_VIEWPORT = { x: 0, y: 0, zoom: 1 }
 
-/** 保存前剥离运行态字段（status/summary/error/iteration 是主进程推送的临时高亮，不落盘）。 */
+/** 保存前剥离运行态字段（status/summary/error/iteration 及并发进度槽是主进程推送的临时高亮，不落盘）。 */
 function cleanNodes(nodes) {
   return nodes.map((n) => {
-    const { status, summary, error, iteration, ...data } = n.data || {}
+    const { status, summary, error, iteration, workerIterations, workerCount, ...data } = n.data || {}
     return { ...n, data, selected: undefined }
   })
 }
@@ -160,7 +160,18 @@ function EditorInner({ projectId, onBack }) {
     setTable(null)
     setVars(null) // 起跑清空，等主进程推第一份快照（runCrawler 起步即推空表）
     setNodes((nds) =>
-      nds.map((n) => ({ ...n, data: { ...n.data, status: undefined, summary: undefined, error: undefined, iteration: undefined } })),
+      nds.map((n) => ({
+        ...n,
+        data: {
+          ...n.data,
+          status: undefined,
+          summary: undefined,
+          error: undefined,
+          iteration: undefined,
+          workerIterations: undefined,
+          workerCount: undefined,
+        },
+      })),
     )
     const res = await window.api.crawler.run({ id: projectId, graph, showWindow })
     if (!res.ok) return message.error(res.error || '启动失败')
@@ -191,7 +202,18 @@ function EditorInner({ projectId, onBack }) {
     if (!pendingRun) return
     setLogs([])
     setNodes((nds) =>
-      nds.map((n) => ({ ...n, data: { ...n.data, status: undefined, summary: undefined, error: undefined, iteration: undefined } })),
+      nds.map((n) => ({
+        ...n,
+        data: {
+          ...n.data,
+          status: undefined,
+          summary: undefined,
+          error: undefined,
+          iteration: undefined,
+          workerIterations: undefined,
+          workerCount: undefined,
+        },
+      })),
     )
     const graph = { nodes: cleanNodes(stateRef.current.nodes), edges: cleanEdges(stateRef.current.edges), viewport: viewportRef.current }
     const res = await window.api.crawler.continueRun({ id: projectId, runId: pendingRun.runId, graph, showWindow })
@@ -243,11 +265,28 @@ function EditorInner({ projectId, onBack }) {
     const offNode = window.api.crawler.onNode((p) => {
       if (p.projectId !== projectId) return
       setNodes((nds) =>
-        nds.map((n) =>
-          n.id === p.nodeId
-            ? { ...n, data: { ...n.data, status: p.status, summary: p.summary, error: p.error, iteration: p.iteration } }
-            : n,
-        ),
+        nds.map((n) => {
+          if (n.id !== p.nodeId) return n
+          // 并发循环的分进程进度：按进程号合并进各自的槽（workerIterations[index]），
+          // 画布上每个进程一条进度一一对应；普通单进程事件不带 workerIteration 原样透传
+          let workerFields = {}
+          if (p.workerIteration) {
+            const slots = Array.isArray(n.data.workerIterations) ? [...n.data.workerIterations] : []
+            slots[p.workerIteration.index] = p.workerIteration
+            workerFields = { workerIterations: slots, workerCount: p.workerCount }
+          }
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              status: p.status,
+              summary: p.summary,
+              error: p.error,
+              iteration: p.iteration,
+              ...workerFields,
+            },
+          }
+        }),
       )
     })
     const offRun = window.api.crawler.onRun((p) => {

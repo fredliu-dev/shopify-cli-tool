@@ -1141,6 +1141,10 @@ export function TapdStyles() {
   return (
     <style>{`
       .tapd-rich, .tapd-rich * { color: rgba(255,255,255,0.82) !important; }
+      /* 富文本常从外部文档（钉钉文档等）复制带入白底内联样式（background-color:#fff），
+         暗色下与上面强制白字叠加成「白底白字」隐形大块；背景一并清掉保证可读。
+         流转节点等 React 元素不在 .tapd-rich 内，不受影响 */
+      .tapd-rich, .tapd-rich * { background-color: transparent !important; }
       /* 长 URL（无空格连续字符）强制在容器内折行，防止撑破父栏/描述块 */
       .tapd-rich { overflow-wrap: anywhere; word-break: break-word; }
       .tapd-rich a { color: #4096ff !important; word-break: break-all; }

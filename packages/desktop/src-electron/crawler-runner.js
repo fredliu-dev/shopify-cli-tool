@@ -166,7 +166,11 @@ function validateNode(node) {
     return null
   }
   if (node.type === 'tableEdit') {
-    if (!String(node.data?.column ?? '').trim()) return `${label}：未填写列名`
+    // 多列：columns 数组一列一项；旧数据：单列 column/value
+    const pairs = Array.isArray(node.data?.columns) && node.data.columns.length
+      ? node.data.columns
+      : [{ column: node.data?.column }]
+    if (pairs.some((p) => !String(p?.column ?? '').trim())) return `${label}：有写入项未填写列名`
     return null
   }
   if (node.type === 'exportTable') {
@@ -1474,7 +1478,15 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
     for (const t of tables) {
       if (!t) continue
       for (const c of t.columns) if (!cols.includes(c)) cols.push(c)
-      rows.push(...t.rows)
+      if (t.__aligned && baseTable) {
+        // 行对齐 worker：表是主表克隆、行号一一对应——按下标并回原行（不追加）；
+        // 克隆之后新追加的行（循环体里嵌套循环等新建行场景）超出主表长度的部分照常追加
+        const overlap = Math.min(t.rows.length, baseTable.rows.length)
+        for (let r = 0; r < overlap; r++) rows[r] = { ...rows[r], ...t.rows[r] }
+        if (t.rows.length > baseTable.rows.length) rows.push(...t.rows.slice(baseTable.rows.length))
+      } else {
+        rows.push(...t.rows)
+      }
     }
     if (cols.length || rows.length) {
       ctx.table = { columns: cols, rows }
@@ -1483,6 +1495,44 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
   }
 
   ctx.log('info', `并发数据循环「${name}」：${items.length} 项分给 ${n} 个进程同时执行`, node)
+  // 并发进度分槽：循环节点按进程数初始化进度槽（row=0 未开始，total=该进程自己的份额数——
+  // 数据按 idx%n 平分，各进程只跑自己的份额），画布上每个进程一条进度一一对应
+  const shareLens = Array.from({ length: n }, (_, i) => items.filter((_, idx) => idx % n === i).length)
+  // 续跑时徽标起点与校准口径一致：续跑 worker = 断点回退后的 index（已完成数），
+  // 未续跑 worker = 已跑完整份；全新起跑（续跑集合为空）一律从 0 开始
+  broadcast('crawler:node', {
+    projectId: ctx.projectId,
+    runId: ctx.runId,
+    nodeId: node.id,
+    status: 'running',
+    workerCount: n,
+    workerIterations: shareLens.map((total, i) => ({
+      index: i,
+      row: resumeWorkerIndexes.length
+        ? resumeWorkerIndexes.includes(i)
+          ? Math.min(total, Math.max(0, workerCps.find((w) => w.workerIndex === i)?.checkpoint?.loopState?.index || 0))
+          : total
+        : 0,
+      total,
+    })),
+  })
+  // 跨进程累加的已完成计数：worker 与主 ctx 同处一个主进程、经原型链共享同一可变对象，
+  // 各 worker 每消费一项 +1 → 摘要「已完成 X/N 项」单调递增（各报各的全局位置会乱闪）。
+  // 续跑校准：不能用断点里的 progressDone 快照（各 worker 保存时刻不同、快照含彼此
+  // 未完成项，取 max 会虚高，反复失败/继续会越累越大超过总数）——按各断点的循环状态
+  // 精确重算：已完成 = Σ 续跑 worker 断点里的 index（断点在回退后落盘，= 该份额真实
+  // 完成数）+ Σ 未续跑 worker 的整份份额（无断点 = 已全部跑完）
+  const shareLenOf = (i) => {
+    const fromCp = workerCps.find((w) => w.workerIndex === i)?.checkpoint?.loopState?.items?.length
+    return Number.isFinite(fromCp) ? fromCp : items.filter((_, idx) => idx % n === i).length
+  }
+  const resumedDone = Array.from({ length: n }, (_, i) => {
+    if (!resumeWorkerIndexes.includes(i)) return shareLenOf(i)
+    const idx = workerCps.find((w) => w.workerIndex === i)?.checkpoint?.loopState?.index
+    const len = shareLenOf(i)
+    return Number.isFinite(idx) ? Math.max(0, Math.min(len, idx)) : 0
+  }).reduce((a, b) => a + b, 0)
+  ctx.concurrentProgress = { done: resumedDone, total: items.length }
   dlog(runTag(ctx), `并发循环「${name}」启动：${items.length} 项 × ${n} 进程，续跑集合=[${resumeWorkerIndexes.join(',') || '无'}]`)
   const interceptNodes = [...bodyIds].map((id) => ctx.byId.get(id)).filter((nd) => nd.type === 'intercept')
   const workerCtxs = []
@@ -1539,8 +1589,11 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
       rowsStartLen: cp?.data?.rows?.length || 0, // 续跑时之前已并入主断点的行数，结束时只追加新行
       captures: new Map(),
       interceptWaiters: new Map(),
-      // 断点续跑不恢复 worker 表：已写行已在主断点的表里（baseTable），重跑空表起步新行追加即可
-      table: null,
+      // 断点续跑不恢复 worker 表：已写行已在主断点的表里（baseTable），重跑空表起步新行追加即可。
+      // 表格行对齐的并发循环除外：注入主表克隆 + 对齐标记，消费项时按下标 gi 写原行，
+      // 合并时按下标并回（见 mergeTables 的 __aligned 分支），与单进程「循环表格=改当前行」一致
+      table: st.tableBacked && baseTable ? { columns: [...baseTable.columns], rows: baseTable.rows.map((r) => ({ ...r })) } : null,
+      workerTableBacked: !!(st.tableBacked && baseTable),
       currentRow: null,
       currentTableRowIndex: null,
       loop: null,
@@ -1563,6 +1616,8 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
       showWindow: !!ctx.showWindow,
       forceSeqLoops: new Set([node.id]),
       workerIndex: i,
+      workerCount: n, // 并发进度分槽：循环节点广播带上，前端渲染 N 条进度
+      concurrentProgress: ctx.concurrentProgress, // 引用共享：所有 worker + 主 ctx 累加同一个计数对象
       activeLoopId: node.id, // worker 的循环即最内层活跃循环
     })
     // worker 日志走父 ctx.log（裸 log 闭包只存在于 run 函数作用域，模块级函数里引用
@@ -1577,11 +1632,20 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
         runId: ctx.runId,
         nodeId: nd.id,
         status,
-        ...(wc.loop ? { iteration: { ...wc.loop } } : {}),
+        // 并发进度分槽：本并发循环的循环节点带 workerIteration（前端按进程号合并成
+        // N 条一一对应的进度）；循环体节点不带 iteration——多进程轮刷同一节点会乱跳
+        ...(nd.id === wc.workerLoopNodeId && wc.loop
+          ? {
+              workerCount: wc.workerCount,
+              workerIteration: { index: wc.workerIndex, row: wc.loop.row, total: wc.loop.total },
+            }
+          : {}),
         ...extra,
       })
     wc.pushTable = () => {
-      tables[i] = wc.table ? { columns: [...wc.table.columns], rows: wc.table.rows } : null
+      tables[i] = wc.table
+        ? { __aligned: !!wc.workerTableBacked, columns: [...wc.table.columns], rows: wc.table.rows }
+        : null
       mergeTables()
     }
     win.on('closed', () => {
@@ -1640,6 +1704,15 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
       const remain = wc.loopStates.get(node.id)
       if (remain && remain.index < remain.items.length && !ctx.stopped && !ctx.failed && !wc.failed && !wc.cancelled) {
         wc.log('warn', `循环体提前结束，剩余 ${remain.items.length - remain.index} 项未执行（循环体内的分支连线走出了循环体外）`)
+      }
+      // 断点回退：worker 在某项的循环体执行中失败/被打断/停止时，消费该项时 index 已
+      // +1——不回退的话「继续上次」从下一项开始，该项被跳过、数据漏处理。回退后续跑
+      // 重新消费该项、整轮重跑循环体。ctx.stopped 覆盖「while 条件处正常退出但上一项
+      // 循环体未走完」的间隙（此时 wc.failed 未置位）
+      const fst = wc.loopStates.get(node.id)
+      if ((wc.failed || wc.cancelled || ctx.stopped) && fst && fst.index > 0 && fst.index <= fst.items.length) {
+        fst.index -= 1
+        if (wc.concurrentProgress) wc.concurrentProgress.done = Math.max(0, wc.concurrentProgress.done - 1)
       }
       if (wc.cancelled && !ctx.stopped && !wc.failed && wc.loopStates.get(node.id)) {
         // 被其他 worker 的失败被动打断且份额未跑完：不是失败者，把进行中的进度存成
@@ -1702,6 +1775,23 @@ async function runConcurrentLoop(ctx, node, name, st, concurrency) {
   // 停止：标记所有留有断点的 worker，续跑时各自从自己的进度接着跑。
   // 重新读盘：workerCps 是起跑时的快照，跑动中的每项保存只有盘上是最新的
   if (ctx.stopped) {
+    // drive() 已对未完成 worker 做过断点回退（含正常退出在循环体中途的间隙），这里只
+    // 负责把回退后的最新状态落盘——停止时 drive 不存断点，盘上还是消费项时的旧 index
+    //（未回退），不重存的话续跑校准多算一项、中断项被跳过。index=0 也要存：否则残留
+    // 旧断点会让续跑漏掉该 worker 的头部数据
+    for (const wc of workerCtxs) {
+      const fst = wc.loopStates.get(node.id)
+      if (!fst || !Number.isFinite(fst.index)) continue
+      try {
+        await saveWorkerCheckpoint(ctx.projectId, ctx.runId, wc.workerIndex, {
+          status: 'running',
+          workerIndex: wc.workerIndex,
+          loopNodeId: node.id,
+          loopState: fst,
+          data: { rows: wc.rows, table: wc.table, vars: wc.vars },
+        })
+      } catch {}
+    }
     const stoppedIdx = (await listWorkerCheckpoints(ctx.projectId, ctx.runId)).map((w) => w.workerIndex)
     if (stoppedIdx.length) {
       ctx.resumeWorkerIndexes = stoppedIdx
@@ -2143,6 +2233,43 @@ async function execNode(ctx, node) {
     ctx.currentTableRowIndex = st.tableBacked ? gi : (st.outer.currentTableRowIndex ?? null)
     // 当前循环项：表格对齐循环里 = 当前表格行对应的项（表格编辑镜像列的目标）；非表格循环沿用外层的项
     ctx.currentItem = st.tableBacked ? item : (st.outer.currentItem ?? null)
+    // 对齐兜底（循环变量不是「表格数据」本身也能写回原行，如数据处理另存/filter 后遍历）：
+    // ① 引用：循环项就是引擎表格的行对象 → 直接对齐那一行；
+    // ② 内容：循环项与某表格行在「原表格列」上的值完全一致且唯一命中 → 对齐（map 拷贝/
+    //    加字段后引用已断，只能按内容找）；多行相同或全不匹配则不猜，保持新建行不写错行。
+    // 并发 worker 的表格行对齐循环（主 ctx 判定 st.tableBacked 后随 workerTableBacked 传入）
+    // 不走内容匹配：worker 按全局下标 gi 直接对齐注入的主表克隆行
+    if (ctx.isWorker && ctx.workerTableBacked && ctx.workerLoopNodeId === node.id) {
+      ctx.currentTableRowIndex = gi
+      ctx.currentItem = item
+    } else if (
+      !st.tableBacked &&
+      item && typeof item === 'object' && !Array.isArray(item) &&
+      Array.isArray(ctx.table?.rows) && ctx.table.rows.length
+    ) {
+      const byRef = ctx.table.rows.indexOf(item)
+      if (byRef >= 0) {
+        ctx.currentTableRowIndex = byRef
+        ctx.currentItem = item
+      } else {
+        const cols = new Set(ctx.table.columns || [])
+        const keys = Object.keys(item).filter((k) => cols.has(k))
+        if (keys.length) {
+          let hit = -1
+          for (let r = 0; r < ctx.table.rows.length; r++) {
+            const row = ctx.table.rows[r]
+            if (keys.every((k) => row[k] === item[k])) {
+              if (hit >= 0) { hit = -2; break } // 多行内容一致：无法确定是哪行，放弃
+              hit = r
+            }
+          }
+          if (hit >= 0) {
+            ctx.currentTableRowIndex = hit
+            ctx.currentItem = item
+          }
+        }
+      }
+    }
     // 变量合并而非替换：外层变量继续可见；对象项的属性直接平铺成
     // 变量（与表格行一致），任何项都可经 {{当前项}}/{{当前序号}} 引用。
     // itemVar：嵌套循环时 {{当前项}} 就近覆盖（只剩最内层的），各循环配了
@@ -2155,13 +2282,23 @@ async function execNode(ctx, node) {
       当前项: item,
       当前序号: gi + 1,
     }
-    ctx.loop = { row: gi + 1, total: st.totalItems ?? st.items.length }
+    // 进度：单进程 = 全局第几项；并发 worker = 自己份额内的第几项（数据按 idx%n 平分，
+    // 各进程 total 是自己的份额数，画布徽标才不会看起来像每个进程都在跑全量）
+    ctx.loop = ctx.isWorker
+      ? { row: st.index, total: st.items.length }
+      : { row: gi + 1, total: st.totalItems ?? st.items.length }
     ctx.activeLoopId = node.id // 本循环成为最内层活跃循环（嵌套时内层又会在其上覆盖）
     ctx.loopHeartbeat?.(ctx, node) // 循环框心跳：确保本循环的框存在并随迭代刷新
     ctx.pushVars()
     // 断点：消费一项后立即保存（单进程存主断点；并发 worker 存自己的 worker 断点）
     if (ctx.isWorker) await saveWorkerCp(ctx, node.id)
     else await saveCp(ctx)
+    // 摘要：并发 = 跨进程累加的已完成数（单调递增不乱闪——多进程轮流报告各自的全局
+    // 位置，画布摘要会来回跳）；单进程 = 全局第几项
+    if (ctx.isWorker && ctx.workerLoopNodeId === node.id && ctx.concurrentProgress) {
+      ctx.concurrentProgress.done += 1
+      return { summary: `已完成 ${ctx.concurrentProgress.done}/${ctx.concurrentProgress.total} 项` }
+    }
     return { summary: `第 ${gi + 1}/${st.totalItems ?? st.items.length} 项` }
   }
 
@@ -2233,13 +2370,16 @@ async function execNode(ctx, node) {
   }
 
   if (node.type === 'tableEdit') {
-    const column = String(data.column ?? '').trim()
-    // 整串 {{变量}} 可能取回对象（接口拦截的 JSON）：转 JSON 文本再入表，导出才不是 [object Object]
-    const raw = interpolate(data.value ?? '', ctx.vars)
-    const value = raw !== null && typeof raw === 'object' ? JSON.stringify(raw) : (raw ?? '')
+    // 多列写入：columns = [{column, value}...] 一列一项；旧数据兼容：单列 column/value
+    const pairs = (Array.isArray(data.columns) && data.columns.length
+      ? data.columns
+      : [{ column: data.column, value: data.value }]
+    ).map((p) => ({ column: String(p?.column ?? '').trim(), value: p?.value ?? '' }))
+    if (pairs.some((p) => !p.column)) throw new Error(`「${label}」有写入项未填写列名`)
     // 就地建表、新起一行：直线流程里连续多个表格编辑写同一行；数据循环每换一项新起
     // 一行（loop 节点消费项时清空 currentRow）。例外：循环遍历的是导入表格的行时，
-    // currentTableRowIndex 指向当前项的原表格行——编辑直接落到该行（不新建行）
+    // currentTableRowIndex 指向当前项的原表格行——编辑直接落到该行（不新建行）。
+    // 多列共用一次起行，全部写进同一行
     const tIdx = ctx.currentTableRowIndex
     if (tIdx != null && ctx.table?.rows[tIdx]) ctx.currentRow = ctx.table.rows[tIdx]
     if (!ctx.currentRow) {
@@ -2247,16 +2387,27 @@ async function execNode(ctx, node) {
       ctx.currentRow = {}
       ctx.table.rows.push(ctx.currentRow)
     }
-    const existed = ctx.table.columns.includes(column)
-    if (!existed) ctx.table.columns.push(column)
-    ctx.currentRow[column] = value
-    // 镜像到当前循环项：循环变量（「表格数据」等）的行对象是导入时的拷贝、数据处理后更是
-    // 新对象，表格编辑只写引擎表格的话循环体内看不到刚写入的列（如「还有没有空 id」判断）
-    if (ctx.currentItem !== null && typeof ctx.currentItem === 'object') {
-      ctx.currentItem[column] = value
+    const results = []
+    for (const { column, value: raw } of pairs) {
+      // 整串 {{变量}} 可能取回对象（接口拦截的 JSON）：转 JSON 文本再入表，导出才不是 [object Object]
+      const iv = interpolate(raw ?? '', ctx.vars)
+      const value = iv !== null && typeof iv === 'object' ? JSON.stringify(iv) : (iv ?? '')
+      const existed = ctx.table.columns.includes(column)
+      if (!existed) ctx.table.columns.push(column)
+      ctx.currentRow[column] = value
+      // 镜像到当前循环项：循环变量（「表格数据」等）的行对象是导入时的拷贝、数据处理后更是
+      // 新对象，表格编辑只写引擎表格的话循环体内看不到刚写入的列（如「还有没有空 id」判断）
+      if (ctx.currentItem !== null && typeof ctx.currentItem === 'object') {
+        ctx.currentItem[column] = value
+      }
+      results.push({ column, value, existed })
     }
     ctx.pushTable()
-    return { summary: `${existed ? '更新' : '新增'}列「${column}」= ${value === '' ? '空' : value}` }
+    if (results.length === 1) {
+      const { column, value, existed } = results[0]
+      return { summary: `${existed ? '更新' : '新增'}列「${column}」= ${value === '' ? '空' : value}` }
+    }
+    return { summary: `写入 ${results.length} 列：${results.map((r) => `${r.column}=${r.value === '' ? '空' : r.value}`).join('、')}` }
   }
 
   if (node.type === 'exportTable') {

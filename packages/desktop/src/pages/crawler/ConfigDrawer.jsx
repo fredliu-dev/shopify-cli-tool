@@ -22,7 +22,7 @@ import beautify from 'js-beautify'
 import SelectorInput from './SelectorInput.jsx'
 import VariableInput from './VariableInput.jsx'
 import JsCodeEditor from './JsCodeEditor.jsx'
-import { CLICK_EVENTS, CLICK_TARGETS, CONDITION_OPS, KEY_EVENTS, KEY_MODIFIERS, MODULES, isUnaryOp } from './constants.js'
+import { CLICK_EVENTS, CLICK_TARGETS, CONDITION_OPS, KEY_EVENTS, KEY_MODIFIERS, MODULES, isUnaryOp, tableEditPairs } from './constants.js'
 import { INK, MAT, iconChip } from './theme.js'
 
 /** 抽屉内嵌卡片（字段卡 / 文件摘要卡）：统一材质，radius 12。 */
@@ -135,6 +135,13 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
         { name: `字段${(data.fields?.length || 0) + 1}`, selector: { mode: 'class', value: '', timeoutMs: 5000 }, extract: { type: 'text' } },
       ],
     })
+
+  // 表格编辑：多列写入项的增删改（统一写 columns；旧数据的单列 column/value 经 tableEditPairs 兼容展示）
+  const patchColumn = (i, key, v) => {
+    patch({ columns: tableEditPairs(data).map((p, idx) => (idx === i ? { ...p, [key]: v } : p)) })
+  }
+  const removeColumn = (i) => patch({ columns: tableEditPairs(data).filter((_, idx) => idx !== i) })
+  const addColumn = () => patch({ columns: [...tableEditPairs(data), { column: '', value: '' }] })
 
   return (
     <Drawer
@@ -619,26 +626,42 @@ export default function ConfigDrawer({ node, open, onClose, onDataPatch, variabl
 
         {node.type === 'tableEdit' && (
           <>
-            <Form.Item label="列名" required style={{ marginBottom: 12 }}>
-              <Input
-                value={data.column}
-                onChange={(e) => patch({ column: e.target.value })}
-                placeholder="如 等级；不存在会自动创建"
-                maxLength={40}
-              />
-            </Form.Item>
-            <Form.Item label="值" style={{ marginBottom: 12 }}>
-              <VariableInput
-                value={data.value}
-                onChange={(v) => patch({ value: v })}
-                options={variableOptions}
-                placeholder="下拉选变量（自动带 {{}}），或输入固定文本"
-              />
-            </Form.Item>
-            <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
-              写入一列数据：有这一列就覆盖，没有就新建再赋值。自动建表并起一行（直线流程里连续的
-              表格编辑写同一行，「数据循环」每换一项新起一行），控制台「表格」页实时可见，
-              流程末尾的「表格导出」模块可直接导出。
+            <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 10 }}>
+              写入列
+            </Text>
+            {tableEditPairs(data).map((p, i) => (
+              <div key={i} style={NEST_CARD}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
+                  <Tag color="purple" style={{ marginInlineEnd: 0, flexShrink: 0 }}>
+                    列{i + 1}
+                  </Tag>
+                  <Input
+                    size="small"
+                    placeholder="列名（不存在会自动创建）"
+                    value={p.column}
+                    onChange={(e) => patchColumn(i, 'column', e.target.value)}
+                    maxLength={40}
+                  />
+                  <Popconfirm title="删除该写入列？" onConfirm={() => removeColumn(i)} okText="删除" cancelText="取消">
+                    <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
+                </div>
+                <VariableInput
+                  value={p.value}
+                  onChange={(v) => patchColumn(i, 'value', v)}
+                  options={variableOptions}
+                  placeholder="下拉选变量（自动带 {{}}），或输入固定文本"
+                />
+              </div>
+            ))}
+            <Button type="dashed" block icon={<PlusOutlined />} onClick={addColumn}>
+              添加写入列
+            </Button>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 12, lineHeight: 1.7 }}>
+              一次写一列或多列：每项「列名 + 值」都写进当前行（值可用 {'{{变量}}'}），列不存在会自动创建。
+              自动建表并起一行（直线流程里连续的表格编辑写同一行，「数据循环」每换一项新起一行；
+              循环遍历导入表格的行时直接改当前行、不追加新行），
+              控制台「表格」页实时可见，流程末尾的「表格导出」模块可直接导出。
             </Text>
           </>
         )}

@@ -166,24 +166,53 @@ export default function CrawlerNode({ id, data, type, selected }) {
         >
           {data.label || meta.name}
         </span>
-        {data.iteration && (
-          <span
-            title={`循环进度：第 ${data.iteration.row}/${data.iteration.total} 项`}
-            style={{
-              fontSize: 10,
-              lineHeight: '16px',
-              padding: '0 6px',
-              borderRadius: 8,
-              flexShrink: 0,
-              color: '#ff6b85',
-              background: 'rgba(255,55,95,0.14)',
-            }}
-          >
-            {data.iteration.row}/{data.iteration.total}
-          </span>
-        )}
+        {(() => {
+          // 循环进度徽标：单进程一条放标题行右侧（原样式）；并发循环的多条进度
+          // 单独一行放标题下方（可换行）——挤在标题行会溢出节点、盖住连接点
+          if (Array.isArray(data.workerIterations) && data.workerIterations.length > 1) return null
+          if (!data.iteration) return null
+          return (
+            <span
+              title={`循环进度：第 ${data.iteration.row}/${data.iteration.total} 项`}
+              style={{
+                fontSize: 10,
+                lineHeight: '16px',
+                padding: '0 6px',
+                borderRadius: 8,
+                flexShrink: 0,
+                color: '#ff6b85',
+                background: 'rgba(255,55,95,0.14)',
+              }}
+            >
+              {data.iteration.row}/{data.iteration.total}
+            </span>
+          )
+        })()}
         <StatusIcon status={status} />
       </div>
+      {Array.isArray(data.workerIterations) && data.workerIterations.length > 1 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 4px', marginTop: 7, width: '100%' }}>
+          {data.workerIterations.map((it) =>
+            it ? (
+              <span
+                key={it.index}
+                title={`进程${it.index + 1}：第 ${it.row}/${it.total} 项`}
+                style={{
+                  fontSize: 10,
+                  lineHeight: '16px',
+                  padding: '0 6px',
+                  borderRadius: 8,
+                  color: '#ff6b85',
+                  background: 'rgba(255,55,95,0.14)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {`P${it.index + 1} ${it.row}/${it.total}`}
+              </span>
+            ) : null,
+          )}
+        </div>
+      )}
       <div
         title={invalid ? `必填缺失：${invalid}` : status === 'failed' ? data.error : data.summary || meta.summary(data)}
         style={{

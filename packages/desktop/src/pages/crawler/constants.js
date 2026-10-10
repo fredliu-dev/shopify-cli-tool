@@ -223,9 +223,14 @@ export const MODULES = {
     name: '表格编辑',
     icon: FormOutlined,
     color: '#5e5ce6',
-    desc: '写入一列数据（值可用 {{变量}}），自动建表新行，供表格导出',
-    defaultData: () => ({ label: '表格编辑', column: '', value: '' }),
-    summary: (d) => (d.column ? `${d.column} ← ${d.value || '空'}` : '未填写列名'),
+    desc: '写入一列或多列数据（值可用 {{变量}}），自动建表新行，供表格导出',
+    defaultData: () => ({ label: '表格编辑', columns: [{ column: '', value: '' }] }),
+    summary: (d) => {
+      const filled = tableEditPairs(d).filter((p) => String(p?.column ?? '').trim() !== '')
+      if (!filled.length) return '未填写列名'
+      const first = `${filled[0].column.trim()} ← ${filled[0].value || '空'}`
+      return filled.length > 1 ? `${first} 等 ${filled.length} 列` : first
+    },
   },
   exportTable: {
     type: 'exportTable',
@@ -258,6 +263,18 @@ export const MODULE_ORDER = [
 ]
 
 const isSelectorFilled = (s) => !!s && typeof s.value === 'string' && s.value.trim() !== ''
+
+/**
+ * 表格编辑写入项归一化：新配置是 columns 数组（[{column, value}]，一列一项），
+ * 旧配置是单列 column/value——统一成数组返回，配置面板与运行校验共用（兼容旧项目）。
+ */
+export function tableEditPairs(d) {
+  if (Array.isArray(d?.columns) && d.columns.length) return d.columns
+  if (String(d?.column ?? '').trim() !== '' || String(d?.value ?? '') !== '') {
+    return [{ column: d?.column ?? '', value: d?.value ?? '' }]
+  }
+  return []
+}
 
 /**
  * 汇总「已定义的变量」供配置抽屉下拉选择（VariableInput 的数据源）：
@@ -369,8 +386,11 @@ export function requiredMissing(node) {
       if (String(d.left ?? '').trim() === '') return '未填写左值'
       if (!isUnaryOp(d.op) && String(d.right ?? '').trim() === '') return '未填写右值'
       return null
-    case 'tableEdit':
-      return String(d.column ?? '').trim() ? null : '未填写列名'
+    case 'tableEdit': {
+      const pairs = tableEditPairs(d)
+      if (pairs.length === 0) return '未填写列名'
+      return pairs.some((p) => !String(p?.column ?? '').trim()) ? '有写入项未填写列名' : null
+    }
     case 'exportTable':
       return String(d.savePath ?? '').trim() ? null : '未填写保存地址'
     default:
