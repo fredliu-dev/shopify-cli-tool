@@ -1,10 +1,11 @@
+import { basename, join } from 'node:path'
+import { existsSync, readdirSync, statSync } from 'node:fs'
+
 /**
  * Git 仓库扫描的纯逻辑（headless）：供 CLI 与 Electron 桌面应用共用。
  * 只读 git、不打印、不提问；展示与交互由各自的壳负责。
  */
 import { spawn } from 'node:child_process'
-import { existsSync, readdirSync, statSync } from 'node:fs'
-import { basename, join } from 'node:path'
 
 /**
  * 在 cwd 跑一次 git 子进程，捕获 stdout/stderr。
@@ -15,37 +16,37 @@ import { basename, join } from 'node:path'
  * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
  */
 function runGit(args, cwd, { timeout = 15000 } = {}) {
-  return new Promise((resolve) => {
-    let stdout = ''
-    let stderr = ''
-    let settled = false
-    const finish = (code) => {
-      if (settled) return
-      settled = true
-      resolve({ code: code ?? 0, stdout, stderr })
-    }
-    const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], timeout })
-    child.stdout.on('data', (d) => {
-      stdout += d.toString()
+    return new Promise((resolve) => {
+        let stdout = ''
+        let stderr = ''
+        let settled = false
+        const finish = (code) => {
+            if (settled) return
+            settled = true
+            resolve({ code: code ?? 0, stdout, stderr })
+        }
+        const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], timeout })
+        child.stdout.on('data', (d) => {
+            stdout += d.toString()
+        })
+        child.stderr.on('data', (d) => {
+            stderr += d.toString()
+        })
+        child.on('error', (err) => {
+            // git 缺失（ENOENT）等启动失败写入 stderr：调用方按退出码只能看到「失败」，
+            // 这里给出可读原因（如「未找到 git 命令」），不再静默吞掉
+            stderr += err.code === 'ENOENT'
+                ? '未找到 git 命令：请安装 Git 并确认其已加入 PATH。'
+                : `git 进程启动失败：${err.message}`
+            finish(1)
+        })
+        child.on('close', finish)
     })
-    child.stderr.on('data', (d) => {
-      stderr += d.toString()
-    })
-    child.on('error', (err) => {
-      // git 缺失（ENOENT）等启动失败写入 stderr：调用方按退出码只能看到「失败」，
-      // 这里给出可读原因（如「未找到 git 命令」），不再静默吞掉
-      stderr += err.code === 'ENOENT'
-        ? '未找到 git 命令：请安装 Git 并确认其已加入 PATH。'
-        : `git 进程启动失败：${err.message}`
-      finish(1)
-    })
-    child.on('close', finish)
-  })
 }
 
 /** 多行文本按行去空白、去重、排序后返回（用于文件名列表）。 */
 function uniqLines(s) {
-  return [...new Set(String(s).split('\n').map((l) => l.trim()).filter(Boolean))].sort()
+    return [...new Set(String(s).split('\n').map((l) => l.trim()).filter(Boolean))].sort()
 }
 
 /**
@@ -55,35 +56,35 @@ function uniqLines(s) {
  * @returns {string}
  */
 function unquotePath(p) {
-  if (!p.startsWith('"') || !p.endsWith('"')) return p
-  const inner = p.slice(1, -1)
-  let out = ''
-  let bytes = []
-  const flush = () => {
-    if (bytes.length) {
-      out += Buffer.from(bytes).toString('utf8')
-      bytes = []
+    if (!p.startsWith('"') || !p.endsWith('"')) return p
+    const inner = p.slice(1, -1)
+    let out = ''
+    let bytes = []
+    const flush = () => {
+        if (bytes.length) {
+            out += Buffer.from(bytes).toString('utf8')
+            bytes = []
+        }
     }
-  }
-  for (let i = 0; i < inner.length; ) {
-    const m = /^\\([0-7]{3})/.exec(inner.slice(i))
-    if (m) {
-      bytes.push(parseInt(m[1], 8)) // 八进制转义是 UTF-8 字节序列，攒够再整体解码
-      i += 4
-    } else {
-      flush()
-      if (inner[i] === '\\') {
-        // \" 与 \\ 的简单反转义
-        out += inner[i + 1] ?? '\\'
-        i += 2
-      } else {
-        out += inner[i]
-        i += 1
-      }
+    for (let i = 0; i < inner.length;) {
+        const m = /^\\([0-7]{3})/.exec(inner.slice(i))
+        if (m) {
+            bytes.push(parseInt(m[1], 8)) // 八进制转义是 UTF-8 字节序列，攒够再整体解码
+            i += 4
+        } else {
+            flush()
+            if (inner[i] === '\\') {
+                // \" 与 \\ 的简单反转义
+                out += inner[i + 1] ?? '\\'
+                i += 2
+            } else {
+                out += inner[i]
+                i += 1
+            }
+        }
     }
-  }
-  flush()
-  return out
+    flush()
+    return out
 }
 
 /**
@@ -102,45 +103,45 @@ function unquotePath(p) {
  * @returns {Promise<string | null>} 形如 '<sha>..HEAD' 的范围；无合适范围返回 null
  */
 async function resolveRange(repoPath) {
-  // 1. 优先：reflog 还原分支创建点（最准、贴合「创建到现在」）
-  const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
-  const branch = head.code === 0 ? head.stdout.trim() : ''
-  if (branch && branch !== 'HEAD') {
-    const rl = await runGit(['log', '-g', '--format=%H', branch], repoPath)
-    if (rl.code === 0) {
-      const shas = rl.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
-      // reflog 按时间倒序，最末一条 = 最早的 ref 值 = 分支创建时的 commit（基准当时的 tip）
-      const start = shas.length ? shas[shas.length - 1] : ''
-      if (start) {
-        // 创建点必然是 HEAD 的祖先；防御性校验，不通过则弃用 reflog 结果走拓扑
-        const anc = await runGit(['merge-base', '--is-ancestor', start, 'HEAD'], repoPath)
-        if (anc.code === 0) return `${start}..HEAD`
-      }
+    // 1. 优先：reflog 还原分支创建点（最准、贴合「创建到现在」）
+    const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
+    const branch = head.code === 0 ? head.stdout.trim() : ''
+    if (branch && branch !== 'HEAD') {
+        const rl = await runGit(['log', '-g', '--format=%H', branch], repoPath)
+        if (rl.code === 0) {
+            const shas = rl.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+            // reflog 按时间倒序，最末一条 = 最早的 ref 值 = 分支创建时的 commit（基准当时的 tip）
+            const start = shas.length ? shas[shas.length - 1] : ''
+            if (start) {
+                // 创建点必然是 HEAD 的祖先；防御性校验，不通过则弃用 reflog 结果走拓扑
+                const anc = await runGit(['merge-base', '--is-ancestor', start, 'HEAD'], repoPath)
+                if (anc.code === 0) return `${start}..HEAD`
+            }
+        }
     }
-  }
 
-  // 2. 回退：远端优先 + 取是祖先且领先数最小的候选，用 merge-base 作 fork-point
-  const candidates = ['origin/main', 'main', 'origin/master', 'master', 'origin/develop', 'develop']
-  let best = null
-  let bestAhead = Infinity
-  for (const c of candidates) {
-    const ex = await runGit(['rev-parse', '--verify', '--quiet', c], repoPath)
-    if (ex.code !== 0 || !ex.stdout.trim()) continue
-    // 必须是 HEAD 的祖先：is-ancestor 返回 0 表示 c 的提交全在 HEAD 里（即「HEAD 从 c 拉出来」）
-    const anc = await runGit(['merge-base', '--is-ancestor', c, 'HEAD'], repoPath)
-    if (anc.code !== 0) continue
-    const ahead = await runGit(['rev-list', '--count', `${c}..HEAD`], repoPath)
-    const n = ahead.code === 0 ? parseInt(ahead.stdout.trim(), 10) || 0 : Infinity
-    if (n < bestAhead) {
-      bestAhead = n
-      best = c
+    // 2. 回退：远端优先 + 取是祖先且领先数最小的候选，用 merge-base 作 fork-point
+    const candidates = ['origin/main', 'main', 'origin/master', 'master', 'origin/develop', 'develop']
+    let best = null
+    let bestAhead = Infinity
+    for (const c of candidates) {
+        const ex = await runGit(['rev-parse', '--verify', '--quiet', c], repoPath)
+        if (ex.code !== 0 || !ex.stdout.trim()) continue
+        // 必须是 HEAD 的祖先：is-ancestor 返回 0 表示 c 的提交全在 HEAD 里（即「HEAD 从 c 拉出来」）
+        const anc = await runGit(['merge-base', '--is-ancestor', c, 'HEAD'], repoPath)
+        if (anc.code !== 0) continue
+        const ahead = await runGit(['rev-list', '--count', `${c}..HEAD`], repoPath)
+        const n = ahead.code === 0 ? parseInt(ahead.stdout.trim(), 10) || 0 : Infinity
+        if (n < bestAhead) {
+            bestAhead = n
+            best = c
+        }
     }
-  }
-  if (best) {
-    const mb = await runGit(['merge-base', best, 'HEAD'], repoPath)
-    if (mb.code === 0 && mb.stdout.trim()) return `${mb.stdout.trim()}..HEAD`
-  }
-  return null
+    if (best) {
+        const mb = await runGit(['merge-base', best, 'HEAD'], repoPath)
+        if (mb.code === 0 && mb.stdout.trim()) return `${mb.stdout.trim()}..HEAD`
+    }
+    return null
 }
 
 /**
@@ -150,9 +151,9 @@ async function resolveRange(repoPath) {
  * @returns {Promise<string | null>}
  */
 export async function getRemoteUrl(repoPath) {
-  if (!isGitRepo(repoPath)) return null
-  const r = await runGit(['remote', 'get-url', 'origin'], repoPath)
-  return r.code === 0 ? r.stdout.trim() : null
+    if (!isGitRepo(repoPath)) return null
+    const r = await runGit(['remote', 'get-url', 'origin'], repoPath)
+    return r.code === 0 ? r.stdout.trim() : null
 }
 
 /**
@@ -161,22 +162,22 @@ export async function getRemoteUrl(repoPath) {
  * @returns {Promise<{ current: string | null, branches: string[] }>}
  */
 export async function listBranches(repoPath) {
-  if (!isGitRepo(repoPath)) return { current: null, branches: [] }
-  const cur = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
-  const current = cur.code === 0 ? cur.stdout.trim() : null
-  const br = await runGit(['branch', '--list'], repoPath)
-  const branches =
-    br.code === 0
-      ? [
-          ...new Set(
-            br.stdout
-              .split('\n')
-              .map((l) => l.replace(/^\* /, '').trim())
-              .filter(Boolean),
-          ),
-        ]
-      : []
-  return { current, branches }
+    if (!isGitRepo(repoPath)) return { current: null, branches: [] }
+    const cur = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
+    const current = cur.code === 0 ? cur.stdout.trim() : null
+    const br = await runGit(['branch', '--list'], repoPath)
+    const branches =
+        br.code === 0
+            ? [
+                ...new Set(
+                    br.stdout
+                        .split('\n')
+                        .map((l) => l.replace(/^\* /, '').trim())
+                        .filter(Boolean),
+                ),
+            ]
+            : []
+    return { current, branches }
 }
 
 /**
@@ -191,32 +192,32 @@ export async function listBranches(repoPath) {
  *   local  本地分支名（refs/heads）；remote 远程分支名（仅 origin/，去前缀、去 HEAD）
  */
 export async function listAllBranches(repoPath, { fetch = true } = {}) {
-  if (!isGitRepo(repoPath)) return { current: null, local: [], remote: [] }
-  const cur = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
-  const current = cur.code === 0 ? cur.stdout.trim() : null
-  if (fetch) {
-    await runGit(['fetch', 'origin', '--prune'], repoPath, { timeout: 60000 }) // 失败忽略，下面仍列已知 refs
-  }
-  const [loc, rem] = await Promise.all([
-    runGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], repoPath),
-    runGit(['for-each-ref', '--format=%(refname:short)', 'refs/remotes'], repoPath),
-  ])
-  const local = loc.code === 0 ? uniqLines(loc.stdout) : []
-  const remote =
-    rem.code === 0
-      ? [
-          ...new Set(
-            rem.stdout
-              .split('\n')
-              .map((l) => l.trim())
-              .filter(Boolean)
-              .filter((l) => l.startsWith('origin/')) // 仅 origin 远程分支
-              .map((l) => l.slice('origin/'.length))
-              .filter((l) => l && l !== 'HEAD' && !l.includes('->')),
-          ),
-        ].sort()
-      : []
-  return { current, local, remote }
+    if (!isGitRepo(repoPath)) return { current: null, local: [], remote: [] }
+    const cur = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
+    const current = cur.code === 0 ? cur.stdout.trim() : null
+    if (fetch) {
+        await runGit(['fetch', 'origin', '--prune'], repoPath, { timeout: 60000 }) // 失败忽略，下面仍列已知 refs
+    }
+    const [loc, rem] = await Promise.all([
+        runGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], repoPath),
+        runGit(['for-each-ref', '--format=%(refname:short)', 'refs/remotes'], repoPath),
+    ])
+    const local = loc.code === 0 ? uniqLines(loc.stdout) : []
+    const remote =
+        rem.code === 0
+            ? [
+                ...new Set(
+                    rem.stdout
+                        .split('\n')
+                        .map((l) => l.trim())
+                        .filter(Boolean)
+                        .filter((l) => l.startsWith('origin/')) // 仅 origin 远程分支
+                        .map((l) => l.slice('origin/'.length))
+                        .filter((l) => l && l !== 'HEAD' && !l.includes('->')),
+                ),
+            ].sort()
+            : []
+    return { current, local, remote }
 }
 
 /**
@@ -229,19 +230,19 @@ export async function listAllBranches(repoPath, { fetch = true } = {}) {
  * @returns {Promise<string[]>}
  */
 export async function getChangedFiles(repoPath, { maxCount = 20 } = {}) {
-  const range = await resolveRange(repoPath)
+    const range = await resolveRange(repoPath)
 
-  // core.quotepath=false：非 ASCII 路径原样输出，避免中文文件名被转成 "\344\270\255" 八进制转义
-  const args = ['-c', 'core.quotepath=false', 'log', '--name-only', '--no-merges', '--pretty=format:']
-  if (range) args.push(range)
-  else args.push('-n', String(maxCount), 'HEAD')
+    // core.quotepath=false：非 ASCII 路径原样输出，避免中文文件名被转成 "\344\270\255" 八进制转义
+    const args = ['-c', 'core.quotepath=false', 'log', '--name-only', '--no-merges', '--pretty=format:']
+    if (range) args.push(range)
+    else args.push('-n', String(maxCount), 'HEAD')
 
-  const lg = await runGit(args, repoPath)
-  const committed = uniqLines(lg.code === 0 ? lg.stdout : '').map(unquotePath)
+    const lg = await runGit(args, repoPath)
+    const committed = uniqLines(lg.code === 0 ? lg.stdout : '').map(unquotePath)
 
-  // 合并工作区未提交改动（已暂存 / 未暂存），与已提交记录去重，得到最终的 template 变动
-  const dirty = await workingTreeFiles(repoPath)
-  return uniqLines(`${committed.join('\n')}\n${dirty.join('\n')}`)
+    // 合并工作区未提交改动（已暂存 / 未暂存），与已提交记录去重，得到最终的 template 变动
+    const dirty = await workingTreeFiles(repoPath)
+    return uniqLines(`${committed.join('\n')}\n${dirty.join('\n')}`)
 }
 
 /**
@@ -250,11 +251,11 @@ export async function getChangedFiles(repoPath, { maxCount = 20 } = {}) {
  * @returns {boolean}
  */
 export function isGitRepo(dir) {
-  try {
-    return existsSync(join(dir, '.git'))
-  } catch {
-    return false
-  }
+    try {
+        return existsSync(join(dir, '.git'))
+    } catch {
+        return false
+    }
 }
 
 /**
@@ -268,21 +269,21 @@ export function isGitRepo(dir) {
  * }>}
  */
 export async function getRepoInfo(repoPath, { maxCount = 20 } = {}) {
-  const name = basename(repoPath)
-  if (!isGitRepo(repoPath)) {
-    return { path: repoPath, name, isRepo: false, currentBranch: null, branches: [], branchCount: 0, changedFiles: [], remoteUrl: null }
-  }
+    const name = basename(repoPath)
+    if (!isGitRepo(repoPath)) {
+        return { path: repoPath, name, isRepo: false, currentBranch: null, branches: [], branchCount: 0, changedFiles: [], remoteUrl: null }
+    }
 
-  // 当前分支 + 本地分支列表（复用 listBranches）；远程地址（origin）并行取，供拼接分支外链
-  const [{ current: currentBranch, branches }, remoteUrl] = await Promise.all([
-    listBranches(repoPath),
-    getRemoteUrl(repoPath),
-  ])
+    // 当前分支 + 本地分支列表（复用 listBranches）；远程地址（origin）并行取，供拼接分支外链
+    const [{ current: currentBranch, branches }, remoteUrl] = await Promise.all([
+        listBranches(repoPath),
+        getRemoteUrl(repoPath),
+    ])
 
-  // 当前分支最终的改动文件（已提交 ∪ 工作区未提交，去重）
-  const changedFiles = await getChangedFiles(repoPath, { maxCount })
+    // 当前分支最终的改动文件（已提交 ∪ 工作区未提交，去重）
+    const changedFiles = await getChangedFiles(repoPath, { maxCount })
 
-  return { path: repoPath, name, isRepo: true, currentBranch, branches, branchCount: branches.length, changedFiles, remoteUrl }
+    return { path: repoPath, name, isRepo: true, currentBranch, branches, branchCount: branches.length, changedFiles, remoteUrl }
 }
 
 /**
@@ -293,29 +294,29 @@ export async function getRepoInfo(repoPath, { maxCount = 20 } = {}) {
  * @returns {Promise<ReturnType<getRepoInfo>[]>}
  */
 export async function scanGitRepos(rootDir, opts) {
-  const found = []
-  if (isGitRepo(rootDir)) found.push(rootDir)
+    const found = []
+    if (isGitRepo(rootDir)) found.push(rootDir)
 
-  let entries = []
-  try {
-    entries = readdirSync(rootDir)
-  } catch {
-    return found.length ? Promise.all(found.map((p) => getRepoInfo(p, opts))) : []
-  }
-
-  for (const entry of entries) {
-    if (entry.startsWith('.') || entry === 'node_modules') continue
-    const full = join(rootDir, entry)
+    let entries = []
     try {
-      if (statSync(full).isDirectory() && isGitRepo(full)) found.push(full)
+        entries = readdirSync(rootDir)
     } catch {
-      // 无权限/符号链接异常等：跳过
+        return found.length ? Promise.all(found.map((p) => getRepoInfo(p, opts))) : []
     }
-  }
 
-  // 去重保序（rootDir 自身与其子项不会重复，防御性去重）
-  const uniq = [...new Set(found)]
-  return Promise.all(uniq.map((p) => getRepoInfo(p, opts)))
+    for (const entry of entries) {
+        if (entry.startsWith('.') || entry === 'node_modules') continue
+        const full = join(rootDir, entry)
+        try {
+            if (statSync(full).isDirectory() && isGitRepo(full)) found.push(full)
+        } catch {
+            // 无权限/符号链接异常等：跳过
+        }
+    }
+
+    // 去重保序（rootDir 自身与其子项不会重复，防御性去重）
+    const uniq = [...new Set(found)]
+    return Promise.all(uniq.map((p) => getRepoInfo(p, opts)))
 }
 
 /**
@@ -325,10 +326,10 @@ export async function scanGitRepos(rootDir, opts) {
  * @returns {string}
  */
 export function repoNameFromUrl(url) {
-  const cleaned = String(url).trim().replace(/\.git$/, '')
-  // SSH 用 ':' 分隔 host:path；HTTPS 用 '/'。统一取最后一段。
-  const last = cleaned.replace(/^.*[:/]/, '')
-  return last || cleaned
+    const cleaned = String(url).trim().replace(/\.git$/, '')
+    // SSH 用 ':' 分隔 host:path；HTTPS 用 '/'。统一取最后一段。
+    const last = cleaned.replace(/^.*[:/]/, '')
+    return last || cleaned
 }
 
 /**
@@ -340,13 +341,13 @@ export function repoNameFromUrl(url) {
  * @returns {string}
  */
 export function normalizeGitUrl(url) {
-  let u = String(url || '').trim()
-  if (!u) return ''
-  u = u.replace(/\.git$/, '')
-  u = u.replace(/^git@([^:]+):/, 'https://$1/') // git@host:org/repo → https://host/org/repo
-  u = u.replace(/^git:\/\//, 'https://') // git://host/... → https://...
-  u = u.replace(/^ssh:\/\/(?:[^/@]+@)?/, 'https://') // ssh://[user@]host/... → https://host/...
-  return u
+    let u = String(url || '').trim()
+    if (!u) return ''
+    u = u.replace(/\.git$/, '')
+    u = u.replace(/^git@([^:]+):/, 'https://$1/') // git@host:org/repo → https://host/org/repo
+    u = u.replace(/^git:\/\//, 'https://') // git://host/... → https://...
+    u = u.replace(/^ssh:\/\/(?:[^/@]+@)?/, 'https://') // ssh://[user@]host/... → https://host/...
+    return u
 }
 
 /**
@@ -356,9 +357,9 @@ export function normalizeGitUrl(url) {
  * @returns {{ owner: string, repo: string } | null}
  */
 export function parseOwnerRepoFromUrl(url) {
-  const https = normalizeGitUrl(url) // → https://github.com/owner/Repo
-  const m = https.match(/github\.com\/([^/]+)\/([^/?#]+)/i)
-  return m ? { owner: m[1], repo: m[2] } : null
+    const https = normalizeGitUrl(url) // → https://github.com/owner/Repo
+    const m = https.match(/github\.com\/([^/]+)\/([^/?#]+)/i)
+    return m ? { owner: m[1], repo: m[2] } : null
 }
 
 /* ---------------- GitHub API 请求（仅直连，不走国内镜像） ----------------
@@ -368,7 +369,30 @@ export function parseOwnerRepoFromUrl(url) {
  */
 
 /**
- * GitHub API fetch（仅直连）。直连试 2 次（时通时断），每次 10 秒超时——
+ * 解析实际用于请求的 fetch。Electron 主进程内优先用 net.fetch（Chromium 网络栈）——
+ * Node 全局 fetch（undici）不读系统代理，开 Clash Verge 等系统代理也照样直连失败；
+ * net.fetch 自动跟随系统代理，无代理环境行为不变。CLI（纯 Node）回退全局 fetch。
+ */
+let _fetchImpl
+async function resolveFetch() {
+    if (_fetchImpl) return _fetchImpl
+    if (process.versions?.electron) {
+        try {
+            const { net } = await import('electron')
+            if (net?.fetch) {
+                _fetchImpl = net.fetch.bind(net)
+                return _fetchImpl
+            }
+        } catch {
+            /* 拿不到 electron（非主进程等）时退回全局 fetch */
+        }
+    }
+    _fetchImpl = globalThis.fetch
+    return _fetchImpl
+}
+
+/**
+ * GitHub API fetch（仅直连，不走国内镜像）。每次试 2 次（时通时断），每次 10 秒超时——
  * 无 VPN 直连常是挂起而非快速失败，不能干等太久。
  * 校验响应 content-type 必须为 JSON：本机直连被 DNS 污染时 api.github.com 会被
  * 劫持成 301 → github.com 的 HTML 页，若不校验会把 HTML 当成功、JSON 解析再报怪错。
@@ -378,22 +402,23 @@ export function parseOwnerRepoFromUrl(url) {
  * @returns {Promise<Response>}
  */
 async function githubApiFetch(path, opts = {}) {
-  const url = `https://api.github.com${path}`
-  let lastErr
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const res = await fetch(url, { ...opts, signal: AbortSignal.timeout(10_000) })
-      const ct = String(res.headers.get('content-type') || '')
-      if (!ct.includes('application/json')) throw new Error('响应非 JSON（api.github.com 可能被网络劫持）')
-      return res
-    } catch (err) {
-      lastErr = err
-      if (attempt < 1) await new Promise((r) => setTimeout(r, 1500))
+    const url = `https://api.github.com${path}`
+    const doFetch = await resolveFetch()
+    let lastErr
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const res = await doFetch(url, { ...opts, signal: AbortSignal.timeout(10_000) })
+            const ct = String(res.headers.get('content-type') || '')
+            if (!ct.includes('application/json')) throw new Error('响应非 JSON（api.github.com 可能被网络劫持）')
+            return res
+        } catch (err) {
+            lastErr = err
+            if (attempt < 1) await new Promise((r) => setTimeout(r, 1500))
+        }
     }
-  }
-  throw new Error(
-    `无法连接 GitHub API（${lastErr?.message || lastErr}）。拉取成员/创建 PR 需能直连 api.github.com，请开启 VPN 后重试`,
-  )
+    throw new Error(
+        `无法连接 GitHub API（${lastErr?.message || lastErr}）。拉取成员/创建 PR 需能连通 api.github.com，请开启 VPN（Clash Verge 需开启「系统代理」或 TUN 模式）后重试`,
+    )
 }
 
 /**
@@ -406,35 +431,35 @@ async function githubApiFetch(path, opts = {}) {
  * @returns {Promise<Array<{ login: string, avatar: string, url: string }>>}
  */
 export async function getCollaborators(repoPath, token) {
-  const url = await getRemoteUrl(repoPath)
-  if (!url) return []
-  const or = parseOwnerRepoFromUrl(url)
-  if (!or) return [] // 非 github 仓库
-  const tok = token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
-  if (!tok) throw new Error('NO_TOKEN') // 特殊标识：前端据此显示 token 输入框（而非普通错误）
-  const res = await githubApiFetch(`/repos/${or.owner}/${or.repo}/collaborators?per_page=100`, {
-    headers: { Authorization: `Bearer ${tok}`, Accept: 'application/vnd.github+json' },
-  })
-  if (!res.ok) {
-    let body = null
-    try {
-      body = await res.json()
-    } catch {
-      /* 非 JSON 响应 */
+    const url = await getRemoteUrl(repoPath)
+    if (!url) return []
+    const or = parseOwnerRepoFromUrl(url)
+    if (!or) return [] // 非 github 仓库
+    const tok = token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+    if (!tok) throw new Error('NO_TOKEN') // 特殊标识：前端据此显示 token 输入框（而非普通错误）
+    const res = await githubApiFetch(`/repos/${or.owner}/${or.repo}/collaborators?per_page=100`, {
+        headers: { Authorization: `Bearer ${tok}`, Accept: 'application/vnd.github+json' },
+    })
+    if (!res.ok) {
+        let body = null
+        try {
+            body = await res.json()
+        } catch {
+            /* 非 JSON 响应 */
+        }
+        const msg = body?.message ? `：${body.message}` : ''
+        if (res.status === 404) {
+            throw new Error(
+                `HTTP 404${msg}。常见原因：① Token 未勾选 repo 权限；② Token 所属账号不是该仓库协作者（无访问权限）；③ 仓库不存在或远程地址解析错误。`,
+            )
+        }
+        if (res.status === 401 || res.status === 403) {
+            throw new Error(`HTTP ${res.status}${msg}。请检查 GitHub Token 是否有效、是否过期、是否勾选了 repo 权限。`)
+        }
+        throw new Error(`HTTP ${res.status}${msg}`)
     }
-    const msg = body?.message ? `：${body.message}` : ''
-    if (res.status === 404) {
-      throw new Error(
-        `HTTP 404${msg}。常见原因：① Token 未勾选 repo 权限；② Token 所属账号不是该仓库协作者（无访问权限）；③ 仓库不存在或远程地址解析错误。`,
-      )
-    }
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(`HTTP ${res.status}${msg}。请检查 GitHub Token 是否有效、是否过期、是否勾选了 repo 权限。`)
-    }
-    throw new Error(`HTTP ${res.status}${msg}`)
-  }
-  const list = await res.json()
-  return list.map((c) => ({ login: c.login, avatar: c.avatar_url, url: c.html_url }))
+    const list = await res.json()
+    return list.map((c) => ({ login: c.login, avatar: c.avatar_url, url: c.html_url }))
 }
 
 /**
@@ -448,33 +473,33 @@ export async function getCollaborators(repoPath, token) {
  * @returns {Promise<{ failed: string[], error: string }>} failed=未能添加的 login；error=首次失败的 GitHub message
  */
 async function addReviewers(or, tok, number, reviewers) {
-  const path = `/repos/${or.owner}/${or.repo}/pulls/${number}/requested_reviewers`
-  const headers = {
-    Authorization: `Bearer ${tok}`,
-    Accept: 'application/vnd.github+json',
-    'Content-Type': 'application/json',
-  }
-  const tryOnce = async (list) => {
-    const r = await githubApiFetch(path, { method: 'POST', headers, body: JSON.stringify({ reviewers: list }) })
-    if (r.ok) return { ok: true, msg: '' }
-    let msg = ''
-    try {
-      msg = (await r.json())?.message || ''
-    } catch {
-      /* 非 JSON 响应 */
+    const path = `/repos/${or.owner}/${or.repo}/pulls/${number}/requested_reviewers`
+    const headers = {
+        Authorization: `Bearer ${tok}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
     }
-    return { ok: false, msg }
-  }
-  const all = await tryOnce(reviewers)
-  if (all.ok) return { failed: [], error: '' }
-  // 一次性失败：多个 reviewer 时逐个重试找出被拒者；单个直接判失败
-  if (reviewers.length <= 1) return { failed: [...reviewers], error: all.msg }
-  const failed = []
-  for (const login of reviewers) {
-    const one = await tryOnce([login])
-    if (!one.ok) failed.push(login)
-  }
-  return { failed, error: all.msg }
+    const tryOnce = async (list) => {
+        const r = await githubApiFetch(path, { method: 'POST', headers, body: JSON.stringify({ reviewers: list }) })
+        if (r.ok) return { ok: true, msg: '' }
+        let msg = ''
+        try {
+            msg = (await r.json())?.message || ''
+        } catch {
+            /* 非 JSON 响应 */
+        }
+        return { ok: false, msg }
+    }
+    const all = await tryOnce(reviewers)
+    if (all.ok) return { failed: [], error: '' }
+    // 一次性失败：多个 reviewer 时逐个重试找出被拒者；单个直接判失败
+    if (reviewers.length <= 1) return { failed: [...reviewers], error: all.msg }
+    const failed = []
+    for (const login of reviewers) {
+        const one = await tryOnce([login])
+        if (!one.ok) failed.push(login)
+    }
+    return { failed, error: all.msg }
 }
 
 /**
@@ -489,63 +514,63 @@ async function addReviewers(or, tok, number, reviewers) {
  * @returns {Promise<{ number: number, url: string, reviewerWarning?: boolean }>}
  */
 export async function createPullRequest(repoPath, opts, token) {
-  const url = await getRemoteUrl(repoPath)
-  if (!url) throw new Error('未找到 git 远程地址（origin）')
-  const or = parseOwnerRepoFromUrl(url)
-  if (!or) throw new Error('远程地址不是 GitHub 仓库，无法创建 PR')
-  const tok = token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
-  if (!tok) throw new Error('NO_TOKEN')
-  const { title, head, base, body, reviewers } = opts || {}
-  const res = await githubApiFetch(`/repos/${or.owner}/${or.repo}/pulls`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${tok}`,
-      Accept: 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ title, head, base, body }),
-  })
-  if (!res.ok) {
-    let b = null
-    try {
-      b = await res.json()
-    } catch {
-      /* 非 JSON 响应 */
+    const url = await getRemoteUrl(repoPath)
+    if (!url) throw new Error('未找到 git 远程地址（origin）')
+    const or = parseOwnerRepoFromUrl(url)
+    if (!or) throw new Error('远程地址不是 GitHub 仓库，无法创建 PR')
+    const tok = token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+    if (!tok) throw new Error('NO_TOKEN')
+    const { title, head, base, body, reviewers } = opts || {}
+    const res = await githubApiFetch(`/repos/${or.owner}/${or.repo}/pulls`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${tok}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ title, head, base, body }),
+    })
+    if (!res.ok) {
+        let b = null
+        try {
+            b = await res.json()
+        } catch {
+            /* 非 JSON 响应 */
+        }
+        const msg = b?.message ? `：${b.message}` : ''
+        if (res.status === 422) {
+            const errs = Array.isArray(b?.errors) && b.errors.length
+                ? `（${b.errors.map((e) => e.message).filter(Boolean).join('；')}）`
+                : ''
+            throw new Error(
+                `创建 PR 失败：HTTP 422${msg}${errs}。常见：该分支已有打开的 PR；或 head 与 base 相同；或 head 分支尚未推到远程。`,
+            )
+        }
+        if (res.status === 404) {
+            throw new Error(
+                `HTTP 404${msg}。常见原因：① Token 未勾选 repo 权限；② Token 所属账号不是该仓库协作者（无访问权限）；③ 仓库不存在或远程地址解析错误。`,
+            )
+        }
+        if (res.status === 401 || res.status === 403) {
+            throw new Error(`HTTP ${res.status}${msg}。请检查 GitHub Token 是否有效、是否过期、是否勾选了 repo 权限。`)
+        }
+        throw new Error(`创建 PR 失败：HTTP ${res.status}${msg}`)
     }
-    const msg = b?.message ? `：${b.message}` : ''
-    if (res.status === 422) {
-      const errs = Array.isArray(b?.errors) && b.errors.length
-        ? `（${b.errors.map((e) => e.message).filter(Boolean).join('；')}）`
-        : ''
-      throw new Error(
-        `创建 PR 失败：HTTP 422${msg}${errs}。常见：该分支已有打开的 PR；或 head 与 base 相同；或 head 分支尚未推到远程。`,
-      )
+    const pr = await res.json()
+    // 请求 reviewer：PR 已建好。先一次性请求，失败则逐个重试过滤被拒者，返回被拒名单/原因给前端。
+    if (Array.isArray(reviewers) && reviewers.length) {
+        const added = await addReviewers(or, tok, pr.number, reviewers)
+        if (added.failed.length) {
+            return {
+                number: pr.number,
+                url: pr.html_url,
+                reviewerWarning: true,
+                reviewerFailed: added.failed,
+                reviewerError: added.error,
+            }
+        }
     }
-    if (res.status === 404) {
-      throw new Error(
-        `HTTP 404${msg}。常见原因：① Token 未勾选 repo 权限；② Token 所属账号不是该仓库协作者（无访问权限）；③ 仓库不存在或远程地址解析错误。`,
-      )
-    }
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(`HTTP ${res.status}${msg}。请检查 GitHub Token 是否有效、是否过期、是否勾选了 repo 权限。`)
-    }
-    throw new Error(`创建 PR 失败：HTTP ${res.status}${msg}`)
-  }
-  const pr = await res.json()
-  // 请求 reviewer：PR 已建好。先一次性请求，失败则逐个重试过滤被拒者，返回被拒名单/原因给前端。
-  if (Array.isArray(reviewers) && reviewers.length) {
-    const added = await addReviewers(or, tok, pr.number, reviewers)
-    if (added.failed.length) {
-      return {
-        number: pr.number,
-        url: pr.html_url,
-        reviewerWarning: true,
-        reviewerFailed: added.failed,
-        reviewerError: added.error,
-      }
-    }
-  }
-  return { number: pr.number, url: pr.html_url }
+    return { number: pr.number, url: pr.html_url }
 }
 
 /**
@@ -556,12 +581,12 @@ export async function createPullRequest(repoPath, opts, token) {
  * @returns {Promise<{ ok: true, path: string } | { ok: false, error: string }>}
  */
 export async function cloneRepo(url, intoDir, { timeout = 180000 } = {}) {
-  const repoName = repoNameFromUrl(url)
-  const target = join(intoDir, repoName)
-  if (existsSync(target)) return { ok: false, error: `目录已存在：${target}` }
-  const r = await runGit(['clone', url, repoName], intoDir, { timeout })
-  if (r.code === 0) return { ok: true, path: target }
-  return { ok: false, error: (r.stderr || r.stdout || '克隆失败').trim() }
+    const repoName = repoNameFromUrl(url)
+    const target = join(intoDir, repoName)
+    if (existsSync(target)) return { ok: false, error: `目录已存在：${target}` }
+    const r = await runGit(['clone', url, repoName], intoDir, { timeout })
+    if (r.code === 0) return { ok: true, path: target }
+    return { ok: false, error: (r.stderr || r.stdout || '克隆失败').trim() }
 }
 
 /**
@@ -572,9 +597,9 @@ export async function cloneRepo(url, intoDir, { timeout = 180000 } = {}) {
  * @returns {Promise<boolean>}
  */
 export async function remoteBranchExists(repoPath, name) {
-  if (!name) return false
-  const r = await runGit(['ls-remote', '--heads', 'origin', name], repoPath, { timeout: 30000 })
-  return r.code === 0 && r.stdout.trim().length > 0
+    if (!name) return false
+    const r = await runGit(['ls-remote', '--heads', 'origin', name], repoPath, { timeout: 30000 })
+    return r.code === 0 && r.stdout.trim().length > 0
 }
 
 /**
@@ -584,9 +609,9 @@ export async function remoteBranchExists(repoPath, name) {
  * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
  */
 async function pushBranch(repoPath, name) {
-  const r = await runGit(['push', '-u', 'origin', name], repoPath, { timeout: 120000 })
-  if (r.code === 0) return { ok: true }
-  return { ok: false, error: (r.stderr || r.stdout || '推送远程失败').trim() }
+    const r = await runGit(['push', '-u', 'origin', name], repoPath, { timeout: 120000 })
+    if (r.code === 0) return { ok: true }
+    return { ok: false, error: (r.stderr || r.stdout || '推送远程失败').trim() }
 }
 
 /**
@@ -601,25 +626,25 @@ async function pushBranch(repoPath, name) {
  * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
  */
 export async function createBranch(repoPath, { base, name, fetch = true, push = false, switch: doSwitch = true } = {}) {
-  if (!base || !name) return { ok: false, error: '缺少基准分支或新分支名' }
-  // 远程已存在同名分支时不允许创建（仅 push 模式校验，避免建了本地分支才发现远程已被占用）
-  if (push && (await remoteBranchExists(repoPath, name))) {
-    return { ok: false, error: `远程已存在分支 ${name}，不允许创建` }
-  }
-  if (fetch) {
-    await runGit(['fetch', 'origin', base], repoPath, { timeout: 60000 }) // 失败忽略，下面回退本地
-  }
-  // 优先基于 origin/<base> 最新代码创建；远程无该分支则回退本地 <base>。
-  // switch=true（默认）checkout -b 创建并切到新分支；switch=false 用 git branch 仅建指针、不切换。
-  const make = (start) => (doSwitch ? ['checkout', '-b', name, start] : ['branch', name, start])
-  let r = await runGit(make(`origin/${base}`), repoPath)
-  if (r.code !== 0) r = await runGit(make(base), repoPath)
-  if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout || '创建分支失败').trim() }
-  if (push) {
-    const pushed = await pushBranch(repoPath, name)
-    if (!pushed.ok) return pushed
-  }
-  return { ok: true }
+    if (!base || !name) return { ok: false, error: '缺少基准分支或新分支名' }
+    // 远程已存在同名分支时不允许创建（仅 push 模式校验，避免建了本地分支才发现远程已被占用）
+    if (push && (await remoteBranchExists(repoPath, name))) {
+        return { ok: false, error: `远程已存在分支 ${name}，不允许创建` }
+    }
+    if (fetch) {
+        await runGit(['fetch', 'origin', base], repoPath, { timeout: 60000 }) // 失败忽略，下面回退本地
+    }
+    // 优先基于 origin/<base> 最新代码创建；远程无该分支则回退本地 <base>。
+    // switch=true（默认）checkout -b 创建并切到新分支；switch=false 用 git branch 仅建指针、不切换。
+    const make = (start) => (doSwitch ? ['checkout', '-b', name, start] : ['branch', name, start])
+    let r = await runGit(make(`origin/${base}`), repoPath)
+    if (r.code !== 0) r = await runGit(make(base), repoPath)
+    if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout || '创建分支失败').trim() }
+    if (push) {
+        const pushed = await pushBranch(repoPath, name)
+        if (!pushed.ok) return pushed
+    }
+    return { ok: true }
 }
 
 /**
@@ -629,10 +654,10 @@ export async function createBranch(repoPath, { base, name, fetch = true, push = 
  * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
  */
 export async function checkoutBranch(repoPath, branch) {
-  if (!branch) return { ok: false, error: '缺少分支名' }
-  const r = await runGit(['checkout', branch], repoPath)
-  if (r.code === 0) return { ok: true }
-  return { ok: false, error: (r.stderr || r.stdout || '切换分支失败').trim() }
+    if (!branch) return { ok: false, error: '缺少分支名' }
+    const r = await runGit(['checkout', branch], repoPath)
+    if (r.code === 0) return { ok: true }
+    return { ok: false, error: (r.stderr || r.stdout || '切换分支失败').trim() }
 }
 
 /**
@@ -646,38 +671,38 @@ export async function checkoutBranch(repoPath, branch) {
  *   | { ok: false, error: string, switchedTo?: string | null, remoteDeleted?: boolean }>}
  */
 export async function deleteBranch(repoPath, { branch, deleteRemote = true, fallback } = {}) {
-  if (!branch) return { ok: false, error: '缺少分支名' }
-  if (branch === 'main' || branch === 'master' || branch === 'alt') {
-    return { ok: false, error: `${branch} 是受保护的主分支，不允许删除` }
-  }
-  let switchedTo = null
-  const { current, branches } = await listBranches(repoPath)
-  if (current === branch) {
-    const target =
-      (fallback && branches.includes(fallback) ? fallback : null) ||
-      ['main', 'master', 'alt'].find((b) => branches.includes(b)) ||
-      branches.find((b) => b && b !== branch)
-    if (!target) return { ok: false, error: '仓库没有其他本地分支可切换，无法删除当前分支' }
-    const sw = await runGit(['checkout', target], repoPath)
-    if (sw.code !== 0) {
-      return { ok: false, error: `删除前需切到 ${target}，切换失败：${(sw.stderr || sw.stdout || '').trim()}` }
+    if (!branch) return { ok: false, error: '缺少分支名' }
+    if (branch === 'main' || branch === 'master' || branch === 'alt') {
+        return { ok: false, error: `${branch} 是受保护的主分支，不允许删除` }
     }
-    switchedTo = target
-  }
-  // 远程存在才删（ls-remote 查询），纯本地分支跳过；删除失败整体报错、本地不动
-  let remoteDeleted = false
-  if (deleteRemote && (await remoteBranchExists(repoPath, branch))) {
-    const r = await runGit(['push', 'origin', '--delete', branch], repoPath, { timeout: 120000 })
-    if (r.code !== 0) {
-      return { ok: false, error: `删除远程分支失败：${(r.stderr || r.stdout || '').trim()}`, switchedTo }
+    let switchedTo = null
+    const { current, branches } = await listBranches(repoPath)
+    if (current === branch) {
+        const target =
+            (fallback && branches.includes(fallback) ? fallback : null) ||
+            ['main', 'master', 'alt'].find((b) => branches.includes(b)) ||
+            branches.find((b) => b && b !== branch)
+        if (!target) return { ok: false, error: '仓库没有其他本地分支可切换，无法删除当前分支' }
+        const sw = await runGit(['checkout', target], repoPath)
+        if (sw.code !== 0) {
+            return { ok: false, error: `删除前需切到 ${target}，切换失败：${(sw.stderr || sw.stdout || '').trim()}` }
+        }
+        switchedTo = target
     }
-    remoteDeleted = true
-  }
-  const d = await runGit(['branch', '-D', branch], repoPath)
-  if (d.code !== 0) {
-    return { ok: false, error: `删除本地分支失败：${(d.stderr || d.stdout || '').trim()}`, switchedTo, remoteDeleted }
-  }
-  return { ok: true, remoteDeleted, switchedTo }
+    // 远程存在才删（ls-remote 查询），纯本地分支跳过；删除失败整体报错、本地不动
+    let remoteDeleted = false
+    if (deleteRemote && (await remoteBranchExists(repoPath, branch))) {
+        const r = await runGit(['push', 'origin', '--delete', branch], repoPath, { timeout: 120000 })
+        if (r.code !== 0) {
+            return { ok: false, error: `删除远程分支失败：${(r.stderr || r.stdout || '').trim()}`, switchedTo }
+        }
+        remoteDeleted = true
+    }
+    const d = await runGit(['branch', '-D', branch], repoPath)
+    if (d.code !== 0) {
+        return { ok: false, error: `删除本地分支失败：${(d.stderr || d.stdout || '').trim()}`, switchedTo, remoteDeleted }
+    }
+    return { ok: true, remoteDeleted, switchedTo }
 }
 
 /**
@@ -688,8 +713,8 @@ export async function deleteBranch(repoPath, { branch, deleteRemote = true, fall
  * @returns {Promise<boolean>}
  */
 export async function isTomlTracked(repoPath) {
-  const r = await runGit(['ls-files', '--error-unmatch', 'shopify.theme.toml'], repoPath)
-  return r.code === 0
+    const r = await runGit(['ls-files', '--error-unmatch', 'shopify.theme.toml'], repoPath)
+    return r.code === 0
 }
 
 /**
@@ -699,20 +724,20 @@ export async function isTomlTracked(repoPath) {
  * @returns {Promise<string[]>}
  */
 export async function workingTreeFiles(repoPath) {
-  // core.quotepath=false + unquotePath：中文/含引号路径原样还原，否则 /\.json$/ 之类的匹配会漏文件
-  const r = await runGit(['-c', 'core.quotepath=false', 'status', '--porcelain'], repoPath)
-  if (r.code !== 0) return []
-  return r.stdout
-    .split('\n')
-    // 只过滤空行，不能 trim 整行：「 M path」未暂存修改的首列是空格，
-    // trim 会吃掉它导致 slice(3) 错位、路径被截断。
-    .filter((l) => l.trim())
-    .map((l) => {
-      // "XY path"（前 2 列状态码 + 1 空格），rename 形如 "R  old -> new" 取新路径
-      const arrow = l.indexOf(' -> ')
-      if (arrow >= 0) return unquotePath(l.slice(arrow + 4).trim())
-      return unquotePath(l.slice(3).trim())
-    })
+    // core.quotepath=false + unquotePath：中文/含引号路径原样还原，否则 /\.json$/ 之类的匹配会漏文件
+    const r = await runGit(['-c', 'core.quotepath=false', 'status', '--porcelain'], repoPath)
+    if (r.code !== 0) return []
+    return r.stdout
+        .split('\n')
+        // 只过滤空行，不能 trim 整行：「 M path」未暂存修改的首列是空格，
+        // trim 会吃掉它导致 slice(3) 错位、路径被截断。
+        .filter((l) => l.trim())
+        .map((l) => {
+            // "XY path"（前 2 列状态码 + 1 空格），rename 形如 "R  old -> new" 取新路径
+            const arrow = l.indexOf(' -> ')
+            if (arrow >= 0) return unquotePath(l.slice(arrow + 4).trim())
+            return unquotePath(l.slice(3).trim())
+        })
 }
 
 /**
@@ -724,49 +749,49 @@ export async function workingTreeFiles(repoPath) {
  * @returns {Promise<{ ok: true } | { ok: false, step: string, error: string }>}
  */
 export async function mergeBranches(repoPath, { source, target, main } = {}) {
-  if (!source || !target || !main) {
-    return { ok: false, step: 'args', error: '缺少 source / target / main 分支' }
-  }
-
-  // 合并前必须工作区干净（checkout/merge 才不会被打断）
-  const dirty = await workingTreeFiles(repoPath)
-  if (dirty.length) {
-    return { ok: false, step: 'dirty', error: `工作区有未提交文件：\n${dirty.join('\n')}` }
-  }
-
-  const { current: original } = await listBranches(repoPath)
-  const restore = async () => {
-    if (original && original !== 'HEAD') await runGit(['checkout', original], repoPath)
-  }
-
-  try {
-    // 1) 切到目标 release 分支
-    let r = await runGit(['checkout', target], repoPath)
-    if (r.code !== 0) {
-      await restore()
-      return { ok: false, step: 'checkout', error: (r.stderr || r.stdout || '切换目标分支失败').trim() }
+    if (!source || !target || !main) {
+        return { ok: false, step: 'args', error: '缺少 source / target / main 分支' }
     }
 
-    // 2) 先合主分支到 release（提前解冲突）
-    r = await runGit(['merge', main], repoPath)
-    if (r.code !== 0) {
-      await runGit(['merge', '--abort'], repoPath)
-      await restore()
-      return { ok: false, step: 'merge-main', error: (r.stderr || r.stdout || '合并主分支失败').trim() }
+    // 合并前必须工作区干净（checkout/merge 才不会被打断）
+    const dirty = await workingTreeFiles(repoPath)
+    if (dirty.length) {
+        return { ok: false, step: 'dirty', error: `工作区有未提交文件：\n${dirty.join('\n')}` }
     }
 
-    // 3) 再合开发分支
-    r = await runGit(['merge', source], repoPath)
-    if (r.code !== 0) {
-      await runGit(['merge', '--abort'], repoPath)
-      await restore()
-      return { ok: false, step: 'merge-source', error: (r.stderr || r.stdout || '合并开发分支失败').trim() }
+    const { current: original } = await listBranches(repoPath)
+    const restore = async () => {
+        if (original && original !== 'HEAD') await runGit(['checkout', original], repoPath)
     }
 
-    await restore()
-    return { ok: true }
-  } catch (err) {
-    await restore()
-    return { ok: false, step: 'unknown', error: err.message }
-  }
+    try {
+        // 1) 切到目标 release 分支
+        let r = await runGit(['checkout', target], repoPath)
+        if (r.code !== 0) {
+            await restore()
+            return { ok: false, step: 'checkout', error: (r.stderr || r.stdout || '切换目标分支失败').trim() }
+        }
+
+        // 2) 先合主分支到 release（提前解冲突）
+        r = await runGit(['merge', main], repoPath)
+        if (r.code !== 0) {
+            await runGit(['merge', '--abort'], repoPath)
+            await restore()
+            return { ok: false, step: 'merge-main', error: (r.stderr || r.stdout || '合并主分支失败').trim() }
+        }
+
+        // 3) 再合开发分支
+        r = await runGit(['merge', source], repoPath)
+        if (r.code !== 0) {
+            await runGit(['merge', '--abort'], repoPath)
+            await restore()
+            return { ok: false, step: 'merge-source', error: (r.stderr || r.stdout || '合并开发分支失败').trim() }
+        }
+
+        await restore()
+        return { ok: true }
+    } catch (err) {
+        await restore()
+        return { ok: false, step: 'unknown', error: err.message }
+    }
 }
