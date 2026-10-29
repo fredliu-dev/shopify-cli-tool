@@ -1,5 +1,5 @@
-import { readdir, stat, mkdir, copyFile } from 'node:fs/promises'
-import { join, extname, basename, isAbsolute } from 'node:path'
+import { readdir, stat, mkdir, copyFile, readFile, writeFile } from 'node:fs/promises'
+import { join, extname, basename } from 'node:path'
 import { select, input } from '@inquirer/prompts'
 import { log } from '../ui/logger.js'
 import ora from 'ora'
@@ -7,6 +7,9 @@ import sharp from 'sharp'
 
 // 支持的图片格式
 const SUPPORTED_FORMATS = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']
+
+// 配置文件：存在执行命令的目录下，只存项目名称列表（作为图片前缀与输出文件夹名）
+const CONFIG_FILE = 'handleimg.config.json'
 
 // 颜色容差默认值（RGB 欧氏距离）：相邻像素颜色差不超过此值即视为同一片背景
 // 阴影是平滑渐变，相邻像素差极小，所以这个值主要用来在「主体边缘」处停下
@@ -38,6 +41,32 @@ function parseOptions(argv) {
   }
   // 容差必须为正
   return { tolerance: tolerance > 0 ? tolerance : DEFAULT_TOLERANCE }
+}
+
+// 读取当前目录下的配置文件；文件缺失或解析失败返回空项目列表
+async function loadConfig(dir) {
+  try {
+    const data = JSON.parse(await readFile(join(dir, CONFIG_FILE), 'utf8'))
+    const projects = Array.isArray(data?.projects)
+      ? data.projects.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim())
+      : []
+    return { projects }
+  } catch {
+    return { projects: [] }
+  }
+}
+
+// 写入配置文件（只存项目名称列表）
+async function saveConfig(dir, config) {
+  await writeFile(join(dir, CONFIG_FILE), JSON.stringify(config, null, 2), 'utf8')
+}
+
+// 校验项目名称：不能为空，且不能包含路径 / 文件名非法字符
+function validateProjectName(value) {
+  const name = value.trim()
+  if (!name) return '项目名称不能为空'
+  if (/[/\\:*?"<>|]/.test(name)) return '项目名称不能包含 / \\ : * ? " < > | 等字符'
+  return true
 }
 
 // 裁掉图片四周的「透明空白 + 阴影 / 边框」，保留主体（卡片）及其内部内容。
@@ -291,7 +320,7 @@ export default {
   name: 'handleimg',
   aliases: ['handleimg'],
   description:
-    '交互式处理图片：依次选择是否裁剪（去四周空白/阴影）、是否转 webp、容差、保存文件夹，再按选择执行',
+    '交互式处理图片：依次选择是否裁剪（去四周空白/阴影）、是否转 webp、容差、项目名称，再按项目名称作为前缀与输出文件夹执行',
   usage: 'shop handleimg [--tolerance 20]',
   async run(ctx) {
     const currentDir = process.cwd()
@@ -347,13 +376,38 @@ export default {
           default: tolerance,
         })
       }
-      const dirInput = (
-        await input({
-          message: '保存到哪个文件夹？',
-          default: 'processed',
+      // 项目名称：从配置文件里选（没有则先输入），同时作为图片前缀与输出文件夹名
+      const config = await loadConfig(currentDir)
+      let projectName
+      if (config.projects.length) {
+        const ADD_NEW = '__add_new__'
+        projectName = await select({
+          message: '选择项目名称（作为图片前缀与输出文件夹）：',
+          choices: [
+            ...config.projects.map((p) => ({ name: p, value: p })),
+            { name: '＋ 新增项目名称', value: ADD_NEW },
+          ],
         })
-      ).trim()
-      outputDir = isAbsolute(dirInput) ? dirInput : join(currentDir, dirInput)
+        if (projectName === ADD_NEW) {
+          projectName = (
+            await input({ message: '请输入新的项目名称：', validate: validateProjectName })
+          ).trim()
+        }
+      } else {
+        projectName = (
+          await input({
+            message: '请输入项目名称（作为图片前缀与输出文件夹）：',
+            validate: validateProjectName,
+          })
+        ).trim()
+      }
+      // 新项目名称写入配置文件（去重），下次可直接选择
+      if (!config.projects.includes(projectName)) {
+        config.projects.push(projectName)
+        await saveConfig(currentDir, config)
+        log.success(`已将项目名称「${projectName}」保存到 ${CONFIG_FILE}`)
+      }
+      outputDir = join(currentDir, projectName)
 
       // 准备输出
       await mkdir(outputDir, { recursive: true })
@@ -376,7 +430,10 @@ export default {
         const file = imageFiles[idx]
         const inputPath = join(currentDir, file)
         const ext = outputExtension(file, trim, toWebp)
-        const outputPath = join(outputDir, basename(file, extname(file)) + ext)
+        const outputPath = join(
+          outputDir,
+          `${projectName}-${basename(file, extname(file))}${ext}`,
+        )
 
         // 输出文件已存在则跳过
         try {

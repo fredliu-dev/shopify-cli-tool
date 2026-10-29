@@ -3,9 +3,11 @@
 //   pnpm release:npm      同时发 core + cli（默认，向后兼容）
 //   pnpm release:core     只发 core
 //   pnpm release:cli      只发 cli
-// 同时发时先 core 后 cli：cli 依赖 core 的 workspace:^，pnpm publish 会把它替换为 core 真实
+// 同时发时先 core 后 cli：cli 依赖 core 的 workspace:^，pnpm pack 会把它替换为 core 真实
 // 版本号，故 core 必须先发布，cli 才能带上正确的 core 依赖版本。
-import { readFileSync, writeFileSync } from 'node:fs'
+// 注：pnpm 11 的 publish 在新版 npm registry 上会返回 404（PUT 包名 Not found），
+// 因此统一改用 npm 发布；cli 仍用 pnpm pack 打包以完成 workspace:^ 的版本替换。
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createInterface } from 'node:readline/promises'
 import { execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -55,11 +57,18 @@ console.log(`→ core ${core.version} / cli ${cli.version}`)
 // 顺序：both 时先 core 后 cli——cli 依赖 core，core 先发，cli 的 workspace:^ 才能替换到新 core 版本
 if (which === 'core' || which === 'both') {
   console.log('\n发布 core …')
-  execSync('pnpm publish --no-git-checks --access public', { stdio: 'inherit', cwd: coreDir })
+  execSync('npm publish --access public', { stdio: 'inherit', cwd: coreDir })
 }
 if (which === 'cli' || which === 'both') {
   console.log('\n发布 cli …')
-  execSync('pnpm publish --no-git-checks', { stdio: 'inherit', cwd: cliDir })
+  // pnpm pack 产出带 core 真实版本的 tarball，再用 npm 上传（npm 异步处理，稍后生效）
+  execSync('pnpm pack', { stdio: 'inherit', cwd: cliDir })
+  const tgz = `${cli.name}-${cli.version}.tgz`
+  try {
+    execSync(`npm publish ${tgz}`, { stdio: 'inherit', cwd: cliDir })
+  } finally {
+    unlinkSync(join(cliDir, tgz))
+  }
 }
 
-console.log(`\n✅ npm 发布完成（${which}）`)
+console.log(`\n✅ npm 发布完成（${which}）；npm 为异步处理，通常一两分钟后在 registry 生效`)
