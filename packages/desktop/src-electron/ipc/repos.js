@@ -1,6 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { watch, existsSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative, resolve, isAbsolute } from 'node:path'
 import { listEditors, openInEditor } from '../editor.js'
 
 const load = () => import('@shopify-cli-tool/core')
@@ -172,6 +172,20 @@ async function rescanWorkspace(dir, core) {
     send('repos:reposChanged', { data })
   } catch {
     /* 工作区被删等：忽略 */
+  }
+}
+
+/* -------- JSON 可视化：单个文件变化监听 -------- */
+const jsonWatchers = new Map() // absPath -> FSWatcher
+
+/** 关闭单个 JSON 文件的监听。 */
+function closeJsonWatcher(path) {
+  const w = jsonWatchers.get(path)
+  if (w) {
+    try {
+      w.close()
+    } catch {}
+    jsonWatchers.delete(path)
   }
 }
 
@@ -434,9 +448,20 @@ export function registerReposIpc() {
   ipcMain.handle('repos:editors', () => ({ ok: true, data: listEditors() }))
 
   // 用默认编辑器打开仓库目录
-  ipcMain.handle('repos:openInEditor', (_evt, { dir, editorId }) => {
+  ipcMain.handle('repos:openInEditor', (_evt, { dir, editorId, file }) => {
     try {
-      openInEditor(dir, editorId)
+      let target = file
+      if (target) {
+        // file 必须落在 dir 内且真实存在：VS Code 系 CLI 会把不存在的路径
+        // 当成「无标题」新文件打开，这里先校验，避免弹出无标题空文件。
+        // 必须传绝对路径给编辑器——CLI 对相对路径按「自身进程 cwd」解析，
+        // 会跑到客户端工具所在目录下新建文件，而不是目标仓库
+        const abs = isAbsolute(target) ? resolve(target) : resolve(dir, target)
+        const relToDir = relative(dir, abs)
+        const inside = relToDir && !relToDir.startsWith('..') && !isAbsolute(relToDir)
+        target = inside && existsSync(abs) ? abs : null
+      }
+      openInEditor(dir, editorId, target)
       return { ok: true }
     } catch (err) {
       return { ok: false, error: err.message }
@@ -587,5 +612,179 @@ export function registerReposIpc() {
     } catch (err) {
       return { ok: false, error: err.message }
     }
+  })
+
+  /* -------- JSON 可视化 -------- */
+
+  // 列出主题里可可视化的 JSON 文件（templates/** + config/settings_data.json）
+  ipcMain.handle('repos:jsonVizList', async (_evt, dir) => {
+    const { listThemeJsonFiles } = await load()
+    try {
+      return { ok: true, data: listThemeJsonFiles(dir) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 读取 JSON 文件并解析 key 含义（section schema / settings_schema）
+  ipcMain.handle('repos:jsonVizRead', async (_evt, { dir, path }) => {
+    const { readJsonFile, resolveJsonMeta } = await load()
+    try {
+      const { raw, data } = readJsonFile(path)
+      if (data == null) return { ok: false, error: 'JSON 解析失败' }
+      const meta = resolveJsonMeta(dir, path, data)
+      return { ok: true, data, meta, raw }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 写入 JSON 文件（value 为对象，按 2 空格缩进写入）
+  ipcMain.handle('repos:jsonVizWrite', async (_evt, { path, value }) => {
+    const { writeJsonFile } = await load()
+    try {
+      writeJsonFile(path, value)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 保存一份版本快照（写入 userDataDir/json-versions/<hash>/<ts>.json）
+  ipcMain.handle('repos:jsonVizSaveVersion', async (_evt, { dir, path, content, name }) => {
+    const { saveJsonVersion } = await load()
+    try {
+      return { ok: true, data: saveJsonVersion(dir, path, content, undefined, name) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 重命名 / 删除历史版本
+  ipcMain.handle('repos:jsonVizRenameVersion', async (_evt, opts) => {
+    const { renameJsonVersion } = await load()
+    try {
+      return { ok: true, data: renameJsonVersion(opts.dir, opts.path, opts.id, opts.name) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+  ipcMain.handle('repos:jsonVizDeleteVersion', async (_evt, opts) => {
+    const { deleteJsonVersions } = await load()
+    try {
+      // 兼容单个 id 和批量 ids 两种入参
+      const ids = Array.isArray(opts.ids) ? opts.ids : [opts.id]
+      return { ok: true, data: deleteJsonVersions(opts.dir, opts.path, ids) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 列出某个 section 类型在 schema 里定义的全部 block 类型（供「添加区块」选择）
+  ipcMain.handle('repos:jsonVizBlockTypes', async (_evt, { dir, sectionType }) => {
+    const { listSectionBlockTypes } = await load()
+    try {
+      return { ok: true, data: listSectionBlockTypes(dir, sectionType) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // ---- 近期改动记录 ----
+
+  // 记录一次文件改动（保存/切换/采用外部修改时调用）
+  ipcMain.handle('repos:jsonVizAddRecent', async (_evt, entry) => {
+    const { addJsonRecent } = await load()
+    try {
+      return { ok: true, data: addJsonRecent(entry) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 读取近期改动列表
+  ipcMain.handle('repos:jsonVizListRecent', async () => {
+    const { listJsonRecent } = await load()
+    try {
+      return { ok: true, data: listJsonRecent().items }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 删除单条近期改动
+  ipcMain.handle('repos:jsonVizRemoveRecent', async (_evt, { repoDir, rel }) => {
+    const { removeJsonRecent } = await load()
+    try {
+      return { ok: true, data: removeJsonRecent(repoDir, rel) }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 清空全部近期改动
+  ipcMain.handle('repos:jsonVizClearRecent', async () => {
+    const { clearJsonRecent } = await load()
+    try {
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 列出某文件的所有版本（按时间倒序），并附带与磁盘当前内容匹配的版本 id
+  ipcMain.handle('repos:jsonVizVersions', async (_evt, { dir, path }) => {
+    const { listJsonVersions, matchVersionId, readJsonFile } = await load()
+    try {
+      const data = listJsonVersions(dir, path)
+      let matchedId = null
+      try {
+        // readJsonFile 返回 { raw, data }，用 data（纯 JSON 内容）做版本比对
+        const disk = readJsonFile(path)
+        matchedId = matchVersionId(dir, path, JSON.stringify(disk.data, null, 2))
+      } catch {
+        /* 磁盘文件读不了就不校准 */
+      }
+      return { ok: true, data, matchedId }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 加载某版本的内容（字符串）
+  ipcMain.handle('repos:jsonVizLoadVersion', async (_evt, { dir, path, id }) => {
+    const { loadJsonVersion } = await load()
+    try {
+      const raw = loadJsonVersion(dir, path, id)
+      if (raw == null) return { ok: false, error: '版本不存在' }
+      return { ok: true, data: raw }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 监听单个 JSON 文件变化：变化时 debounce 300ms 推 repos:jsonFileChanged { path }
+  ipcMain.handle('repos:jsonVizWatch', (_evt, path) => {
+    closeJsonWatcher(path)
+    let timer = null
+    try {
+      const w = watch(path, () => {
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = null
+          send('repos:jsonFileChanged', { path })
+        }, 300)
+      })
+      jsonWatchers.set(path, w)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // 取消监听单个 JSON 文件
+  ipcMain.handle('repos:jsonVizUnwatch', (_evt, path) => {
+    closeJsonWatcher(path)
+    return { ok: true }
   })
 }

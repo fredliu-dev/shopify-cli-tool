@@ -11,7 +11,7 @@
  */
 import { existsSync, readdirSync, writeFileSync, realpathSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, isAbsolute } from 'node:path'
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { clipboard } from 'electron'
 
@@ -205,49 +205,76 @@ function winExePath(e) {
  * 用指定编辑器打开目录（detached，主进程不等待）。
  * @param {string} dir 要打开的目录
  * @param {string} id 编辑器 id
+ * @param {string} [file] 可选：同时打开该文件（相对 dir 的路径或绝对路径）。
+ *   VS Code 系 CLI 支持 `code <dir> <file>` —— 打开目录窗口并定位到该文件；
+ *   JetBrains / Sublime 等同样接受「目录 + 文件」参数序列；兜底路径（open -a /
+ *   explorer / xdg-open）只打开目录。
  */
-export function openInEditor(dir, id) {
+export function openInEditor(dir, id, file) {
   const e = EDITORS.find((x) => x.id === id)
   if (!e) throw new Error(`未知编辑器：${id}`)
-  if (MAC) openMac(e, dir)
-  else if (WIN) openWin(e, dir)
-  else openLinux(e, dir)
+  if (MAC) openMac(e, dir, file)
+  else if (WIN) openWin(e, dir, file)
+  else openLinux(e, dir, file)
 }
 
-function openMac(e, dir) {
-  // 优先用「确属本编辑器」的 CLI 命令打开目录：VS Code 系的 CLI（code / cursor / trae-cn）
-  // 能把目录在已开窗口里打开；而 open -a 对部分编辑器（如 Trae CN）只激活、不打开目录。
-  // 但必须校验 CLI 归属——Trae / Cursor 会把 code / cursor 命令指向自己，劫持「vscode」：
-  // 只有 realpath 落在本编辑器 bundle 内的 cmd 才可信。
+/** mac app bundle 内置 CLI 的候选路径（VS Code 系都带 Contents/Resources/app/bin/<cmd>）。 */
+function macBundledCmd(e, appPath) {
+  if (!e.mac.cmd || !appPath) return null
+  const p = join(appPath, 'Contents/Resources/app/bin', e.mac.cmd)
+  return existsSync(p) ? p : null
+}
+
+function openMac(e, dir, file) {
+  const args = file ? [dir, file] : [dir]
+  // 1) 优先用「确属本编辑器」的 PATH CLI：VS Code 系的 CLI（code / cursor / trae-cn）
+  //    能把目录/文件在已开窗口里打开。必须校验归属——Trae / Cursor 会把 code / cursor
+  //    命令指向自己，劫持「vscode」选择；只有 realpath 落在本编辑器 bundle 内才可信。
   if (e.mac.cmd && macCmdBelongsTo(e.mac.cmd, e.mac.apps)) {
-    spawn(e.mac.cmd, [dir], { detached: true, stdio: 'ignore' }).unref()
+    spawn(e.mac.cmd, args, { detached: true, stdio: 'ignore' }).unref()
     return
   }
-  // 归属不明 / 无 CLI：用 app bundle 兜底，至少打开正确的编辑器本体
-  const app = e.mac.apps.find((a) => MAC_APP_DIRS.some((d) => existsSync(join(d, a))))
-  spawn('open', ['-a', app || e.name, dir], { detached: true, stdio: 'ignore' }).unref()
+  const appPath = e.mac.apps
+    .flatMap((a) => MAC_APP_DIRS.map((d) => join(d, a)))
+    .find((p) => existsSync(p))
+  // 2) PATH 里没有该命令（很常见：安装时跳过了「添加到 PATH」）→ 用 app bundle 内置 CLI，
+  //    如 Trae CN.app/Contents/Resources/app/bin/trae-cn。没有它，open -a 对 Trae CN
+  //    这类应用只激活窗口、不打开目录/文件。
+  const bundled = macBundledCmd(e, appPath)
+  if (bundled) {
+    spawn(bundled, args, { detached: true, stdio: 'ignore' }).unref()
+    return
+  }
+  // 3) 兜底：app 本体（至少打开正确的编辑器；file 传给 open -a 尽量定位）
+  //    file 可能已是绝对路径（IPC 层校验时解析过），不能直接 join 到 dir 上
+  const fileArg = file ? (isAbsolute(file) ? file : join(dir, file)) : null
+  spawn('open', ['-a', appPath || e.name, ...(fileArg ? [fileArg] : [dir])], {
+    detached: true,
+    stdio: 'ignore',
+  }).unref()
 }
 
-function openWin(e, dir) {
+function openWin(e, dir, file) {
   // 优先用 .exe 显式路径（同样避免 PATH 里 code.cmd 被其它 VS Code 系编辑器劫持），
   // 其次 CLI 命令，最后用资源管理器兜底
   const exe = winExePath(e)
+  const args = file ? [dir, file] : [dir]
   if (exe) {
-    spawn(exe, [dir], { detached: true, stdio: 'ignore' }).unref()
+    spawn(exe, args, { detached: true, stdio: 'ignore' }).unref()
     return
   }
   if (e.win.cmd && cmdExists(e.win.cmd)) {
     // shell:true 时 Node 只按空格拼接参数、不加引号：路径含空格（如 C:\Users\张 三\repo）
     // 会被截断成多个参数，必须自己包一层引号
-    spawn(e.win.cmd, [`"${dir}"`], { detached: true, stdio: 'ignore', shell: true }).unref()
+    spawn(e.win.cmd, args.map((a) => `"${a}"`), { detached: true, stdio: 'ignore', shell: true }).unref()
     return
   }
   spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore' }).unref()
 }
 
-function openLinux(e, dir) {
+function openLinux(e, dir, file) {
   if (cmdExists(e.linux.cmd)) {
-    spawn(e.linux.cmd, [dir], { detached: true, stdio: 'ignore' }).unref()
+    spawn(e.linux.cmd, file ? [dir, file] : [dir], { detached: true, stdio: 'ignore' }).unref()
     return
   }
   spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref()

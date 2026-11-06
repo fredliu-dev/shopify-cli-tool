@@ -66,6 +66,27 @@ contextBridge.exposeInMainWorld('api', {
     templates: () => ipcRenderer.invoke('repos:templates'),
     resolveTemplate: (store) => ipcRenderer.invoke('repos:resolveTemplate', store),
     resolveTemplateByRemote: (remoteUrl) => ipcRenderer.invoke('repos:resolveTemplateByRemote', remoteUrl),
+    // JSON 可视化：列出/读写 templates 下 JSON，解析 key 含义，版本快照
+    jsonVizList: (dir) => ipcRenderer.invoke('repos:jsonVizList', dir),
+    jsonVizRead: (opts) => ipcRenderer.invoke('repos:jsonVizRead', opts),
+    jsonVizWrite: (opts) => ipcRenderer.invoke('repos:jsonVizWrite', opts),
+    jsonVizSaveVersion: (opts) => ipcRenderer.invoke('repos:jsonVizSaveVersion', opts),
+    jsonVizVersions: (opts) => ipcRenderer.invoke('repos:jsonVizVersions', opts),
+    jsonVizLoadVersion: (opts) => ipcRenderer.invoke('repos:jsonVizLoadVersion', opts),
+    jsonVizRenameVersion: (opts) => ipcRenderer.invoke('repos:jsonVizRenameVersion', opts),
+    jsonVizDeleteVersion: (opts) => ipcRenderer.invoke('repos:jsonVizDeleteVersion', opts),
+    jsonVizBlockTypes: (opts) => ipcRenderer.invoke('repos:jsonVizBlockTypes', opts),
+    jsonVizAddRecent: (entry) => ipcRenderer.invoke('repos:jsonVizAddRecent', entry),
+    jsonVizListRecent: () => ipcRenderer.invoke('repos:jsonVizListRecent'),
+    jsonVizRemoveRecent: (opts) => ipcRenderer.invoke('repos:jsonVizRemoveRecent', opts),
+    jsonVizClearRecent: () => ipcRenderer.invoke('repos:jsonVizClearRecent'),
+    jsonVizWatch: (path) => ipcRenderer.invoke('repos:jsonVizWatch', path),
+    jsonVizUnwatch: (path) => ipcRenderer.invoke('repos:jsonVizUnwatch', path),
+    onJsonFileChanged: (cb) => {
+      const listener = (_e, p) => cb(p)
+      ipcRenderer.on('repos:jsonFileChanged', listener)
+      return () => ipcRenderer.removeListener('repos:jsonFileChanged', listener)
+    },
     // 仓库文件（配置/templates）变动后，主进程推送的最新仓库数据
     // 返回真正的注销函数（ipcRenderer.on 返回的是 ipcRenderer 对象本身，非函数；
     // 渲染层清理时直接调用返回值会抛 "off is not a function"，故包成 removeListener）

@@ -65,6 +65,7 @@ import React, {
 
 import TapdItemDrawer from "../components/TapdItemDrawer.jsx";
 import WorkItemSelect from "../components/WorkItemSelect.jsx";
+import JsonVizPage from "./JsonVizModal.jsx";
 
 const { Title, Text, Link: ALink } = Typography;
 const { TextArea } = Input;
@@ -5577,6 +5578,18 @@ function RepoCard({
                   <span className='tile-label'>后台工具</span>
                 </div>
               </Tooltip>
+              <Tooltip title='可视化 templates 下的 JSON 文件：解析每个 key 的含义、监听本地变化、保存版本并回切'>
+                <div
+                  className='action-tile'
+                  onClick={() => onAction("jsonViz", repo)}
+                >
+                  <CodeOutlined
+                    className='tile-icon'
+                    style={{ color: "#13c2c2" }}
+                  />
+                  <span className='tile-label'>JSON可视化</span>
+                </div>
+              </Tooltip>
             </div>
           </div>
 
@@ -5735,6 +5748,9 @@ const EDIT_ORDER = [
   "previewKey",
   "port",
 ];
+// 需要单独渲染的字段（不在 editableKeys 自动生成里）：previewPath（老项目无此 key）、
+// jsonFileName（JSON 可视化默认打开的文件，新增字段）
+const EXTRA_EDIT_FIELDS = ["previewPath", "jsonFileName"];
 // 排除：以 _ 开头的只读字段（如 _branch）、id（主键）、派生/注入字段
 const EDIT_SKIP = new Set([
   "id",
@@ -5753,10 +5769,13 @@ function EditProjectModal({ open, project, onClose, onDone }) {
   const [loading, setLoading] = useState(false);
 
   const editableKeys = (Object.keys(project || {}) || [])
-    // previewPath 单独固定渲染（下方专属 Form.Item）：老项目记录里没有这个 key，
-    // 走自动生成会漏掉字段，导致已存项目无法补填网页路径
+    // previewPath / jsonFileName 单独固定渲染（下方专属 Form.Item）：
+    // 老项目记录里没有这些 key，走自动生成会漏掉字段
     .filter(
-      (k) => !k.startsWith("_") && !EDIT_SKIP.has(k) && k !== "previewPath",
+      (k) =>
+        !k.startsWith("_") &&
+        !EDIT_SKIP.has(k) &&
+        !EXTRA_EDIT_FIELDS.includes(k),
     )
     .sort((a, b) => {
       const ia = EDIT_ORDER.indexOf(a);
@@ -5779,6 +5798,7 @@ function EditProjectModal({ open, project, onClose, onDone }) {
         ? { title: "", url: String(project._tapd) }
         : null;
       vals.previewPath = project.previewPath ?? "";
+      vals.jsonFileName = project.jsonFileName ?? "";
       form.setFieldsValue(vals);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5847,6 +5867,18 @@ function EditProjectModal({ open, project, onClose, onDone }) {
           }
         >
           <Input placeholder='/pages/xxx' />
+        </Form.Item>
+        <Form.Item
+          name='jsonFileName'
+          label='JSON 可视化默认文件（选填）'
+          extra={
+            <Text type='secondary' style={{ fontSize: 12 }}>
+              点击「JSON可视化」时直接打开此文件（相对主题根，如
+              templates/product.json）；不填则弹出文件列表选择
+            </Text>
+          }
+        >
+          <Input placeholder='templates/product.json' />
         </Form.Item>
         <Form.Item name='_tapd' label='工单（选填）'>
           <WorkItemSelect
@@ -6441,6 +6473,7 @@ export default function Repos({ registerMenu }) {
   const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false);
   const [gitModal, setGitModal] = useState(null); // { mode:'branch', repo }
   const [editProject, setEditProject] = useState(null); // 编辑本地项目
+  const [jsonVizRepo, setJsonVizRepo] = useState(null); // JSON 可视化目标 repo
 
   // 刷新「创建项目」可选模板（带 _github 且未在工作区存在的）
   const refreshCloneable = useCallback(
@@ -6616,6 +6649,7 @@ export default function Repos({ registerMenu }) {
     else if (type === "gotest") setGotestFor(payload);
     else if (type === "mergeInfo") setMergeInfoFor(payload);
     else if (type === "adminOpen") setAdminOpenFor(payload);
+    else if (type === "jsonViz") setJsonVizRepo(payload);
   };
 
   // 项目卡片动作分发
@@ -7140,6 +7174,14 @@ export default function Repos({ registerMenu }) {
           if (rp) refreshRepo(rp);
           else refreshProjects();
         }}
+      />
+
+      {/* JSON 可视化：整页视图（不是弹窗），支持左右对照与版本管理 */}
+      <JsonVizPage
+        open={!!jsonVizRepo}
+        repo={jsonVizRepo}
+        defaultFileName={jsonVizRepo?.matched?.jsonFileName || ""}
+        onClose={() => setJsonVizRepo(null)}
       />
 
       {/* 关于：版本信息 */}
