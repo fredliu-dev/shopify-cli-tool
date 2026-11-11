@@ -1,5 +1,6 @@
 import { basename, join } from 'node:path'
 import { existsSync, readdirSync, statSync } from 'node:fs'
+import https from 'node:https'
 
 /**
  * Git 仓库扫描的纯逻辑（headless）：供 CLI 与 Electron 桌面应用共用。
@@ -396,11 +397,103 @@ async function resolveFetch() {
  * 无 VPN 直连常是挂起而非快速失败，不能干等太久。
  * 校验响应 content-type 必须为 JSON：本机直连被 DNS 污染时 api.github.com 会被
  * 劫持成 301 → github.com 的 HTML 页，若不校验会把 HTML 当成功、JSON 解析再报怪错。
+ * DNS 污染兜底：检测到污染响应（301 → github.com / 无 content-type）时，改用 GitHub
+ * 官方公开网段的已知 IP 直连（SNI/Host 不变，仅替换连接目标），探活成功的 IP 进程内缓存。
  * 只要拿到合法 JSON 响应（含 404/401/403 等业务状态）就返回，由调用方按状态码分层报错。
  * @param {string} path API 路径（含 query），如 /repos/{owner}/{repo}/collaborators?per_page=100
  * @param {{ method?: string, headers?: object, body?: string }} [opts] 透传给 fetch 的选项
  * @returns {Promise<Response>}
  */
+
+/* DNS 污染兜底用的 GitHub API 已知 IP（api.github.com 官方网段，轮询全部缀）。
+ * 连接时只替换 TCP 目标，TLS SNI 与 Host 头仍是 api.github.com，证书校验照常通过。 */
+const GITHUB_API_IPS = [
+    '140.82.112.5', '140.82.112.6', '140.82.113.5', '140.82.113.6',
+    '140.82.114.5', '140.82.114.6', '140.82.116.5', '140.82.116.6',
+    '140.82.121.5', '140.82.121.6',
+]
+/** 探活成功的干净 IP 缓存（进程内）；null=尚未探测。污染是间歇性的，缓存命中时零探测开销。 */
+let _cleanIp = null
+
+/**
+ * 判断一次响应是否为 DNS 污染特征：301 且 location 指向 github.com（劫持机把
+ * api.github.com 整体 301 到主站），正常 GitHub API 从不这样跳转。
+ */
+function isPollutedResponse(res) {
+    if (res.status !== 301) return false
+    const loc = String(res.headers.get('location') || '')
+    return /^https:\/\/github\.com\//i.test(loc)
+}
+
+/**
+ * 用 https.request 直连指定 IP 请求 GitHub API（TLS SNI/Host 仍为 api.github.com）。
+ * 供 DNS 污染兜底：系统解析被劫持时绕过 DNS、直接打官方网段 IP。
+ * @returns {Promise<{ status: number, headers: Headers, text: string }>}
+ */
+function githubApiFetchViaIp(ip, path, opts = {}) {
+    return new Promise((resolve, reject) => {
+        const req = https.request(
+            {
+                hostname: 'api.github.com', // SNI 与 Host 均为真域名，证书校验不受影响
+                servername: 'api.github.com',
+                path,
+                method: opts.method || 'GET',
+                headers: {
+                    // GitHub API 要求带 User-Agent，缺失会被 403（Forbidden）
+                    'User-Agent': 'shopify-cli-tool',
+                    Host: 'api.github.com',
+                    ...(opts.headers || {}),
+                },
+                // 固定连这个 IP，绕过系统 DNS；all:true 时需返回 [{address,family}] 数组
+                lookup: (host, o, cb) =>
+                    o.all ? cb(null, [{ address: ip, family: 4 }]) : cb(null, ip, 4),
+                timeout: 10_000,
+            },
+            (res) => {
+                const chunks = []
+                res.on('data', (d) => chunks.push(d))
+                res.on('end', () => {
+                    // 组装成 fetch Response，调用方无感知（headers 用原始小写键）
+                    const headers = new Headers()
+                    for (const [k, v] of Object.entries(res.headers)) headers.set(k, Array.isArray(v) ? v.join(', ') : String(v))
+                    resolve({ status: res.statusCode || 0, headers, text: Buffer.concat(chunks).toString('utf8') })
+                })
+            },
+        )
+        req.on('timeout', () => req.destroy(new Error('timeout')))
+        req.on('error', reject)
+        if (opts.body) req.write(opts.body)
+        req.end()
+    })
+}
+
+/**
+ * DNS 污染兜底：轮询已知 IP 找到第一个能正常返回 JSON 的（探活即业务请求本身，
+ * 探活失败换下一个）。成功后缓存该 IP，后续请求直接走它不再试系统解析。
+ * @returns {Promise<{ status, headers, text }>}
+ */
+async function githubApiFetchPinned(path, opts = {}) {
+    const order = _cleanIp ? [_cleanIp, ...GITHUB_API_IPS.filter((i) => i !== _cleanIp)] : GITHUB_API_IPS
+    let lastErr
+    let lastResp = null
+    for (const ip of order) {
+        try {
+            const r = await githubApiFetchViaIp(ip, path, opts)
+            const ct = String(r.headers.get('content-type') || '')
+            if (r.status < 500 && ct.includes('application/json')) {
+                _cleanIp = ip
+                return r
+            }
+            lastErr = new Error(`HTTP ${r.status} via ${ip}`)
+            lastResp = r // 记下最后一个像 GitHub 真实响应的（业务 4xx 也算），兜底全失败时还能返回它
+        } catch (err) {
+            lastErr = err
+        }
+    }
+    if (lastResp) return lastResp
+    throw lastErr || new Error('all pinned IPs failed')
+}
+
 async function githubApiFetch(path, opts = {}) {
     const url = `https://api.github.com${path}`
     const doFetch = await resolveFetch()
@@ -413,8 +506,26 @@ async function githubApiFetch(path, opts = {}) {
             return res
         } catch (err) {
             lastErr = err
-            if (attempt < 1) await new Promise((r) => setTimeout(r, 1500))
+            // 第一次失败不空等：先探测是否 DNS 污染（301→github.com），是则立即走 IP 兜底；
+            // 不是污染（真超时/断网）才退避 1.5s 重试系统解析
+            if (attempt < 1) {
+                try {
+                    const probe = await doFetch('https://api.github.com/zen', { signal: AbortSignal.timeout(8_000) })
+                    if (isPollutedResponse(probe)) break
+                } catch {
+                    /* 探测失败按普通失败处理 */
+                }
+                await new Promise((r) => setTimeout(r, 1500))
+            }
         }
+    }
+    // DNS 污染兜底：绕过系统解析直连官方网段（探活成功的 IP 会缓存）
+    try {
+        const pinned = await githubApiFetchPinned(path, opts)
+        // 包装成 fetch Response，调用方（res.ok / res.json()）行为不变
+        return new Response(pinned.text, { status: pinned.status, headers: pinned.headers })
+    } catch (pinnedErr) {
+        console.error('[github] pinned-IP fallback failed:', pinnedErr?.message || pinnedErr)
     }
     throw new Error(
         `无法连接 GitHub API（${lastErr?.message || lastErr}）。拉取成员/创建 PR 需能连通 api.github.com，请开启 VPN（Clash Verge 需开启「系统代理」或 TUN 模式）后重试`,

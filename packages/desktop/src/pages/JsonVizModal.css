@@ -764,6 +764,70 @@
 .jv-readonly-value.ant-input {
   cursor: default;
 }
+/* CSS 值编辑框（CodeMirror）：外层容器统一绘制边框/背景，编辑器透明融入 */
+.jv-css-box {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--jv-border);
+  border-radius: 6px;
+  background: var(--jv-card-bg);
+  overflow: hidden;
+}
+.jv-css-box .cm-theme,
+.jv-css-box .cm-editor {
+  background: transparent;
+}
+.jv-css-box .cm-editor.cm-focused {
+  outline: none;
+}
+/* 只读侧的高亮块（左侧原始内容，pre 浅层高亮） */
+pre.jv-css-src.jv-css-static {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 32px 4px 11px;
+  border: 1px solid var(--jv-border);
+  border-radius: 6px;
+  background: var(--jv-card-bg);
+  color: var(--jv-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  cursor: default;
+  min-height: 24px;
+}
+/* 高亮配色（只读侧）：花括号醒目、liquid 变量、注释弱化 */
+.jv-hl-brace {
+  color: #d46b08;
+  font-weight: 700;
+}
+.jv-hl-liq {
+  color: #722ed1;
+  background: rgba(114, 46, 209, 0.1);
+  border-radius: 2px;
+}
+.jv-hl-comment {
+  color: var(--jv-muted);
+  font-style: italic;
+}
+.jv-css-box .ant-btn.jv-css-fmt {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  z-index: 2;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 12px;
+  opacity: 0.6;
+  background: var(--jv-card-bg);
+}
+.jv-css-box .ant-btn.jv-css-fmt:hover {
+  opacity: 1;
+}
 /* 可拖拽的卡片头部 */
 .jv-card-head[draggable="true"],
 .jv-block-head[draggable="true"] {

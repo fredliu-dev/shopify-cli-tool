@@ -32,6 +32,11 @@ import {
   UploadOutlined,
 } from "@ant-design/icons";
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import beautify from "js-beautify";
+import CodeMirror from "@uiw/react-codemirror";
+import { css } from "@codemirror/lang-css";
+import { EditorView } from "@codemirror/view";
+import { oneDark } from "@codemirror/theme-one-dark";
 import "./JsonVizModal.css";
 
 const { Text } = Typography;
@@ -90,6 +95,161 @@ function changedUnder(changed, path) {
     if (path && p.startsWith(path + ".")) return true;
   }
   return false;
+}
+
+/**
+ * 判断字符串是否像 CSS，覆盖三种形态：
+ *   1. 选择器块：.a { color: red }（含嵌套 / @media）
+ *   2. 纯声明列表：color: red; font-size: 14px;（无选择器，theme 设置里常见）
+ *   3. 任意形态内嵌 liquid 片段（{{ }} / {% %}），检测前先抹掉避免干扰
+ * JSON 串、URL、时间等非 CSS 文本不误判。
+ */
+function looksLikeCss(text) {
+  if (typeof text !== "string") return false;
+  const t = text.trim();
+  if (t.length < 8 || !t.includes(":")) return false;
+  // 以 { 或 [ 开头且能整体解析为 JSON 的（配置串等）不算 CSS
+  if (/^[[{]/.test(t)) {
+    try {
+      JSON.parse(t);
+      return false;
+    } catch { /* 解析失败继续按 CSS 特征判断 */ }
+  }
+  // liquid 片段抹成占位词，避免 {{ }} 的花括号/冒号干扰判断
+  const plain = t.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g, "LIQ");
+  // 形态一：存在选择器块，且块内/块外有「属性: 值;」写法
+  if (plain.includes("{") && plain.includes("}")) {
+    if (/(^|[;{\s(])[-a-zA-Z]+\s*:\s*[^;{}]*\s*[;}]/.test(plain)) return true;
+  }
+  // 形态二：无选择器的声明列表 —— 至少 2 条「属性: 值;」（属性须字母开头，排除 10:30 / https: 这类；
+  // lookbehind 不消费边界符，相邻声明 color:red;font-size:14px 才能各命中一条）
+  const decls = plain.match(/(?:^|(?<=[;\n{]))\s*(-?[a-zA-Z][a-zA-Z-]*)\s*:\s*[^;{}\n]+;/g) || [];
+  return decls.length >= 2;
+}
+
+/** 用 js-beautify 美化 CSS，失败时原样返回。liquid 片段（{{ }} / {% %}）先遮蔽再还原，避免被打散。 */
+function formatCssText(text) {
+  const src = String(text ?? "");
+  const slots = [];
+  const masked = src.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g, (m) => {
+    slots.push(m);
+    return `__LIQ${slots.length - 1}__`;
+  });
+  try {
+    return beautify
+      .css(masked, {
+        indent_size: 2,
+        wrap_line_length: 0,
+        end_with_newline: false,
+        preserve_newlines: true,
+      })
+      .replace(/__LIQ(\d+)__/g, (_, i) => slots[Number(i)] ?? "");
+  } catch {
+    return src;
+  }
+}
+
+/** CSS 文本浅层高亮：liquid 片段 / 注释 / 花括号着色，其余原色。返回 React 节点数组。 */
+function highlightCssSpans(text) {
+  const nodes = [];
+  let key = 0;
+  const push = (s, cls) => {
+    if (!s) return;
+    nodes.push(
+      cls ? (
+        <span key={key++} className={cls}>
+          {s}
+        </span>
+      ) : (
+        s
+      ),
+    );
+  };
+  const re = /(\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\})|(\/\*[\s\S]*?\*\/)|([{}])/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text))) {
+    push(text.slice(last, m.index));
+    if (m[1]) push(m[1], "jv-hl-liq");
+    else if (m[2]) push(m[2], "jv-hl-comment");
+    else push(m[3], "jv-hl-brace");
+    last = m.index + m[0].length;
+  }
+  push(text.slice(last));
+  return nodes;
+}
+
+/** 估算背景色亮度（WCAG 相对亮度），判断当前 antd 主题是否为暗色。 */
+function isDarkBg(color) {
+  const m = /#([0-9a-f]{3,8})\s*$/i.exec(String(color || ""));
+  if (!m) return false;
+  let h = m[1];
+  if (h.length === 3 || h.length === 4) h = [...h.slice(0, 3)].map((c) => c + c).join("");
+  const lin = (v) => {
+    const c = parseInt(v, 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * lin(h.slice(0, 2)) + 0.7152 * lin(h.slice(2, 4)) + 0.0722 * lin(h.slice(4, 6)) < 0.5;
+}
+
+/** CSS 值编辑器：CodeMirror（CSS 语法高亮 + 属性/值自动补全提示），可一键重新格式化。 */
+function CssEditor({ path, value, onChange }) {
+  const { token } = theme.useToken();
+  const dark = useMemo(() => isDarkBg(token.colorBgBase), [token.colorBgBase]);
+  // 字体/背景贴合弹层：透明背景 + 等宽小字，无行号
+  const matTheme = useMemo(
+    () =>
+      EditorView.theme({
+        "&": { backgroundColor: "transparent", fontSize: "12px" },
+        ".cm-scroller": {
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+        },
+        "&.cm-focused": { outline: "none" },
+      }),
+    [],
+  );
+  const extensions = useMemo(() => [css(), EditorView.lineWrapping, matTheme], [matTheme]);
+  const [text, setText] = useState(() => formatCssText(value));
+  const last = useRef(value);
+  // 外部值变化（撤销/换版本/替换数据）时重新格式化同步
+  useEffect(() => {
+    if (value !== last.current) {
+      last.current = value;
+      setText(formatCssText(value));
+    }
+  }, [value]);
+  const commit = (next) => {
+    last.current = next;
+    setText(next);
+    onChange(path, next);
+  };
+  return (
+    <div className="jv-css-box">
+      <CodeMirror
+        value={text}
+        onChange={commit}
+        theme={dark ? oneDark : "light"}
+        extensions={extensions}
+        minHeight="56px"
+        maxHeight="320px"
+        basicSetup={{
+          lineNumbers: false,
+          foldGutter: false,
+          highlightActiveLine: false,
+          autocompletion: true, // 输入时提示 CSS 属性 / 值
+        }}
+      />
+      <Button
+        size="small"
+        type="text"
+        className="jv-css-fmt"
+        icon={<FileTextOutlined />}
+        onClick={() => commit(formatCssText(text))}
+      >
+        格式化
+      </Button>
+    </div>
+  );
 }
 
 /** 在嵌套对象/数组的 path 处设置新值，返回新对象（不可变更新）。 */
@@ -213,6 +373,12 @@ function ArrayEditor({ path, value, onChange }) {
             <span className="jv-chip" style={{ flex: 1 }}>
               {JSON.stringify(item)}
             </span>
+          ) : looksLikeCss(item) ? (
+            <CssEditor
+              path={i}
+              value={item}
+              onChange={(i2, v) => setItem(i2, v)}
+            />
           ) : (
             <Input
               size="small"
@@ -268,12 +434,28 @@ function StaticValue({ value }) {
               <HolderOutlined />
             </span>
             <span className="jv-index">{i + 1}</span>
-            <Input
-              size="small"
-              readOnly
-              className="jv-readonly-value"
-              value={typeof v === "object" ? JSON.stringify(v) : String(v)}
-            />
+            {typeof v === "object" || looksLikeCss(v) ? (
+              typeof v === "object" ? (
+                <Input
+                  size="small"
+                  readOnly
+                  className="jv-readonly-value"
+                  value={JSON.stringify(v)}
+                />
+              ) : (
+                <pre className="jv-css-src jv-css-static">
+                  {highlightCssSpans(formatCssText(v))}
+                  {"\n"}
+                </pre>
+              )
+            ) : (
+              <Input
+                size="small"
+                readOnly
+                className="jv-readonly-value"
+                value={String(v)}
+              />
+            )}
             <span className="jv-op-space" />
           </div>
         ))}
@@ -302,6 +484,14 @@ function StaticValue({ value }) {
         className="jv-readonly-value"
         value={JSON.stringify(value)}
       />
+    );
+  }
+  if (typeof value === "string" && looksLikeCss(value)) {
+    return (
+      <pre className="jv-css-src jv-css-static">
+        {highlightCssSpans(formatCssText(value))}
+        {"\n"}
+      </pre>
     );
   }
   return (
@@ -349,6 +539,9 @@ function ValueControl({ path, value, onChange }) {
   }
   if (Array.isArray(value)) {
     return <ArrayEditor path={path} value={value} onChange={onChange} />;
+  }
+  if (looksLikeCss(value)) {
+    return <CssEditor path={path} value={value} onChange={onChange} />;
   }
   return (
     <Input
