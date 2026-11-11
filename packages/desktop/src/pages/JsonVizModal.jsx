@@ -2145,10 +2145,10 @@ export default function JsonVizPage({ open, repo, defaultFileName, onClose }) {
                 const name = parts[parts.length - 1];
                 return (
                   <div key={f.rel} className="jv-file" onClick={() => openFile(f)}>
-                    {f.rel.startsWith("templates/") ? (
-                      <FileTextOutlined className="jv-file-icon" />
-                    ) : (
+                    {f.rel === "config/settings_data.json" ? (
                       <FolderOpenOutlined className="jv-file-icon" />
+                    ) : (
+                      <FileTextOutlined className="jv-file-icon" />
                     )}
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div className="jv-file-name" title={name}>

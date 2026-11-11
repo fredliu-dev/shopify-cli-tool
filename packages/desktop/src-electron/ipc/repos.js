@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron'
-import { watch, existsSync, statSync } from 'node:fs'
+import { watch, existsSync, statSync, readdirSync } from 'node:fs'
 import { join, relative, resolve, isAbsolute } from 'node:path'
 import { listEditors, openInEditor } from '../editor.js'
 
@@ -44,7 +44,29 @@ async function refreshAndSend(repoPath, core) {
   }
 }
 
-/** 为单个仓库建立监听：根目录（catch 配置增删改）+ templates 目录（catch 模板改动）。 */
+/** 目录内（递归）是否存在 .json 文件，用于决定是否值得建监听。 */
+function dirHasJson(dir) {
+  let names
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return false
+  }
+  for (const name of names) {
+    if (name === 'node_modules' || name === '.git' || name === 'dist' || name === 'build' || name === 'release' || name.startsWith('.')) continue
+    const full = join(dir, name)
+    let st
+    try {
+      st = statSync(full)
+    } catch {
+      continue
+    }
+    if (st.isDirectory() ? dirHasJson(full) : /\.json$/i.test(name)) return true
+  }
+  return false
+}
+
+/** 为单个仓库建立监听：根目录 + 所有一级子目录中含 .json 的（templates/config/locales/sections 等），改动后刷新状态。 */
 function watchRepo(repoPath, core) {
   // 先清掉旧监听
   watchers.get(repoPath)?.forEach((w) => {
@@ -68,13 +90,19 @@ function watchRepo(repoPath, core) {
   try {
     ws.push(watch(repoPath, trigger)) // 根目录（非递归）：shopify.theme.toml 增删改
   } catch {}
-  for (const tname of ['templates', 'template']) {
-    const tdir = join(repoPath, tname)
-    if (existsSync(tdir) && statSync(tdir).isDirectory()) {
-      try {
-        ws.push(watch(tdir, { recursive: true }, trigger))
-      } catch {}
-    }
+  // 一级子目录逐个递归监听（含 .json 才监听，避开 node_modules 等大目录）
+  let subNames = []
+  try {
+    subNames = readdirSync(repoPath)
+  } catch {}
+  for (const name of subNames) {
+    if (name === 'node_modules' || name === '.git' || name === 'dist' || name === 'build' || name === 'release' || name.startsWith('.')) continue
+    const sub = join(repoPath, name)
+    if (!existsSync(sub) || !statSync(sub).isDirectory()) continue
+    if (!dirHasJson(sub)) continue
+    try {
+      ws.push(watch(sub, { recursive: true }, trigger))
+    } catch {}
   }
   if (ws.length) watchers.set(repoPath, ws)
 }
@@ -616,7 +644,7 @@ export function registerReposIpc() {
 
   /* -------- JSON 可视化 -------- */
 
-  // 列出主题里可可视化的 JSON 文件（templates/** + config/settings_data.json）
+  // 列出仓库里可可视化的 JSON 文件（全仓库 .json，templates 优先）
   ipcMain.handle('repos:jsonVizList', async (_evt, dir) => {
     const { listThemeJsonFiles } = await load()
     try {

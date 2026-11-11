@@ -1,6 +1,6 @@
 /**
- * JSON 可视化（主题 templates/*.json + config/settings_data.json）：
- *   - 列出主题内可可视化的 JSON 文件
+ * JSON 可视化（全仓库 .json：templates/**、config、locales、sections 等）：
+ *   - 列出仓库内可可视化的 JSON 文件
  *   - 读写 + 解析（兼容带 BOM / 宽松 JSON）
  *   - 为 JSON 里的每个 key 解析「代表什么」（section schema 的 name/label，或 settings_schema 的 label）
  *   - 版本快照：每次保存写入一份带时间戳的历史版本，支持回切
@@ -98,7 +98,9 @@ function parseLooseJson(code) {
   }
 }
 
-/** 递归列出目录下所有 .json 文件（相对路径用 posix 分隔符）。 */
+const JSON_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'release'])
+
+/** 递归列出目录下所有 .json 文件（相对路径用 posix 分隔符）。跳过 node_modules / .git / 构建产物 / 隐藏目录。 */
 function walkJson(dir, base = dir) {
   const out = []
   let names
@@ -108,6 +110,7 @@ function walkJson(dir, base = dir) {
     return out
   }
   for (const name of names) {
+    if (JSON_SKIP_DIRS.has(name) || name.startsWith('.')) continue
     const full = join(dir, name)
     let st
     try {
@@ -125,24 +128,16 @@ function walkJson(dir, base = dir) {
 }
 
 /**
- * 列出主题里可可视化的 JSON 文件：templates/** 下所有 .json，
- * 外加 config/settings_data.json（全局配置数据）。
+ * 列出仓库里可可视化的 JSON 文件：全仓库递归扫描（不限 templates），
+ * 排序上 templates/** 最前、config/settings_data.json 次之，其余按路径排序。
  * @param {string} repoDir 主题根目录
  * @returns {{ path: string, rel: string }[]} path 绝对路径，rel 相对主题根的路径
  */
 export function listThemeJsonFiles(repoDir) {
-  const out = []
-  const templates = join(repoDir, 'templates')
-  if (existsSync(templates)) {
-    for (const rel of walkJson(templates, repoDir)) {
-      out.push({ rel, path: join(repoDir, rel) })
-    }
-  }
-  const settingsData = join(repoDir, 'config', 'settings_data.json')
-  if (existsSync(settingsData)) {
-    out.push({ rel: 'config/settings_data.json', path: settingsData })
-  }
-  return out
+  const prio = (rel) => (rel.startsWith('templates/') ? 0 : rel === 'config/settings_data.json' ? 1 : 2)
+  return walkJson(repoDir, repoDir)
+    .sort((a, b) => prio(a) - prio(b) || a.localeCompare(b))
+    .map((rel) => ({ rel, path: join(repoDir, rel) }))
 }
 
 /** 读取并解析 JSON 文件。 */
